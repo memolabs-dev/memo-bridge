@@ -6,6 +6,9 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PROJECTS_ROOT = process.env.MEMO_BRIDGE_PROJECTS_ROOT || join(homedir(), 'projects');
+// Repositories move into the Memo Labs layout (~/memolabs/<area>/<name>) and keep a
+// ~/projects/<name> symlink. Their real path may therefore live under this second root.
+const DEFAULT_LAYOUT_ROOT = process.env.MEMO_BRIDGE_LAYOUT_ROOT || join(homedir(), 'memolabs');
 const MAX_REGISTRY_BYTES = 1024 * 1024;
 const MAX_PROJECTS = 500;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
@@ -50,6 +53,9 @@ export async function readProjectRegistry(options = {}) {
   const info = await stat(registryFile);
   if (info.size > MAX_REGISTRY_BYTES) throw new Error('registry_too_large');
   const root = await realpath(projectsRoot);
+  // Real paths are accepted under the projects root or the layout root, never elsewhere.
+  const layoutRoot = await realpath(options.layoutRoot ?? DEFAULT_LAYOUT_ROOT).catch(() => null);
+  const allowed = resolved => contained(root, resolved) || (layoutRoot !== null && contained(layoutRoot, resolved));
   const records = parseMainTable(await readFile(registryFile, 'utf8'));
   const projects = await Promise.all(records.map(async record => {
     const candidate = resolve(root, record.pathRelative);
@@ -58,7 +64,7 @@ export async function readProjectRegistry(options = {}) {
     if (contained(root, candidate)) {
       try {
         const resolved = await realpath(candidate);
-        if (contained(root, resolved)) {
+        if (allowed(resolved)) {
           const dir = await stat(resolved);
           if (dir.isDirectory()) {
             safePath = resolved;
@@ -158,6 +164,12 @@ export async function auditProjectRegistry(options = {}) {
       if (entry.name.startsWith('.') || entry.name === 'workspace') continue;
       const candidate = join(directory, entry.name);
       if (entry.isDirectory()) {
+        // A real repository moved into the layout is reported like an alias, and not descended.
+        try {
+          await stat(join(candidate, '.git'));
+          record(entry.name, 'memolabs_layout');
+          continue;
+        } catch { /* not a repository: keep walking */ }
         await walk(candidate, depth + 1);
       } else if (entry.isSymbolicLink()) {
         try {
