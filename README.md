@@ -11,6 +11,12 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 - `project_info`: inspect a registered project and its verified local location
 - `project_git_status`: read live Git branch, change count and worktree count
 - `projects_audit`: report unregistered repository candidates without granting access
+- Observers, read-only and never a new probe (`observe_*`). Each returns its source, its age and a stale flag:
+  - `observe_guardian`: the latest infrastructure-guardian audit;
+  - `observe_agents`: VPS agent workflows from agents-observe;
+  - `observe_live_state`: operational sections of LIVE-STATE only;
+  - `observe_focus`: the active Stasis bet.
+  `host_status` remains for reachability.
 - Coordinator (`docs/COORDINATOR.md`):
   - workspaces: `workspace_open`, `workspace_status`, `workspace_list`, `workspace_close`
   - issues: `issue_status`, `issue_claim`, `issue_heartbeat`, `issue_release`, `issue_checkpoint`
