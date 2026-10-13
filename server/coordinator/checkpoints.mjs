@@ -9,7 +9,7 @@ const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 export function validBranch(branch) {
   return typeof branch === 'string' && BRANCH_RE.test(branch) && !branch.includes('..') && !branch.includes('//') &&
     !branch.endsWith('/') && !branch.endsWith('.') && !branch.endsWith('.lock') && !branch.includes('/.') &&
-    !branch.includes('@{');
+    !branch.includes('@{') && branch !== 'HEAD' && !branch.startsWith('refs/');
 }
 
 function git(path, args) {

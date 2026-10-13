@@ -27,7 +27,9 @@ export function registerCoordinatorTools(server, getCoordinator) {
   const call = method => async args => {
     let coordinator;
     try { coordinator = await getCoordinator(); } catch (error) {
-      return result({ ok: false, error: 'store_unavailable', detail: String(error?.message ?? 'unknown').slice(0, 80) });
+      // Only our own short codes reach the model; filesystem paths and engine messages do not.
+      const code = String(error?.message ?? '');
+      return result({ ok: false, error: 'store_unavailable', ...(/^state_[a-z_]{1,40}$/.test(code) ? { detail: code } : {}) });
     }
     return result(await coordinator[method](args ?? {}));
   };

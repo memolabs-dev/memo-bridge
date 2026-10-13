@@ -45,6 +45,7 @@ The principal comes from the entry point, never from tool arguments:
 | Hub (future, PR #5/#6) | derived from the verified OIDC `sub` and scopes | mapped per scope |
 
 - Reads (`*_status`, `*_list`, `coordinator_events`) need `coordinator:read`. Writes need `coordinator:write`.
+- Authorization is checked before any argument validation, so every refusal is journaled.
 - A workspace can only be read or used by its principal.
 - Tasks are shared coordination data: any reader sees them and their lease holder.
 - `coordinator_events` returns the caller's own events unless the caller holds `coordinator:audit`.
@@ -96,7 +97,11 @@ Contract:
 The contract tests in `tests/coordinator-store-contract.test.mjs` are parameterized by engine.
 
 Current engine: SQLite through the Node built-in `node:sqlite`. No dependency is added.
-- WAL journal, `busy_timeout` 5 s, `BEGIN IMMEDIATE` for every transaction.
+- WAL journal and `busy_timeout` 5 s.
+- Writes use `BEGIN IMMEDIATE`, so check-then-write is atomic across processes. Reads use a deferred `BEGIN` and are never blocked by a writer.
+- The switch to WAL on a brand-new file is retried with a short backoff, so many sessions can open a fresh store at once.
+- Rollback state is tracked by the store itself and does not rely on `database.isTransaction`.
+- Requires Node 22.16 or later. CI runs Node 22 and 24.
 - Schema version is held in `PRAGMA user_version` (currently 1). A newer schema refuses to open with older code.
 - Several local stdio processes, one per client session, share the file safely through SQLite locking.
   The multi-process tests cover this.
@@ -108,8 +113,10 @@ Location (override with `MEMO_BRIDGE_STATE_DIR`):
 | macOS | `~/Library/Application Support/memo-bridge/coordinator.sqlite` |
 | Linux | `$XDG_STATE_HOME/memo-bridge/` or `~/.local/state/memo-bridge/` |
 
-- Directory 0700, file 0600.
-- Opening fails inside iCloud (`Mobile Documents`) or inside a Git working tree.
+- The path must be absolute. Directory 0700, file 0600.
+- An existing directory that others can read is refused rather than re-moded.
+- Opening fails inside iCloud (`Mobile Documents`), `~/Library/CloudStorage`, or any Git repository, bare repositories included. Path checks ignore case and follow symlinks.
+- A folder synced by a third-party tool without a recognisable path cannot be detected.
 - Backup: copy the file with `sqlite3 coordinator.sqlite ".backup <dest>"` while idle. The journal holds no secrets.
 
 ## Limits of v1
@@ -119,3 +126,5 @@ Location (override with `MEMO_BRIDGE_STATE_DIR`):
 - **Not included yet:** worktree creation, job execution and runners.
 - **No event retention policy yet.** The journal grows by one small row per write or refusal.
 - **Local wall clock.** Expiry uses the clock of the machine that hosts the store.
+- **Synchronous SQLite.** `node:sqlite` is synchronous. Under heavy write contention, one call can wait up to the 5 s busy timeout and delay other tools of the same session.
+- **Text fields.** Titles and labels are single-line. Notes and summaries may span lines. Control characters and bidirectional overrides are refused everywhere, because other sessions' models read this text back.

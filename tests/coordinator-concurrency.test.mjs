@@ -23,10 +23,12 @@ function startWorker(stateDir) {
   return { child, next };
 }
 
-async function startWorkers(stateDir, count) {
-  // Create the schema once so workers race on claims, not on the first migration.
-  const { store } = coordinatorOn(stateDir);
-  await store.close();
+async function startWorkers(stateDir, count, { precreate = true } = {}) {
+  // By default create the schema once so workers race on claims, not on the first migration.
+  if (precreate) {
+    const { store } = coordinatorOn(stateDir);
+    await store.close();
+  }
   const workers = Array.from({ length: count }, () => startWorker(stateDir));
   const ready = await Promise.all(workers.map(w => w.next('ready')));
   return { workers, ready };
@@ -87,3 +89,10 @@ test('AC-02: ten processes get ten isolated workspaces that cannot use each othe
   assert.equal((await coordinator.workspaceStatus({ workspace_id: ids[0] })).active_leases.length, 1);
 });
 
+
+test('sixteen sessions opening a brand-new store at once all succeed', { timeout: 30000 }, async t => {
+  const stateDir = await tempStateDir(t);
+  const { workers, ready } = await startWorkers(stateDir, 16, { precreate: false });
+  await stopWorkers(workers);
+  assert.deepEqual(ready.map(r => r.workspace.ok), Array(16).fill(true), JSON.stringify(ready.find(r => !r.workspace.ok)));
+});

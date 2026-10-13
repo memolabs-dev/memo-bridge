@@ -32,8 +32,12 @@ export function makePrincipal(id, capabilities) {
 }
 
 // The local stdio plugin runs as the trusted OS user that launched it (see SECURITY.md).
-export function localOwnerPrincipal() {
-  const name = userInfo().username.replace(/[^A-Za-z0-9._@-]/g, '_').slice(0, 120) || 'unknown';
+export function localOwnerPrincipal(env = process.env) {
+  let raw;
+  // userInfo() throws when the uid has no passwd entry (some containers); never let that
+  // take the whole server down.
+  try { raw = userInfo().username; } catch { raw = env.USER || env.LOGNAME || 'unknown'; }
+  const name = String(raw).replace(/[^A-Za-z0-9._@-]/g, '_').slice(0, 120) || 'unknown';
   return makePrincipal(`local:${name}`, Object.values(CAPABILITIES));
 }
 

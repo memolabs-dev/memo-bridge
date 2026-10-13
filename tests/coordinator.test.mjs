@@ -119,6 +119,8 @@ test('AC-06: missing capability and foreign workspaces are refused and audited',
   t.after(() => s2.close());
   assert.deepEqual(await readOnly.taskCreate({ project: 'drop', title: 'x' }), { ok: false, error: 'forbidden' });
   assert.deepEqual(await readOnly.workspaceOpen({ project: 'drop' }), { ok: false, error: 'forbidden' });
+  // Authorization precedes validation: malformed arguments are refused and journaled too.
+  assert.deepEqual(await readOnly.taskClaim({ workspace_id: 'nope', ttl_seconds: 1 }), { ok: false, error: 'forbidden' });
   assert.equal((await readOnly.tasksList({})).ok, true);
 
   const stranger = makePrincipal('oidc:stranger', [CAPABILITIES.READ, CAPABILITIES.WRITE]);
@@ -132,7 +134,7 @@ test('AC-06: missing capability and foreign workspaces are refused and audited',
 
   const journal = (await coordinator.events({ limit: 200 })).events;
   const deniedBy = p => journal.filter(e => e.principal === p && e.outcome === 'denied' && e.code === 'forbidden');
-  assert.equal(deniedBy('oidc:reader').length, 2);
+  assert.equal(deniedBy('oidc:reader').length, 3);
   assert.equal(deniedBy('oidc:stranger').length, 3);
   assert.equal((await coordinator.taskStatus({ task_id: id })).task.status, 'claimed');
 });
@@ -156,7 +158,14 @@ test('AC-07: invalid inputs are rejected before touching state', async t => {
     [coordinator.taskCheckpoint({ workspace_id: a, task_id: id, fencing_token: 1, branch: 'main', commit: 'HEAD' }), 'invalid_input'],
     [coordinator.taskCheckpoint({ workspace_id: a, task_id: id, fencing_token: 1, branch: '-x', commit: 'a'.repeat(40) }), 'invalid_input'],
     [coordinator.taskRenew({ workspace_id: a, task_id: id, fencing_token: 0 }), 'invalid_input'],
-    [coordinator.tasksList({ limit: 500 }), 'invalid_input']
+    [coordinator.tasksList({ limit: 500 }), 'invalid_input'],
+    [coordinator.taskCreate({ project: 'drop', title: 'line\nbreak' }), 'invalid_input'],
+    [coordinator.taskCreate({ project: 'drop', title: 'ok \u202Eevil' }), 'invalid_input'],
+    [coordinator.workspaceOpen({ project: 'drop', client_label: 'tab\there' }), 'invalid_input'],
+    [coordinator.taskCreate({ project: 'drop', title: 'x', issue_ref: 'a-/b#1' }), 'invalid_input'],
+    [coordinator.taskCheckpoint({ workspace_id: a, task_id: id, fencing_token: 1, branch: 'HEAD', commit: 'a'.repeat(40) }), 'invalid_input'],
+    [coordinator.taskCheckpoint({ workspace_id: a, task_id: id, fencing_token: 1, branch: 'refs/heads/main', commit: 'a'.repeat(40) }), 'invalid_input'],
+    [coordinator.taskComplete({ workspace_id: a, task_id: id, fencing_token: 1, summary: 'x\u2066y' }), 'invalid_input']
   ];
   for (const [promise, error] of cases) assert.equal((await promise).error, error);
   const kollio = await ws('kollio');
@@ -196,6 +205,7 @@ test('AC-08: checkpoints are verified read-only against the project repository',
   git(repo, 'commit', '-q', '-am', 'two');
   const unpushed = git(repo, 'rev-parse', 'HEAD');
 
+  const refsBefore = git(repo, 'for-each-ref');
   const { coordinator, ws, task } = await setup(t, { repos: { drop: repo } });
   const a = await ws(); const id = await task();
   const { fencing_token } = await coordinator.taskClaim({ workspace_id: a, task_id: id });
@@ -208,7 +218,9 @@ test('AC-08: checkpoints are verified read-only against the project repository',
   assert.equal((await coordinator.taskCheckpoint({ ...base, commit: 'c'.repeat(40) })).error, 'commit_not_found');
   assert.equal(git(repo, 'rev-parse', 'HEAD'), unpushed);
   assert.equal(git(repo, 'status', '--porcelain'), '');
-  assert.equal((await coordinator.taskStatus({ task_id: id })).checkpoints.length, 3);
+  assert.equal(git(repo, 'for-each-ref'), refsBefore, 'checkpoints must not fetch or move any ref');
+  assert.equal((await coordinator.taskCheckpoint({ ...base, commit: pushed.toUpperCase(), note: 'multi\nline ok' })).durability, 'remote');
+  assert.equal((await coordinator.taskStatus({ task_id: id })).checkpoints.length, 4);
 });
 
 test('policy: unknown operations are never authorized; local owner holds all capabilities', () => {
@@ -223,4 +235,24 @@ test('policy: unknown operations are never authorized; local owner holds all cap
 
 test('a coordinator without store or principal refuses to start', () => {
   assert.throws(() => createCoordinator({ principal: OWNER, resolveProject: stubProjects() }));
+});
+
+test('tasks_list filters by effective status in storage, beyond any page size', async t => {
+  const { coordinator, time, ws } = await setup(t);
+  const a = await ws();
+  const old = (await coordinator.taskCreate({ project: 'drop', title: 'oldest open' })).task.task_id;
+  const claimed = (await coordinator.taskCreate({ project: 'drop', title: 'claimed' })).task.task_id;
+  for (let i = 0; i < 260; i++) {
+    time.advance(1);
+    const id = (await coordinator.taskCreate({ project: 'drop', title: `done ${i}` })).task.task_id;
+    const c = await coordinator.taskClaim({ workspace_id: a, task_id: id });
+    await coordinator.taskComplete({ workspace_id: a, task_id: id, fencing_token: c.fencing_token });
+  }
+  await coordinator.taskClaim({ workspace_id: a, task_id: claimed, ttl_seconds: 60 });
+  const open = await coordinator.tasksList({ project: 'drop', status: 'open', limit: 1 });
+  assert.deepEqual(open.tasks.map(x => x.task_id), [old]);
+  assert.deepEqual((await coordinator.tasksList({ status: 'claimed' })).tasks.map(x => x.task_id), [claimed]);
+  assert.equal((await coordinator.tasksList({ status: 'completed', limit: 200 })).count, 200);
+  time.advance(61 * 1000);
+  assert.equal((await coordinator.tasksList({ status: 'open' })).count, 2, 'an expired lease counts as open');
 });

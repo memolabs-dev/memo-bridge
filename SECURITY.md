@@ -12,7 +12,7 @@ Memo Bridge is a local proof of concept. It is not designed for exposure to the 
 ## Coordinator write exception (v0.2)
 
 The Coordinator (`docs/COORDINATOR.md`) is the only component that writes. This exception was approved by the owner on 2026-10-13.
-- **Where it writes:** only to its private SQLite store, a 0700 directory and a 0600 file. The store never sits in a repository or in iCloud.
+- **Where it writes:** only to its private SQLite store, a 0700 directory and a 0600 file. Opening refuses relative paths, Git repositories (bare repositories included), iCloud (`Mobile Documents`), `~/Library/CloudStorage`, and any existing directory readable by others. A folder that a third-party tool syncs silently, such as `~/Documents` with iCloud Desktop & Documents enabled, cannot be detected, so do not point `MEMO_BRIDGE_STATE_DIR` there.
 - **Git access:** it verifies checkpoints with fixed, read-only `git` invocations through `execFile`, with no shell, no fetch and no push. It never writes project files.
 - **Identity:** the principal is derived by the server (`local:<OS user>` over stdio) and never comes from tool arguments. Each operation requires a capability, and a workspace can only be used by its principal.
 - **Audit:** every write and every refusal is appended to an audit journal. The journal holds identifiers, operation names and result codes, never tool payloads or secrets.

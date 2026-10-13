@@ -11,7 +11,7 @@ export const CLIENT_TYPES = Object.freeze(['chatgpt', 'claude-code', 'codex', 'o
 export const HOSTS = Object.freeze(['mac', 'vps']);
 export const TASK_STATUSES = Object.freeze(['open', 'claimed', 'completed']);
 const ID_RE = { ws: /^ws_[A-Za-z0-9_-]{16}$/, task: /^task_[A-Za-z0-9_-]{16}$/ };
-const ISSUE_REF_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,8}$/;
+const ISSUE_REF_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,8}$/;
 const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_closed', 'task_closed', 'project_mismatch']);
 const MAX_LIST = 200;
 
@@ -19,11 +19,15 @@ const newId = prefix => `${prefix}_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 const fail = (error, detail) => ({ ok: false, error, ...(detail ? { detail } : {}) });
 
-function cleanText(value, max, { required = false } = {}) {
+// Text written by one session is read back by other sessions' models: no control characters,
+// no bidirectional overrides, and line breaks only where the field is meant to be multi-line.
+const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const LINE_BREAKS = /[\t\n\r]/;
+function cleanText(value, max, { required = false, multiline = false } = {}) {
   if (value === undefined || value === null || value === '') return required ? undefined : null;
   if (typeof value !== 'string') return undefined;
   const text = value.trim();
-  if ((required && !text) || text.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) return undefined;
+  if ((required && !text) || text.length > max || CONTROL.test(text) || (!multiline && LINE_BREAKS.test(text))) return undefined;
   return text || null;
 }
 function limitOf(value, fallback = 50) {
@@ -80,27 +84,30 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
     op, outcome, code: code ?? null
   });
 
-  // Runs one operation in a transaction and records its outcome. Writes are always audited;
-  // reads are audited only when refused, so the journal stays useful rather than noisy.
+  const journalDenied = (op, code, ids) =>
+    store.transaction(repo => audit(repo, op, 'denied', code, ids)).catch(() => {});
+
+  // Runs one operation in a transaction and records its outcome. Writes are always audited in
+  // the same transaction; reads run in a read transaction and are audited only when refused.
   async function execute(op, ids, body) {
-    if (!authorize(principal, op)) {
-      await store.transaction(repo => audit(repo, op, 'denied', 'forbidden', ids)).catch(() => {});
-      return fail('forbidden');
-    }
+    const write = writes.has(op);
+    let result;
     try {
-      return await store.transaction(repo => {
-        const result = body(repo, now());
-        const failed = result && result.ok === false;
-        if (writes.has(op) || (failed && DENIED.has(result.error))) {
-          const outcome = failed ? (DENIED.has(result.error) ? 'denied' : 'error') : 'ok';
-          audit(repo, op, outcome, failed ? result.error : null, ids);
+      result = await store.transaction(repo => {
+        const value = body(repo, now());
+        if (write) {
+          const failed = value && value.ok === false;
+          const outcome = failed ? (DENIED.has(value.error) ? 'denied' : 'error') : 'ok';
+          audit(repo, op, outcome, failed ? value.error : null, ids);
         }
-        return result;
-      });
+        return value;
+      }, { write });
     } catch {
       await store.transaction(repo => audit(repo, op, 'error', 'store_unavailable', ids)).catch(() => {});
       return fail('store_unavailable');
     }
+    if (!write && result?.ok === false && DENIED.has(result.error)) await journalDenied(op, result.error, ids);
+    return result;
   }
 
   // Shared preconditions for every operation that names a workspace.
@@ -132,8 +139,7 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
     return resolved;
   }
 
-  return {
-    principal: principal.id,
+  const operations = {
 
     async workspaceOpen(args = {}) {
       const clientType = args.client_type ?? 'other';
@@ -143,7 +149,6 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
       const hostId = args.host ?? host;
       if (!HOSTS.includes(hostId)) return fail('invalid_input', 'host');
       if (args.branch !== undefined && args.branch !== null && !validBranch(args.branch)) return fail('invalid_input', 'branch');
-      if (!authorize(principal, 'workspace_open')) return execute('workspace_open', {}, () => fail('forbidden'));
       const project = await resolve(args.project);
       if (!project.ok) return project;
       const id = newId('ws');
@@ -196,7 +201,6 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
       if (!title) return fail('invalid_input', 'title');
       const issueRef = args.issue_ref ?? null;
       if (issueRef !== null && !ISSUE_REF_RE.test(issueRef)) return fail('invalid_input', 'issue_ref');
-      if (!authorize(principal, 'task_create')) return execute('task_create', {}, () => fail('forbidden'));
       const project = await resolve(args.project);
       if (!project.ok) return project;
       const id = newId('task');
@@ -224,8 +228,7 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
       const max = limitOf(limit);
       if (max === undefined) return fail('invalid_input', 'limit');
       return execute('tasks_list', {}, (repo, at) => {
-        const tasks = repo.listTasks({ project_id: project, limit: 500 }).map(t => publicTask(t, at))
-          .filter(t => !status || t.status === status).slice(0, max);
+        const tasks = repo.listTasks({ project_id: project, status, now: at, limit: max }).map(t => publicTask(t, at));
         return { ok: true, count: tasks.length, tasks };
       });
     },
@@ -273,16 +276,16 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
 
     async taskCheckpoint(args = {}) {
       if (!validBranch(args.branch)) return fail('invalid_input', 'branch');
-      if (typeof args.commit !== 'string' || !COMMIT_RE.test(args.commit)) return fail('invalid_input', 'commit');
-      const note = cleanText(args.note, 500);
+      if (typeof args.commit !== 'string' || !COMMIT_RE.test(args.commit.toLowerCase())) return fail('invalid_input', 'commit');
+      args = { ...args, commit: args.commit.toLowerCase() };
+      const note = cleanText(args.note, 500, { multiline: true });
       if (note === undefined) return fail('invalid_input', 'note');
       if (!ID_RE.task.test(args.task_id ?? '')) return fail('invalid_input', 'task_id');
       const ids = { workspace_id: args.workspace_id, task_id: args.task_id };
-      if (!authorize(principal, 'task_checkpoint')) return execute('task_checkpoint', ids, () => fail('forbidden'));
       // Git verification happens before the write transaction; the fence is re-checked inside it.
       let projectId = null;
       try {
-        projectId = await store.transaction(repo => repo.getTask(args.task_id)?.project_id ?? null);
+        projectId = await store.transaction(repo => repo.getTask(args.task_id)?.project_id ?? null, { write: false });
       } catch {
         return fail('store_unavailable');
       }
@@ -307,7 +310,7 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
     },
 
     async taskComplete(args = {}) {
-      const summary = cleanText(args.summary, 2000);
+      const summary = cleanText(args.summary, 2000, { multiline: true });
       if (summary === undefined) return fail('invalid_input', 'summary');
       return execute('task_complete', { workspace_id: args.workspace_id, task_id: args.task_id }, (repo, at) => {
         const f = fencedTask(repo, args, at);
@@ -330,4 +333,24 @@ export function createCoordinator({ store, principal, now = Date.now, catalogOpt
       });
     }
   };
+
+  // Authorization comes first, before any argument validation, so every refusal is journaled
+  // whatever the arguments look like.
+  const METHOD_OPERATION = {
+    workspaceOpen: 'workspace_open', workspaceStatus: 'workspace_status', workspaceList: 'workspace_list',
+    workspaceClose: 'workspace_close', taskCreate: 'task_create', taskStatus: 'task_status', tasksList: 'tasks_list',
+    taskClaim: 'task_claim', taskRenew: 'task_renew', taskRelease: 'task_release', taskCheckpoint: 'task_checkpoint',
+    taskComplete: 'task_complete', events: 'coordinator_events'
+  };
+  const api = { principal: principal.id };
+  for (const [method, op] of Object.entries(METHOD_OPERATION)) {
+    api[method] = async (args = {}) => {
+      if (!authorize(principal, op)) {
+        await journalDenied(op, 'forbidden', { workspace_id: args?.workspace_id, task_id: args?.task_id });
+        return fail('forbidden');
+      }
+      return operations[method](args ?? {});
+    };
+  }
+  return Object.freeze(api);
 }

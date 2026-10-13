@@ -2,14 +2,14 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "memo-bridge",
   "version": "0.2.0",
-  "description": "Private, read-only MCP for Memo Labs: one interface to inspect a Mac and a Netcup VPS without relying on the Sentinel X commercial hub.",
+  "description": "Private MCP for Memo Labs: inspect a Mac and a Netcup VPS read-only, browse registered projects, and coordinate parallel AI work sessions (workspaces, task leases, checkpoints) without relying on the Sentinel X commercial hub.",
   "author": { "name": "Memo Labs" },
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "Memo Bridge",
-        "shortDescription": "Mac + VPS diagnostics",
-        "longDescription": "Inspect the status of the Memo Labs Mac and VPS from one MCP, using only fixed read-only probes. Requires a local Mac runtime and SSH access to the VPS.",
+        "shortDescription": "Mac + VPS status and work coordination",
+        "longDescription": "Inspect the Memo Labs Mac and VPS with fixed read-only probes, list registered projects, and coordinate work between sessions: open a workspace, claim a task, record pushed checkpoints. Coordinator state stays in a private local store; no shell, no project file writes. Requires a local Mac runtime and SSH access to the VPS.",
         "developerName": "Memo Labs",
         "category": "Developer Tools",
         "capabilities": ["Interactive"],

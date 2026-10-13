@@ -24,7 +24,7 @@ npm run build
 npm run smoke
 ```
 
-The plugin package is under `plugin/`. It is a **local stdio plugin**, not a cloud-hosted ChatGPT MCP. Its runtime depends on local Node 22.13+ (24 recommended, for the built-in `node:sqlite`) and a working SSH alias `lab` with BatchMode and a pinned host key.
+The plugin package is under `plugin/`. It is a **local stdio plugin**, not a cloud-hosted ChatGPT MCP. Its runtime depends on local Node 22.16+ (24 recommended, for the built-in `node:sqlite`) and a working SSH alias `lab` with BatchMode and a pinned host key.
 
 ## Next architecture milestones
 
