@@ -14,7 +14,8 @@
     "package:plugin": "npm run build && node scripts/package-plugin.mjs",
     "test:hub": "node --test tests/hub-auth.test.mjs",
     "start:hub": "node bridge/hub-cli.mjs",
-    "start:agent": "node bridge/agent-cli.mjs"
+    "start:agent": "node bridge/agent-cli.mjs",
+    "install:local": "npm run build && node scripts/install-local.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
