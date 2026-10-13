@@ -86,3 +86,8 @@ export function authorize(principal, operation) {
 export function ownsWorkspace(principal, workspace) {
   return Boolean(workspace) && workspace.principal === principal.id;
 }
+
+// The worker identity recorded in the ledger. It is derived from the workspace, so another
+// workspace, even of the same principal, can never act on this claim. (Re-exported by
+// coordinator/index.mjs; it lives here so the job runner can use it without the Coordinator.)
+export const workerFor = workspace => `mb.${workspace.host}.${workspace.id}`;

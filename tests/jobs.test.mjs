@@ -12,9 +12,15 @@ import { join } from 'node:path';
 import { createRuntime } from '../server/runtime.mjs';
 import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 import { detectRecipes } from '../server/runners/recipes.mjs';
-import { createJobService, groupAlive, logPathFor, processAlive } from '../server/runners/jobs.mjs';
+import { RUNNER_PROTOCOL, createJobService, groupAlive, logPathFor, processAlive } from '../server/runners/jobs.mjs';
 import { commandFor, createLogSink, jobEnv } from '../server/runners/job-runner.mjs';
 import { JOB_TOOLS, registerJobTools } from '../server/tools/job-tools.mjs';
+
+// Jobs run only inside the macOS job sandbox. Elsewhere (Linux CI) there is none yet, so these
+// tests run the recipes unsandboxed, the owner's explicit opt-out; the sandbox itself is
+// covered by tests/job-sandbox.test.mjs on macOS.
+if (process.platform !== 'darwin') process.env.MEMO_BRIDGE_JOB_SANDBOX = 'off';
+const RUNNER = new URL('../server/runners/job-runner.mjs', import.meta.url).pathname;
 
 const OWNER = makePrincipal('local:owner', Object.values(CAPABILITIES));
 const OTHER = makePrincipal('local:other', Object.values(CAPABILITIES));
@@ -33,6 +39,11 @@ const SCRIPTS = {
   'pass.js': "console.log('hello-ok'); console.log('ci=' + process.env.CI + ' secret=' + (process.env.MEMO_TEST_API_TOKEN ?? 'none'));\n",
   'fail.js': "console.error('boom'); process.exit(3);\n",
   'sleep.js': "console.log('sleeping'); setTimeout(() => {}, 120000);\n",
+  // Starts a grandchild in its own process group (it leaves the job's group), records its pid,
+  // and keeps the job alive.
+  'escape.js': "const { spawn } = require('child_process'); const fs = require('fs');\n" +
+    "const g = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });\n" +
+    "g.unref(); fs.writeFileSync('grandchild.pid', String(g.pid)); console.log('escaped ' + g.pid); setTimeout(() => {}, 120000);\n",
   'noisy.js': "for (let i = 0; i < 600; i++) console.log('\\u001b[31mline ' + i + '\\u001b[0m \\u202eevil\\u0007 ' + 'x'.repeat(150));\n"
 };
 
@@ -60,11 +71,12 @@ async function setup(t, { scripts, principal = OWNER, claimExpiresIn = 3600_000,
   const rt = createRuntime({ stateDir, principal: OWNER, ledger: stubLedger(), host: 'mac' });
   const workspaceId = wsId();
   const worktreeId = `wt_${randomBytes(9).toString('base64url')}`;
+  const claimId = randomBytes(16).toString('hex');
   const now = Date.now();
   await rt.store().transaction(repo => {
     repo.insertWorkspace({ id: workspaceId, principal: OWNER.id, client_type: 'claude-code', project_id: 'drop', host: 'mac',
       status: 'active', created_at: now, updated_at: now });
-    repo.insertClaim({ claim_id: randomBytes(16).toString('hex'), workspace_id: workspaceId, issue_ref: ISSUE,
+    repo.insertClaim({ claim_id: claimId, workspace_id: workspaceId, issue_ref: ISSUE,
       fence_sha: 'f'.repeat(40), epoch: 1, expires_at: new Date(now + claimExpiresIn).toISOString(), updated_at: now });
     repo.insertWorktree({ id: worktreeId, workspace_id: workspaceId, project_id: 'drop', host: 'mac', path: repoDir,
       branch: 'agent/drop-7', base_ref: 'main', base_commit: 'a'.repeat(40), issue_ref: ISSUE, created_at: now, updated_at: now });
@@ -90,7 +102,7 @@ async function setup(t, { scripts, principal = OWNER, claimExpiresIn = 3600_000,
       await rm(base, { recursive: true, force: true });
     }
   });
-  return { rt, stateDir, repoDir, workspaceId, worktreeId, jobs, ownerJobs };
+  return { rt, base, stateDir, repoDir, workspaceId, worktreeId, claimId, jobs, ownerJobs };
 }
 
 async function waitFor(fn, { timeoutMs = 30000, intervalMs = 100, what = 'condition' } = {}) {
@@ -152,9 +164,14 @@ test('runner helpers: nice wrapper, secret-free env, capped log with marker', as
   assert.deepEqual(commandFor(['npm', 'test'], 'linux'), ['nice', ['-n', '10', 'npm', 'test']]);
   assert.deepEqual(commandFor(['npm', 'test'], 'win32'), ['npm', ['test']]);
 
-  const env = jobEnv({ PATH: '/bin', HOME: '/h', GITHUB_TOKEN: 'x', GH_HOST: 'y', AWS_ACCESS_KEY_ID: 'z', MY_API_KEY: 'k',
-    SSH_AUTH_SOCK: '/s', MEMO_BRIDGE_STATE_DIR: '/d', OPENAI_API_KEY: 'o', DB_PASSWORD: 'p' }, 'job_x');
-  assert.deepEqual(env, { PATH: '/bin', HOME: '/h', CI: '1', NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', MEMO_BRIDGE_JOB_ID: 'job_x' });
+  // An allow-list: secrets whose names do not look like secrets (DATABASE_URL) are dropped too,
+  // HOME and TMPDIR are the job's own folder, and Git ignores the owner's configuration.
+  const env = jobEnv({ PATH: '/bin', HOME: '/h', LANG: 'C.UTF-8', GITHUB_TOKEN: 'x', GH_HOST: 'y', AWS_ACCESS_KEY_ID: 'z', MY_API_KEY: 'k',
+    SSH_AUTH_SOCK: '/s', MEMO_BRIDGE_STATE_DIR: '/d', OPENAI_API_KEY: 'o', DB_PASSWORD: 'p',
+    DATABASE_URL: 'postgres://u:hunter2@db/x', GIT_ASKPASS: '/a', NODE_OPTIONS: '--require /evil.js' }, 'job_x', { home: '/j/home', tmp: '/j/tmp' });
+  assert.deepEqual(env, { PATH: '/bin', LANG: 'C.UTF-8', HOME: '/j/home', TMPDIR: '/j/tmp', XDG_CONFIG_HOME: '/j/home/.config',
+    XDG_CACHE_HOME: '/j/home/.cache', CI: '1', NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0',
+    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', npm_config_update_notifier: 'false', MEMO_BRIDGE_JOB_ID: 'job_x' });
 
   const file = join(await tempDir(t, 'memo-jobs-log-'), 'x.log');
   const fd = openSync(file, 'a');
@@ -280,8 +297,7 @@ test('host concurrency limit refuses with host_busy; queued jobs can be cancelle
   assert.equal(queued.job.status, 'queued');
   const cancelled = await fake.cancel({ job_id: queued.job.job_id });
   assert.equal(cancelled.job.status, 'cancelled');
-  const runner = spawn(process.execPath, [new URL('../server/runners/job-runner.mjs', import.meta.url).pathname, stateDir, queued.job.job_id],
-    { stdio: 'ignore' });
+  const runner = spawn(process.execPath, [RUNNER, `--protocol=${RUNNER_PROTOCOL}`, stateDir, queued.job.job_id], { stdio: 'ignore' });
   const code = await new Promise(resolve => runner.once('exit', resolve));
   assert.equal(code, 1, 'runner refuses a job that is not queued');
   const kinds = (await jobs.events({ job_id: queued.job.job_id })).events.map(e => e.kind);
@@ -437,10 +453,178 @@ test('recipes run only what detectRecipes chooses now: a tampered job row is rej
   await rt.store().transaction(repo => repo.insertJob({ id, workspace_id: workspaceId, worktree_id: worktreeId, project_id: 'drop',
     host: 'mac', recipe: 'test', argv_json: '["sh","-c","echo pwned"]', timeout_ms: 60000, log_path: logPathFor(stateDir, id),
     created_at: Date.now() }));
-  const runner = spawn(process.execPath, [new URL('../server/runners/job-runner.mjs', import.meta.url).pathname, stateDir, id], { stdio: 'ignore' });
+  const runner = spawn(process.execPath, [RUNNER, `--protocol=${RUNNER_PROTOCOL}`, stateDir, id], { stdio: 'ignore' });
   assert.equal(await new Promise(resolve => runner.once('exit', resolve)), 1);
   const job = (await jobs.status({ job_id: id })).job;
   assert.equal(job.status, 'failed');
   assert.equal(job.summary, 'recipe_changed');
   assert.equal(readFileSync(logPathFor(stateDir, id), 'utf8'), '', 'nothing ran');
+});
+
+// ---------------------------------------------------------------------------------------
+// Regressions from the adversarial review of 933e759 (finding numbers in the test names).
+
+const startedDetail = async (jobs, id) => {
+  const events = await waitFor(async () => {
+    const e = (await jobs.events({ job_id: id })).events;
+    return e.some(x => x.kind === 'started') ? e : null;
+  }, { what: 'started event' });
+  return events.find(e => e.kind === 'started').detail;
+};
+
+test('finding 5: a process that leaves the job\'s group is stopped by job_cancel too', async t => {
+  const { repoDir, workspaceId, worktreeId, jobs } = await setup(t, { scripts: { test: 'node escape.js' } });
+  const submitted = await jobs.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  const id = submitted.job.job_id;
+  await waitFor(async () => (await jobs.results({ job_id: id })).log.lines.some(l => l.includes('escaped')), { what: 'grandchild' });
+  const grandchild = Number(readFileSync(join(repoDir, 'grandchild.pid'), 'utf8'));
+  t.after(() => { try { process.kill(grandchild, 'SIGKILL'); } catch { /* gone */ } });
+  const { pid } = await startedDetail(jobs, id);
+  assert.notEqual(grandchild, pid);
+  assert.equal(processAlive(grandchild), true);
+  // Give the runner's process tracking a few polls to see it.
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  assert.equal((await jobs.cancel({ job_id: id })).ok, true);
+  await waitFor(() => !processAlive(grandchild), { timeoutMs: 15000, what: 'detached grandchild gone' });
+  await waitFor(() => !groupAlive(pid), { timeoutMs: 15000, what: 'job group gone' });
+});
+
+test('finding 5: processes left behind by a job that exited are stopped too', async t => {
+  const { repoDir, workspaceId, worktreeId, jobs } = await setup(t, { scripts: { test: 'node escape.js && true' } });
+  await writeFile(join(repoDir, 'escape.js'), SCRIPTS['escape.js'].replace('setTimeout(() => {}, 120000);', 'setTimeout(() => {}, 1500);'));
+  const submitted = await jobs.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  const done = await waitStatus(jobs, submitted.job.job_id, ['succeeded', 'failed', 'timed_out', 'interrupted']);
+  assert.equal(done.status, 'succeeded', JSON.stringify(done));
+  const grandchild = Number(readFileSync(join(repoDir, 'grandchild.pid'), 'utf8'));
+  t.after(() => { try { process.kill(grandchild, 'SIGKILL'); } catch { /* gone */ } });
+  await waitFor(() => !processAlive(grandchild), { timeoutMs: 15000, what: 'detached grandchild gone' });
+});
+
+test('finding 6: SIGTERM to the runner stops the job and records it interrupted', async t => {
+  const { workspaceId, worktreeId, jobs } = await setup(t, { scripts: { test: 'node sleep.js' } });
+  const submitted = await jobs.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test', timeout_seconds: 600 });
+  const id = submitted.job.job_id;
+  await waitFor(async () => (await jobs.results({ job_id: id })).log.lines.some(l => l.includes('sleeping')), { what: 'job output' });
+  const { pid, runner_pid: runnerPid } = await startedDetail(jobs, id);
+  process.kill(runnerPid, 'SIGTERM');
+  const done = await waitStatus(jobs, id, ['interrupted', 'succeeded', 'failed', 'timed_out', 'cancelled'], { timeoutMs: 15000 });
+  assert.equal(done.status, 'interrupted');
+  assert.equal(done.summary, 'runner_terminated');
+  await waitFor(() => !groupAlive(pid) && !processAlive(runnerPid), { timeoutMs: 15000, what: 'job and runner gone' });
+});
+
+test('finding 6: a running job past its deadline is killed and timed out by the next read; a reused group id is never signalled', async t => {
+  const { rt, stateDir, workspaceId, worktreeId, jobs } = await setup(t);
+  const { processStart } = await import('../server/runners/processes.mjs');
+  const { DEADLINE_GRACE_MS } = await import('../server/runners/jobs.mjs');
+  const spawnGroup = () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    t.after(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } });
+    return child.pid;
+  };
+  const ours = spawnGroup(); const reused = spawnGroup();
+  await waitFor(() => processStart(ours) && processStart(reused), { what: 'processes started' });
+  const insert = (pid, pidStart) => rt.store().transaction(repo => {
+    const id = 'job_' + randomBytes(12).toString('base64url');
+    const started = Date.now() - 60_000 - DEADLINE_GRACE_MS - 1000;
+    repo.insertJob({ id, workspace_id: workspaceId, worktree_id: worktreeId, project_id: 'drop', host: 'mac', recipe: 'test',
+      argv_json: '["npm","test"]', timeout_ms: 60_000, log_path: logPathFor(stateDir, id), created_at: started });
+    repo.updateJob(id, { status: 'running', pid, started_at: started }, 'queued');
+    repo.appendJobEvent({ job_id: id, at: started, kind: 'started', detail: JSON.stringify({ pid, pid_start: pidStart, runner_pid: 999999 }) });
+    return id;
+  });
+  const ownJob = await insert(ours, processStart(ours));
+  // A recorded start time that does not match: the group id now belongs to someone else.
+  const staleJob = await insert(reused, 'Thu Jan  1 00:00:00 1970');
+  const own = (await jobs.status({ job_id: ownJob })).job;
+  assert.equal(own.status, 'timed_out');
+  assert.equal(own.summary, 'deadline_exceeded');
+  await waitFor(() => !groupAlive(ours), { timeoutMs: 10000, what: 'overdue job group killed' });
+  assert.equal((await jobs.status({ job_id: staleJob })).job.status, 'timed_out');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(groupAlive(reused), true, 'an unrelated process group with a reused id is left alone');
+  const kinds = (await jobs.events({ job_id: ownJob })).events.map(e => `${e.kind}:${e.detail?.by ?? ''}`);
+  assert.deepEqual(kinds, ['started:', 'timeout:deadline']);
+});
+
+test('finding 7: workspace_close cancels the workspace\'s running jobs', async t => {
+  const { rt, workspaceId, worktreeId, jobs } = await setup(t, { scripts: { test: 'node sleep.js' } });
+  const submitted = await jobs.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' });
+  const id = submitted.job.job_id;
+  await waitFor(async () => (await jobs.results({ job_id: id })).log.lines.some(l => l.includes('sleeping')), { what: 'job output' });
+  const { pid } = await startedDetail(jobs, id);
+  const closed = await rt.coordinator().workspaceClose({ workspace_id: workspaceId });
+  assert.equal(closed.ok, true, JSON.stringify(closed));
+  assert.deepEqual(closed.cancelled_jobs, [id]);
+  assert.equal((await jobs.status({ job_id: id })).job.status, 'cancelled');
+  await waitFor(() => !groupAlive(pid), { timeoutMs: 15000, what: 'job group gone' });
+  const cancelled = (await jobs.events({ job_id: id })).events.find(e => e.kind === 'cancelled');
+  assert.equal(cancelled.detail.reason, 'workspace_closed');
+});
+
+test('finding 7: task_release cancels the jobs running under that claim', async t => {
+  const { rt, workspaceId, worktreeId, claimId, jobs } = await setup(t, { scripts: { test: 'node sleep.js' } });
+  const submitted = await jobs.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' });
+  const id = submitted.job.job_id;
+  await waitStatus(jobs, id, ['running']);
+  const { pid } = await startedDetail(jobs, id);
+  const released = await rt.coordinator().taskRelease({ workspace_id: workspaceId, issue: ISSUE, claim_id: claimId,
+    fence: 'f'.repeat(40), outcome: 'cancelled' });
+  assert.equal(released.ok, true, JSON.stringify(released));
+  assert.deepEqual(released.cancelled_jobs, [id]);
+  await waitFor(() => !groupAlive(pid), { timeoutMs: 15000, what: 'job group gone' });
+  assert.equal((await jobs.status({ job_id: id })).job.status, 'cancelled');
+});
+
+test('finding 7: the runner stops a job once its claim has expired', async t => {
+  const { workspaceId, worktreeId, jobs } = await setup(t, { scripts: { test: 'node sleep.js' }, claimExpiresIn: 4000 });
+  const submitted = await jobs.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  const id = submitted.job.job_id;
+  const done = await waitStatus(jobs, id, ['cancelled', 'succeeded', 'failed', 'timed_out', 'interrupted'], { timeoutMs: 25000 });
+  assert.equal(done.status, 'cancelled');
+  const cancelled = (await jobs.events({ job_id: id })).events.find(e => e.kind === 'cancelled');
+  assert.deepEqual(cancelled.detail, { from: 'running', by: 'runner', reason: 'no_live_claim' });
+  const { pid } = await startedDetail(jobs, id);
+  await waitFor(() => !groupAlive(pid), { timeoutMs: 15000, what: 'job group gone' });
+});
+
+test('version skew: a runner refuses a job launched by a server of another protocol', async t => {
+  const { rt, stateDir, workspaceId, worktreeId, jobs } = await setup(t);
+  const fake = createJobService(rt, { spawnRunner: async () => ({ ok: true, pid: process.pid }) });
+  for (const args of [[], ['--protocol=1']]) {
+    const queued = await fake.submit({ workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' });
+    assert.equal(queued.ok, true, JSON.stringify(queued));
+    // [] is how a 0.4.0 server starts the runner: `node job-runner.mjs <stateDir> <jobId>`.
+    const runner = spawn(process.execPath, [RUNNER, ...args, stateDir, queued.job.job_id], { stdio: 'ignore' });
+    assert.equal(await new Promise(resolve => runner.once('exit', resolve)), 1);
+    const job = (await jobs.status({ job_id: queued.job.job_id })).job;
+    assert.equal(job.status, 'failed', args.join(' '));
+    assert.equal(job.summary, 'runner_version_mismatch');
+    assert.equal(readFileSync(logPathFor(stateDir, queued.job.job_id), 'utf8'), '', 'nothing ran');
+  }
+});
+
+test('jobs_submit asks the ledger, not only the local mirror, and refuses without a sandbox', async t => {
+  const { rt, workspaceId, worktreeId, jobs } = await setup(t);
+  const base = { workspace_id: workspaceId, worktree_id: worktreeId, recipe: 'test' };
+  const verify = rt.ledger.verify;
+  rt.ledger.verify = async () => ({ ok: false, error: 'stale_lease', detail: 'Missing or superseded lease' });
+  assert.deepEqual(await jobs.submit(base), { ok: false, error: 'stale_lease', detail: 'Missing or superseded lease' });
+  rt.ledger.verify = async () => { throw new Error('python crashed'); };
+  assert.deepEqual(await jobs.submit(base), { ok: false, error: 'ledger_unavailable' });
+  rt.ledger.verify = verify;
+  const misconfigured = createJobService(rt, { env: { ...process.env, MEMO_BRIDGE_JOB_SANDBOX: 'maybe' } });
+  assert.equal((await misconfigured.submit(base)).error, 'invalid_configuration');
+  if (process.platform !== 'darwin') {
+    const strict = createJobService(rt, { env: { ...process.env, MEMO_BRIDGE_JOB_SANDBOX: 'on' } });
+    assert.equal((await strict.submit(base)).error, 'sandbox_unavailable');
+  }
+  const audit = (await auditOf(rt)).filter(e => e.op === 'jobs_submit').map(e => `${e.outcome}:${e.code}`);
+  assert.ok(audit.includes('denied:stale_lease'), audit.join(', '));
+  assert.ok(audit.includes('error:ledger_unavailable'), audit.join(', '));
+  assert.deepEqual((await jobs.list({})).jobs, [], 'nothing was recorded');
 });

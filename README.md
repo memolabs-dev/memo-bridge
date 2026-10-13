@@ -23,13 +23,15 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 ### Phase 3: the Mac runner (`docs/RUNNER.md`)
 
 - Worktrees and files: `worktrees_list`, `worktree_create`, `worktree_status`, `worktree_list_files`, `worktree_read_file`, `worktree_write_file`, `worktree_diff`, `worktree_commit`, `worktree_push`, `worktree_remove`
-- Jobs (detected `test`, `build`, `lint` recipes only): `jobs_submit`, `jobs_list`, `job_status`, `job_events`, `job_results`, `job_cancel`
+- Jobs (detected `test`, `build`, `lint` recipes only, sandboxed on macOS): `jobs_submit`, `jobs_list`, `job_status`, `job_events`, `job_results`, `job_cancel`
 - Hosts: `host_capabilities`, `host_resources`
 - GitHub: `github_issues`, `github_pull_requests`, `github_workflows`, `github_checks` (reads of registered repositories), `github_create_pr` (opens a pull request from a pushed worktree branch)
 
 ### What Memo Bridge never does
 
-No arbitrary shell: every command is a fixed argument list run without a shell, and jobs run only the recipe the repository itself declares. No file access outside its own worktrees and the canonical register. No write to a default branch, no force-push, no merge, no deployment, no service change. Every repository write, job and pull request needs a live claim on the task, and commit, push and pull request creation re-verify that claim with the shared ledger first. Pull requests land through the Memo Labs landing contract (`.github/workflows/land.yml`), never through an agent. Details: `SECURITY.md`.
+Through its own tools: no shell (every command is a fixed argument list), no file access outside its own worktrees and the canonical register, no write to a default branch (compared without case, and checked against the remote itself), no force-push, no merge, no deployment, no service change. Every repository write, job and pull request needs a live claim on the task, and commit, push, job submission and pull request creation re-verify that claim with the shared ledger first. Pull requests land through the Memo Labs landing contract (`.github/workflows/land.yml`), never through an agent.
+
+Jobs are different: they run the repository's own scripts, which a model can edit, so they are code a model wrote. On macOS they run inside a sandbox: writes only to the worktree, no network beyond loopback, no access to the state directory, other repositories, `~/.agent`, `~/Vault` or credentials, an allow-listed environment, and every process stopped with the job. They are refused on other platforms. `MEMO_BRIDGE_JOB_SANDBOX=off` runs them unsandboxed, which makes a job owner-equivalent. Details and residual risks: `SECURITY.md`.
 
 ## Development
 

@@ -8,6 +8,7 @@ import { collectHost, listHosts } from './probe.mjs';
 import { listProjects, projectInfo, projectGitStatus, auditProjectRegistry } from './catalog.mjs';
 import { CAPABILITIES } from './coordinator/policy.mjs';
 import { getRuntime } from './runtime.mjs';
+import { sandboxMode } from './runners/sandbox.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from './tools/coordinator-tools.mjs';
 import { WORKTREE_TOOLS, registerWorktreeTools } from './tools/worktree-tools.mjs';
 import { JOB_TOOLS, registerJobTools } from './tools/job-tools.mjs';
@@ -42,8 +43,11 @@ const server = new McpServer({
     'worktree_create with the issue -> worktree_read_file / worktree_write_file -> jobs_submit test|build|lint, then ' +
     'job_status / job_results -> worktree_commit -> worktree_push (records a checkpoint) -> github_create_pr -> task_complete -> ' +
     'workspace_close. After losing context call workspace_recover. Stop writing as soon as a call returns stale_lease or ' +
-    'no_live_claim. Memo Bridge never runs arbitrary commands (only detected test/build/lint recipes), never writes outside ' +
-    'its worktrees, never writes the default branch, never force-pushes, never merges and never deploys.'
+    'no_live_claim. Memo Bridge\'s own tools use no shell, never write outside its worktrees, never write the default ' +
+    'branch, never force-push, never merge and never deploy. Jobs run the repository\'s own test/build/lint scripts, which you ' +
+    'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +
+    'only, no private data or credentials) and stop when the claim ends; elsewhere they are refused unless the owner set ' +
+    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent.'
 });
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -82,7 +86,7 @@ server.registerTool('bridge_info', {
       [CAPABILITIES.WRITE]: 'open and close workspaces, claim, renew, release, complete and checkpoint tasks',
       [CAPABILITIES.AUDIT]: 'read every principal\'s audit events (otherwise only your own)',
       [CAPABILITIES.REPO_WRITE]: 'create worktrees on new branches, write files inside them, commit, push the branch (never the default branch, never forced), remove clean worktrees; requires a live claim',
-      [CAPABILITIES.EXECUTE]: 'run the repository\'s own detected test/build/lint recipe in a worktree, without a shell, as the owner; not a sandbox; requires a live claim',
+      [CAPABILITIES.EXECUTE]: 'run the repository\'s own detected test/build/lint recipe in a worktree, without a shell, inside the job sandbox (macOS; MEMO_BRIDGE_JOB_SANDBOX=off makes a job owner-equivalent); requires a live claim',
       [CAPABILITIES.GITHUB_WRITE]: 'open a pull request from a pushed worktree branch; requires a live claim; never merges'
     },
     observation: 'host_status checks reachability only; health comes from the existing observers (observe_*), never from new probes',
@@ -93,10 +97,14 @@ server.registerTool('bridge_info', {
     },
     runner: {
       worktrees: 'isolated Git worktrees under ~/projects/_worktrees/<project>/ (or MEMO_BRIDGE_WORKTREES_ROOT); Git hooks disabled',
-      jobs: 'detected recipes only (test, build, lint); at most MEMO_BRIDGE_MAX_JOBS (default 2) per host; logs in the private state directory'
+      jobs: 'detected recipes only (test, build, lint); at most MEMO_BRIDGE_MAX_JOBS (default 2) per host; logs in the private state directory',
+      job_sandbox: (() => { const m = sandboxMode(); return m.ok ? m.mode : m.error; })()
     },
+    // What the tools themselves never do. Jobs run repository scripts a model can edit: they are
+    // bounded by the job sandbox, and owner-equivalent when MEMO_BRIDGE_JOB_SANDBOX=off.
     excluded: ['arbitrary-shell', 'writes-outside-worktrees', 'default-branch-writes', 'force-push', 'merge', 'service-changes',
       'deployment'],
+    excluded_scope: 'the tools themselves; jobs are bounded by job_sandbox, and owner-equivalent when it is off',
     next: 'Hub exposure of these tools once the root CI runners are isolated; a VPS runner; a job queue.'
   });
 });

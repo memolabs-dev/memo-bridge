@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { createRuntime } from '../server/runtime.mjs';
 import { CAPABILITIES, OPERATION_CAPABILITY, makePrincipal } from '../server/coordinator/policy.mjs';
 import { WORKTREE_TOOLS, registerWorktreeTools } from '../server/tools/worktree-tools.mjs';
-import { LIMITS, insideWorktree, normalizeRelPath } from '../server/runners/worktrees.mjs';
+import { AI_ATTRIBUTION, LIMITS, insideWorktree, isProtectedBranch, normalizeRelPath, parseLsRemote } from '../server/runners/worktrees.mjs';
 
 // Git must never read the user's own configuration (identity, signing, hooks) in these tests.
 const SANDBOX = await mkdtemp(join(tmpdir(), 'memo-wt-gitconfig-'));
@@ -117,7 +117,7 @@ async function fixture(t, { principal = OWNER } = {}) {
     return { ws, claim, wt, id: wt.worktree_id, path };
   };
 
-  return { base, repo, origin, worktrees, rt, call, tools, ledgerCalls, state, addWorkspace, addClaim, events, row, ready };
+  return { base, repo, origin, worktrees, rt, call, tools, ledgerCalls, state, addWorkspace, addClaim, events, row, ready, projectsRoot };
 }
 
 test('registers the ten worktree tools, each mapped to a capability', async t => {
@@ -548,4 +548,160 @@ test('path helpers', () => {
   assert.equal(insideWorktree('/w/t', '/w'), false);
   assert.equal(insideWorktree('/w/t', '/w/t/.git'), false);
   assert.equal(insideWorktree('/w/t', '/w/t/sub/.git/config'), false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Regressions from the adversarial review of 933e759 (finding numbers in the test names).
+
+test('finding 1: a case variant of the default branch or of an existing branch is refused (APFS)', async t => {
+  const f = await fixture(t);
+  const ws = await f.addWorkspace();
+  await f.addClaim(ws);
+  const create = args => f.call('worktree_create', { workspace_id: ws, issue: ISSUE, ...args });
+  // Auto-gc packs refs: refs/heads/main then exists only in packed-refs, and a loose
+  // refs/heads/Main would be the very same file on a case-insensitive volume.
+  git(f.repo, 'pack-refs', '--all');
+  const main = git(f.repo, 'rev-parse', 'refs/heads/main');
+  for (const branch of ['Main', 'MAIN', 'mAsTeR']) {
+    assert.deepEqual(await create({ branch }), { ok: false, error: 'protected_branch' }, branch);
+  }
+  git(f.repo, 'branch', 'taken');
+  assert.deepEqual(await create({ branch: 'Taken' }), { ok: false, error: 'branch_exists', detail: 'local' });
+  git(f.repo, 'push', '-q', 'origin', 'HEAD:refs/heads/Remote-Only');
+  assert.deepEqual(await create({ branch: 'remote-only' }), { ok: false, error: 'branch_exists', detail: 'remote' });
+  assert.equal(git(f.repo, 'rev-parse', 'refs/heads/main'), main, 'the default branch never moved');
+  assert.equal(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads').split('\n').filter(r => /main/i.test(r)).length, 1);
+  assert.equal(isProtectedBranch('Develop', ['develop']), true);
+  assert.equal(isProtectedBranch('agent/7-x', ['develop']), false);
+});
+
+test('finding 2: the remote default branch and remote branches are read with ls-remote, before create and push', async t => {
+  const f = await fixture(t);
+  // The origin's default branch is develop; the local clone only fetches main (a
+  // --single-branch clone), so neither origin/HEAD nor origin/develop exist locally.
+  git(f.repo, 'push', '-q', 'origin', 'HEAD:refs/heads/develop');
+  execFileSync('git', ['--git-dir', f.origin, 'symbolic-ref', 'HEAD', 'refs/heads/develop']);
+  git(f.repo, 'config', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main');
+  git(f.repo, 'update-ref', '-d', 'refs/remotes/origin/develop');
+  const ws = await f.addWorkspace();
+  await f.addClaim(ws);
+  assert.deepEqual(await f.call('worktree_create', { workspace_id: ws, issue: ISSUE, branch: 'develop' }),
+    { ok: false, error: 'protected_branch' });
+  const developBefore = git(f.origin, 'rev-parse', 'refs/heads/develop');
+
+  // A branch someone else creates on the remote after our worktree exists: our first push
+  // would fast-forward it; it is refused instead, and the remote is untouched.
+  const { id, path, wt } = await f.ready({ branch: 'agent/feature' });
+  await f.call('worktree_write_file', { worktree_id: id, path: 'x.txt', content: 'x\n' });
+  assert.equal((await f.call('worktree_commit', { worktree_id: id, message: 'feat: x' })).ok, true);
+  git(f.repo, 'push', '-q', 'origin', `${wt.base_commit}:refs/heads/agent/feature`);
+  assert.deepEqual(await f.call('worktree_push', { worktree_id: id }), { ok: false, error: 'push_rejected', detail: 'remote_branch_not_ours' });
+  assert.equal(git(f.origin, 'rev-parse', 'refs/heads/agent/feature'), wt.base_commit);
+  execFileSync('git', ['--git-dir', f.origin, 'update-ref', '-d', 'refs/heads/agent/feature']);
+
+  // A case variant on the remote is refused as well.
+  git(f.repo, 'push', '-q', 'origin', `${wt.base_commit}:refs/heads/Agent/Feature`);
+  assert.deepEqual(await f.call('worktree_push', { worktree_id: id }), { ok: false, error: 'push_rejected', detail: 'remote_case_variant' });
+  execFileSync('git', ['--git-dir', f.origin, 'update-ref', '-d', 'refs/heads/Agent/Feature']);
+
+  // Our own branch: first push creates it, the next one moves it from the commit we pushed.
+  assert.equal((await f.call('worktree_push', { worktree_id: id })).ok, true);
+  await f.call('worktree_write_file', { worktree_id: id, path: 'y.txt', content: 'y\n' });
+  assert.equal((await f.call('worktree_commit', { worktree_id: id, message: 'feat: y' })).ok, true);
+  const again = await f.call('worktree_push', { worktree_id: id });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.equal(git(f.origin, 'rev-parse', 'refs/heads/agent/feature'), git(path, 'rev-parse', 'HEAD'));
+
+  // The remote's default branch becomes ours (renamed on the forge): pushing it is refused.
+  execFileSync('git', ['--git-dir', f.origin, 'symbolic-ref', 'HEAD', 'refs/heads/agent/feature']);
+  assert.deepEqual(await f.call('worktree_push', { worktree_id: id }), { ok: false, error: 'protected_branch' });
+  assert.equal(git(f.origin, 'rev-parse', 'refs/heads/develop'), developBefore, 'develop never moved');
+
+  assert.deepEqual(parseLsRemote(`ref: refs/heads/develop\tHEAD\n${'a'.repeat(40)}\tHEAD\n${'b'.repeat(40)}\trefs/heads/x/y\n`),
+    { head: 'develop', heads: new Map([['x/y', 'b'.repeat(40)]]) });
+});
+
+test('finding 7: worktree_remove is refused while a job is queued or running in the worktree', async t => {
+  const f = await fixture(t);
+  const { ws, id, path } = await f.ready();
+  const jobId = `job_${randomBytes(12).toString('base64url')}`;
+  await f.rt.store().transaction(r => r.insertJob({ id: jobId, workspace_id: ws, worktree_id: id, project_id: 'demo', host: 'mac',
+    recipe: 'test', argv_json: '["npm","test"]', timeout_ms: 60000, log_path: join(f.base, 'x.log'), created_at: Date.now() }));
+  const refused = await f.call('worktree_remove', { worktree_id: id });
+  assert.equal(refused.error, 'job_active', JSON.stringify(refused));
+  assert.ok(existsSync(path));
+  await f.rt.store().transaction(r => r.updateJob(jobId, { status: 'cancelled', ended_at: Date.now() }, 'queued'));
+  assert.equal((await f.call('worktree_remove', { worktree_id: id })).ok, true);
+  assert.ok((await f.events()).includes('worktree_remove:denied:job_active'));
+});
+
+test('finding 8: worktree_remove never deletes ignored files silently', async t => {
+  const f = await fixture(t);
+  const { id, path } = await f.ready();
+  assert.equal((await f.call('worktree_write_file', { worktree_id: id, path: 'node_modules/notes.txt', content: 'keep me\n' })).ok, true);
+  const status = await f.call('worktree_status', { worktree_id: id });
+  assert.equal(status.clean, true, 'ignored files are not changes');
+  const refused = await f.call('worktree_remove', { worktree_id: id });
+  assert.equal(refused.error, 'ignored_files', JSON.stringify(refused));
+  assert.match(refused.detail, /1 ignored entry would be deleted \(node_modules\/\); pass discard_ignored: true/);
+  assert.ok(existsSync(join(path, 'node_modules', 'notes.txt')), 'nothing was deleted');
+  const removed = await f.call('worktree_remove', { worktree_id: id, discard_ignored: true });
+  assert.equal(removed.ok, true, JSON.stringify(removed));
+  assert.equal(removed.detail, '1 ignored entry deleted');
+  assert.equal(existsSync(path), false);
+  assert.ok((await f.events()).includes('worktree_remove:denied:ignored_files'));
+});
+
+test('finding 9: AI attribution is refused as a trailer or as prose, ordinary messages are not', async t => {
+  const f = await fixture(t);
+  const { id } = await f.ready();
+  await f.call('worktree_write_file', { worktree_id: id, path: 'a.txt', content: 'a\n' });
+  for (const message of ['feat: x\n\nWritten by Claude', 'feat: x\n\nMade with Claude Code', 'feat: x\n\nAI-generated change',
+    'feat: x\n\nAssisted-by: GPT-4o', 'feat: x\n\nSigned-off-by: Claude <noreply@anthropic.com>', 'Generated using ChatGPT',
+    'feat: x\n\nCreated with the help of an AI']) {
+    assert.deepEqual(await f.call('worktree_commit', { worktree_id: id, message }),
+      { ok: false, error: 'invalid_input', detail: 'message carries an AI attribution' }, message);
+  }
+  for (const message of ['fix: claude adapter timeout', 'docs: written by the maintainers', 'feat: made with love', 'feat: AI provider list']) {
+    assert.ok(!AI_ATTRIBUTION.some(rx => rx.test(message)), message);
+  }
+  assert.equal((await f.call('worktree_commit', { worktree_id: id, message: 'fix: claude adapter timeout' })).ok, true);
+});
+
+test('a FIFO in place of a written file never hangs worktree_status or worktree_read_file', async t => {
+  const f = await fixture(t);
+  const { id, path } = await f.ready();
+  // A tracked file Memo Bridge wrote, then replaced by a FIFO (git reports it as modified).
+  await f.call('worktree_write_file', { worktree_id: id, path: 'README.md', content: 'edited\n' });
+  await rm(join(path, 'README.md'));
+  execFileSync('mkfifo', [join(path, 'README.md')]);
+  const started = Date.now();
+  const status = await f.call('worktree_status', { worktree_id: id });
+  assert.equal(status.ok, true, JSON.stringify(status));
+  assert.deepEqual(status.external_edits.modified_after_write, ['README.md']);
+  assert.equal((await f.call('worktree_read_file', { worktree_id: id, path: 'README.md' })).error, 'not_a_file');
+  assert.ok(Date.now() - started < 10000, 'returned promptly');
+});
+
+test('a redirected .git link is refused before any Git command runs in the worktree', async t => {
+  const f = await fixture(t);
+  const { id, path } = await f.ready();
+  // A job could write a .git file pointing at a repository it prepared (with a config that
+  // runs commands); the server must not run Git there.
+  const evil = join(path, 'evil');
+  execFileSync('git', ['init', '-q', '-b', 'agent/x', evil]);
+  await writeFile(join(path, '.git'), `gitdir: ${join(evil, '.git')}\n`);
+  for (const name of ['worktree_status', 'worktree_diff', 'worktree_push', 'worktree_remove']) {
+    assert.equal((await f.call(name, { worktree_id: id })).error, 'worktree_link_changed', name);
+  }
+  assert.equal((await f.call('worktree_commit', { worktree_id: id, message: 'feat: x' })).error, 'worktree_link_changed');
+  assert.equal((await f.call('worktree_write_file', { worktree_id: id, path: 'a.txt', content: 'a' })).error, 'worktree_link_changed');
+  assert.ok(existsSync(path), 'not removed');
+  // Same shape as a real link, but into another repository's worktree administration.
+  const other = join(f.base, 'other');
+  execFileSync('git', ['init', '-q', '-b', 'main', other]);
+  execFileSync('git', ['-C', other, 'commit', '-q', '--allow-empty', '-m', 'other']);
+  execFileSync('git', ['-C', other, 'worktree', 'add', '-q', '-b', 'agent/x', join(f.base, 'other-wt')]);
+  await writeFile(join(path, '.git'), `gitdir: ${join(other, '.git', 'worktrees', 'other-wt')}\n`);
+  assert.equal((await f.call('worktree_status', { worktree_id: id })).error, 'worktree_link_changed');
 });

@@ -3,11 +3,12 @@
 // A recipe is NOT an arbitrary command. The model picks a recipe name ('test', 'build',
 // 'lint'); the argv is chosen here from the repository's own manifests and never from tool
 // arguments. Be clear about what that means, though: a recipe runs the repository's OWN
-// scripts (package.json scripts, Makefile targets, test suites…) on the owner's machine, as
-// the owner's OS user, with the owner's file access. It is not a sandbox. Whoever can write
-// files in the worktree (worktree_write_file) and submit a job can therefore run code there;
-// that is why jobs_submit requires the runner:execute capability, an owned active workspace
-// and a live claim on the worktree's Issue.
+// scripts (package.json scripts, Makefile targets, test suites…) on the owner's machine.
+// Whoever can write files in the worktree (worktree_write_file) and submit a job can therefore
+// run code there. That code is bounded by the job sandbox (sandbox.mjs: worktree writes only,
+// loopback network only, no private data or credentials), and jobs_submit requires the
+// runner:execute capability, an owned active workspace and a live claim on the worktree's
+// Issue. With MEMO_BRIDGE_JOB_SANDBOX=off a job is owner-equivalent.
 import { closeSync, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 

@@ -6,7 +6,14 @@
 // - the worktree belongs to the workspace's principal, and writes need an active workspace;
 // - repository writes need a live claim on the worktree's Issue (local mirror on every write;
 //   at commit and push, the ledger verifies worker, claim and fence immediately before);
-// - never the default branch, never main or master, never --force, never a merge;
+// - never the default branch, never main or master, never --force, never a merge; branch
+//   names are compared without case (APFS is case-insensitive: refs/heads/Main is the file
+//   refs/heads/main), and the remote's own default branch and branches are read with
+//   ls-remote before creating and before pushing, so a narrow fetch refspec hides nothing;
+// - a push only creates the remote branch or moves it from a commit this worktree pushed;
+// - the worktree's `.git` link must still point at the project's repository (a job could
+//   otherwise redirect the server's own Git commands to a repository and configuration it
+//   wrote);
 // - no shell: git runs with fixed argv arrays, hooks disabled (a model can write files a
 //   hook path could point to), external diff drivers and textconv disabled;
 // - every path stays inside the worktree after realpath, and never under .git;
@@ -17,12 +24,13 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { constants as fsConstants } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { projectInfo } from '../catalog.mjs';
 import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
-import { workerFor } from '../coordinator/index.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
-import { ownsWorkspace } from '../coordinator/policy.mjs';
+import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
+import { reconcileJob } from './jobs.mjs';
 
 export const LIMITS = Object.freeze({
   readBytes: 256 * 1024,
@@ -39,7 +47,13 @@ export const LIMITS = Object.freeze({
 
 export const WT_RE = /^wt_[A-Za-z0-9_-]{16}$/;
 const WS_RE = /^ws_[A-Za-z0-9_-]{16}$/;
-const PROTECTED = new Set(['main', 'master']);
+const PROTECTED = Object.freeze(['main', 'master']);
+// Remote heads listed by ls-remote are bounded; a remote with more is refused rather than guessed.
+const REMOTE_REFS_BYTES = 8 * 1024 * 1024;
+// Commits this worktree pushed, remembered so a later push only moves the remote branch from one of them.
+const PUSHED_KEEP = 50;
+// Active jobs block worktree_remove (they run inside the directory).
+const ACTIVE_JOB_STATUSES = Object.freeze(['queued', 'running']);
 const GIT_TIMEOUT_MS = 30_000;
 const NETWORK_TIMEOUT_MS = 120_000;
 
@@ -123,6 +137,23 @@ async function resolveExisting(root, rel) {
   return { real };
 }
 
+// Read a regular file without ever blocking: O_NONBLOCK so a FIFO swapped in after a check
+// cannot hang the server, then fstat on the opened descriptor. Returns null for anything that
+// is not a regular file of at most maxBytes.
+async function readRegular(path, maxBytes) {
+  let handle;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) return null;
+    return await handle.readFile();
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 export function worktreesRoot(env = process.env) {
   const override = env.MEMO_BRIDGE_WORKTREES_ROOT;
   if (override !== undefined && override !== '') return isAbsolute(override) ? resolve(override) : null;
@@ -182,6 +213,44 @@ async function refExists(cwd, ref, env) {
 async function currentBranch(cwd, env) {
   const r = await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { readOnly: true, env, maxBytes: 400 });
   return r.code === 0 ? out(r) : null;
+}
+
+// Branch names are compared without case: on APFS (case-insensitive) a loose ref
+// refs/heads/Main is the same file as refs/heads/main.
+const fold = name => String(name).toLowerCase();
+export function isProtectedBranch(branch, defaults = []) {
+  const folded = fold(branch);
+  return [...PROTECTED, ...defaults.filter(Boolean)].some(name => fold(name) === folded);
+}
+// Names in `names` equal to `name` once case is ignored (including `name` itself).
+const sameIgnoringCase = (names, name) => names.filter(other => fold(other) === fold(name));
+
+// Every local branch and remote-tracking ref of origin, full names.
+async function localRefs(cwd, env) {
+  const r = await runGit(cwd, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes/origin'],
+    { readOnly: true, env, maxBytes: REMOTE_REFS_BYTES });
+  if (r.code !== 0 || r.truncated) return null;
+  return out(r).split('\n').filter(Boolean);
+}
+
+// The remote's own view, asked over the network: its default branch (HEAD symref) and every
+// branch with its commit. A local fetch refspec narrowed to one branch (--single-branch,
+// --depth clones) would otherwise hide both.
+export function parseLsRemote(text) {
+  let head = null; const heads = new Map();
+  for (const line of String(text).split('\n')) {
+    const symref = /^ref: refs\/heads\/(\S+)\tHEAD$/.exec(line);
+    if (symref) { head = symref[1]; continue; }
+    const ref = /^([0-9a-f]{40}|[0-9a-f]{64})\trefs\/heads\/(\S+)$/.exec(line);
+    if (ref) heads.set(ref[2], ref[1]);
+  }
+  return { head, heads };
+}
+async function remoteBranches(cwd, env) {
+  const r = await runGit(cwd, ['ls-remote', '--symref', 'origin', 'HEAD', 'refs/heads/*'],
+    { readOnly: true, env, timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: REMOTE_REFS_BYTES });
+  if (r.code !== 0 || r.truncated) return null;
+  return parseLsRemote(r.stdout.toString('utf8'));
 }
 
 // The remote's default branch, from the local origin/HEAD, else origin/main or origin/master.
@@ -266,13 +335,19 @@ export function publicWorktree(w) {
   };
 }
 
-// Commit messages go out under the user's name: never with an AI attribution trailer.
+// Commit messages go out under the user's name: never with an AI attribution, as a trailer or
+// as prose ("Written by Claude", "Made with Claude Code", "AI-generated").
 const MESSAGE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
-const AI_ATTRIBUTION = [
-  /^\s*co-authored-by:.*\b(claude|anthropic|openai|chatgpt|gpt-?\d*|codex|copilot|gemini|cursor)\b/im,
-  /generated (with|by) .*\b(claude|chatgpt|codex|copilot|gemini|ai)\b/i,
+const AI_NAMES = '(?:claude(?:[ -]code)?|anthropic|openai|chat-?gpt|gpt[-\\d.o]*|codex|copilot|gemini|cursor|llms?|ai|an? (?:ai|llm|language model))';
+export const AI_ATTRIBUTION = Object.freeze([
+  // Any trailer (Co-authored-by, Signed-off-by, Assisted-by, Generated-by...) naming an assistant.
+  new RegExp(`^\\s*[a-z-]+-by:.*\\b${AI_NAMES}\\b`, 'im'),
+  // "Generated with/by", "Written by", "Made with", "Created using the help of"... an assistant.
+  new RegExp(`\\b(?:generated|written|created|made|authored|produced|assisted|built|drafted|co-?authored)\\s+(?:with|by|using|via|in|thanks to)\\s+(?:the\\s+)?(?:help\\s+of\\s+)?${AI_NAMES}\\b`, 'i'),
+  /\bai[- ](?:generated|assisted|written|authored)\b/i,
+  /noreply@anthropic\.com|claude\.(?:ai|com)\/(?:code|claude-code)/i,
   /\u{1F916}/u
-];
+]);
 function commitMessage(value) {
   if (typeof value !== 'string') return null;
   const text = value.replace(/\r\n/g, '\n').trim();
@@ -333,13 +408,38 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
     return held;
   }
 
-  // The worktree must still be on its own branch, which is never a protected one.
+  // The worktree must still be on its own branch, which is never a protected one (any case).
   async function onOwnBranch(root, row) {
     const branch = await currentBranch(root, env);
     if (branch !== row.branch) return { error: fail('branch_changed', 'the worktree is no longer on its branch') };
-    const base = await defaultBranch(root, env);
-    if (PROTECTED.has(branch) || branch === base) return { error: fail('protected_branch') };
+    if (isProtectedBranch(branch, [await defaultBranch(root, env)])) return { error: fail('protected_branch') };
     return { branch };
+  }
+
+  // The worktree directory, and proof that its `.git` link still points at this project's
+  // repository: a plain file "gitdir: <repo>/.git/worktrees/<name>". Anything else (a
+  // directory, a symlink, another repository) would make every Git command below run against
+  // a repository and configuration that someone else wrote.
+  async function locate(row) {
+    const located = await worktreeRoot(row);
+    if (located.error) return located;
+    const { root } = located;
+    const bad = { error: fail('worktree_link_changed', 'the worktree .git link no longer points at the project repository') };
+    try {
+      const link = join(root, '.git');
+      if (!(await lstat(link)).isFile()) return bad;
+      const text = await readRegular(link, 4096);
+      const match = text && /^gitdir: (\/.+)\n?$/.exec(text.toString('utf8'));
+      if (!match) return bad;
+      const gitdir = await realpath(match[1]);
+      if (basename(dirname(gitdir)) !== 'worktrees') return bad;
+      const info = await projectInfo(row.project_id, rt.catalogOptions);
+      if (!info.ok || !info.project.local_path) return bad;
+      if (dirname(dirname(gitdir)) !== await realpath(join(info.project.local_path, '.git'))) return bad;
+    } catch {
+      return bad;
+    }
+    return { root };
   }
 
   return {
@@ -394,9 +494,16 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const suffix = workspace.id.slice(3, 11).toLowerCase();
       const branch = args.branch ?? (issue ? `agent/${issue.number}-${suffix}` : `agent/ws-${suffix}`);
       if (!validBranch(branch)) return fail('invalid_input', 'branch');
-      if (PROTECTED.has(branch) || branch === defaultName) return fail('protected_branch');
-      if (await refExists(repoPath, `refs/heads/${branch}`, env)) return fail('branch_exists', 'local');
-      if (await refExists(repoPath, `refs/remotes/origin/${branch}`, env)) return fail('branch_exists', 'remote');
+      // Documented network call: the remote's own default branch and branches.
+      const remote = await remoteBranches(repoPath, env);
+      if (!remote) return fail('fetch_failed', 'ls-remote');
+      if (isProtectedBranch(branch, [defaultName, remote.head])) return fail('protected_branch');
+      // Any existing branch with the same name in another case is the same ref file on APFS.
+      const refs = await localRefs(repoPath, env);
+      if (!refs) return fail('git_failed', 'for-each-ref');
+      if (sameIgnoringCase(refs, `refs/heads/${branch}`).length) return fail('branch_exists', 'local');
+      if (sameIgnoringCase(refs, `refs/remotes/origin/${branch}`).length) return fail('branch_exists', 'remote');
+      if (sameIgnoringCase([...remote.heads.keys()], branch).length) return fail('branch_exists', 'remote');
 
       const baseRef = args.base ?? `origin/${defaultName}`;
       const baseCommit = await revParse(repoPath, baseRef, env);
@@ -446,7 +553,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
       const { row } = wt;
-      const located = await worktreeRoot(row);
+      const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
       const head = await revParse(root, 'HEAD', env);
@@ -472,10 +579,9 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
         if (!written || entry.status.includes('D')) { unknownChanges.push(entry.path); continue; }
         try {
           const real = await realpath(join(root, entry.raw));
-          const info = await stat(real);
-          if (!insideWorktree(root, real) || info.size > LIMITS.writeBytes || digest(await readFile(real)) !== written) {
-            modifiedAfterWrite.push(entry.path);
-          }
+          // Never blocks: a FIFO or device put in place of a written file is just "modified".
+          const content = insideWorktree(root, real) ? await readRegular(real, LIMITS.writeBytes) : null;
+          if (content === null || digest(content) !== written) modifiedAfterWrite.push(entry.path);
         } catch { modifiedAfterWrite.push(entry.path); }
       }
       const external = {
@@ -506,7 +612,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       if (!Number.isInteger(max) || max < 1 || max > LIMITS.listMax) return fail('invalid_input', 'limit');
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
-      const located = await worktreeRoot(wt.row);
+      const located = await locate(wt.row);
       if (located.error) return located.error;
       const { root } = located;
       if (rel) {
@@ -538,15 +644,18 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > LIMITS.readBytes) return fail('invalid_input', 'limit');
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
-      const located = await worktreeRoot(wt.row);
+      const located = await locate(wt.row);
       if (located.error) return located.error;
       const target = await resolveExisting(located.root, rel);
       if (target.error) return target.error;
-      const info = await stat(target.real);
-      if (!info.isFile()) return fail('not_a_file');
-      if (offset > info.size) return fail('invalid_input', 'offset');
-
-      const handle = await open(target.real, 'r');
+      if (!(await stat(target.real)).isFile()) return fail('not_a_file');
+      // O_NONBLOCK and a check on the opened descriptor: the entry may have been replaced by a
+      // FIFO since the check above, and opening a FIFO for reading would hang.
+      let handle;
+      try { handle = await open(target.real, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK); } catch { return fail('not_found'); }
+      const info = await handle.stat();
+      if (!info.isFile()) { await handle.close(); return fail('not_a_file'); }
+      if (offset > info.size) { await handle.close(); return fail('invalid_input', 'offset'); }
       try {
         // Binary detection on the head of the file, whatever the requested window.
         const head = Buffer.alloc(Math.min(8192, info.size));
@@ -584,7 +693,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const { row, workspace } = wt;
       const held = await liveClaim(row, workspace);
       if (held.error) return held.error;
-      const located = await worktreeRoot(row);
+      const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
       const own = await onOwnBranch(root, row);
@@ -643,7 +752,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       if (args.staged !== undefined && typeof args.staged !== 'boolean') return fail('invalid_input', 'staged');
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
-      const located = await worktreeRoot(wt.row);
+      const located = await locate(wt.row);
       if (located.error) return located.error;
       const { root } = located;
       // No external diff programs and no textconv filters: only git's own diff runs.
@@ -669,7 +778,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
-      const located = await worktreeRoot(row);
+      const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
       const own = await onOwnBranch(root, row);
@@ -689,7 +798,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       if (committed.code !== 0) return fail('git_failed', committed.timedOut ? 'commit timeout' : 'commit');
       const head = await revParse(root, 'HEAD', env);
       const shortstat = await runGit(root, ['show', '--shortstat', '--format=', '--no-ext-diff', 'HEAD'], { readOnly: true, env, maxBytes: 1024 });
-      await withTrack(rt, row.id, () => ({ head, written: {} })).catch(() => {});
+      await withTrack(rt, row.id, track => ({ ...track, head, written: {} })).catch(() => {});
       await write(repo => repo.updateWorktree(row.id, { updated_at: now() })).catch(() => {});
       return { ok: true, commit: head, branch: row.branch, summary: cleanLine(out(shortstat), 200) };
     },
@@ -698,13 +807,27 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
-      const located = await worktreeRoot(row);
+      const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
       const own = await onOwnBranch(root, row);
       if (own.error) return own.error;
       const head = await revParse(root, 'HEAD', env);
       if (!head) return fail('git_failed', 'HEAD');
+      // Ask the remote itself (network): its default branch and its branches. The local
+      // origin/HEAD can be missing or stale, and a narrow fetch refspec hides other branches.
+      const remote = await remoteBranches(root, env);
+      if (!remote) return fail('push_failed', 'ls-remote');
+      if (isProtectedBranch(row.branch, [remote.head, await defaultBranch(root, env)])) return fail('protected_branch');
+      const variants = sameIgnoringCase([...remote.heads.keys()], row.branch).filter(name => name !== row.branch);
+      if (variants.length) return fail('push_rejected', 'remote_case_variant');
+      // The remote branch must not exist yet, or be at a commit this worktree pushed: a push
+      // never takes over (fast-forwards) a branch someone else created or moved.
+      const existing = remote.heads.get(row.branch);
+      if (existing) {
+        const track = await readTrack(rt, row.id);
+        if (!(track.pushed ?? []).includes(existing)) return fail('push_rejected', 'remote_branch_not_ours');
+      }
       const held = await verifiedClaim(row, workspace);
       if (held.error) return held.error;
 
@@ -719,7 +842,8 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
         return fail('push_failed', pushed.timedOut ? 'timeout' : `exit ${pushed.code}`);
       }
       const remoteCommit = await revParse(root, `refs/remotes/origin/${row.branch}`, env);
-      await withTrack(rt, row.id, track => ({ ...track, head })).catch(() => {});
+      await withTrack(rt, row.id, track => ({ ...track, head, pushed: [...(track.pushed ?? []).filter(c => c !== head), head].slice(-PUSHED_KEEP) }))
+        .catch(() => {});
 
       // Durability is tracked by the Coordinator: a checkpoint under the workspace's claim.
       let checkpoint;
@@ -745,6 +869,13 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       if (wt.error) return wt.error;
       const { row } = wt;
       if (row.status === 'removed') return { ok: true, worktree: publicWorktree(row), already_removed: true };
+      if (args.discard_ignored !== undefined && typeof args.discard_ignored !== 'boolean') return fail('invalid_input', 'discard_ignored');
+      // A job runs inside the directory: cancel it first (job_cancel).
+      // Reconciled first: a job whose processes are gone does not block the removal.
+      const activeJobs = await write(repo => ACTIVE_JOB_STATUSES.flatMap(status =>
+        repo.listJobs({ workspace_id: row.workspace_id, status, limit: 1000 }).filter(job => job.worktree_id === row.id))
+        .map(job => reconcileJob(repo, job, now())).filter(job => ACTIVE_JOB_STATUSES.includes(job.status)));
+      if (activeJobs.length) return fail('job_active', `${activeJobs.length} job(s) queued or running in this worktree; cancel them with job_cancel`);
       const markRemoved = async detail => {
         const at = now();
         await write(repo => repo.updateWorktree(row.id, { status: 'removed', removed_at: at, updated_at: at }));
@@ -752,18 +883,30 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
         await trackFile(rt, row.id).then(file => rm(file, { force: true })).catch(() => {});
         return { ok: true, worktree: publicWorktree({ ...row, status: 'removed', removed_at: at }), ...(detail ? { detail } : {}) };
       };
-      let located = await worktreeRoot(row);
-      if (located.error) {
+      const located = await locate(row);
+      if (located.error?.error === 'worktree_missing') {
         // Deleted by hand: nothing left to lose here. Git's own administrative entry is left for
         // `git worktree prune`, which also touches other worktrees and is not run from here.
         return markRemoved('path was already gone');
       }
+      if (located.error) return located.error;
       const { root } = located;
       const changes = await statusEntries(root, env);
       if (!changes) return fail('git_failed', 'status');
       if (changes.count > 0) {
         const untracked = changes.entries.filter(e => e.status === '??').length;
         return fail('worktree_dirty', `${changes.count - untracked} modified, ${untracked} untracked`);
+      }
+      // Ignored files (.env, node_modules, build output) are not in the status above, and
+      // `git worktree remove` deletes them: only with explicit consent.
+      const ignored = await runGit(root, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'],
+        { readOnly: true, env, maxBytes: 256 * 1024 });
+      if (ignored.code !== 0 && !ignored.truncated) return fail('git_failed', 'ls-files');
+      const ignoredNames = ignored.stdout.toString('utf8').split('\0').filter(Boolean);
+      if (ignored.truncated) ignoredNames.pop();
+      if (ignoredNames.length && args.discard_ignored !== true) {
+        const shown = ignoredNames.slice(0, 10).map(name => cleanLine(name, 200)).join(', ');
+        return fail('ignored_files', `${ignoredNames.length}${ignored.truncated ? '+' : ''} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} would be deleted (${shown}${ignoredNames.length > 10 ? ', ...' : ''}); pass discard_ignored: true to delete them`);
       }
       const unpushed = await runGit(root, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], { readOnly: true, env, maxBytes: 100 });
       if (unpushed.code !== 0) return fail('git_failed', 'rev-list');
@@ -774,7 +917,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       // No --force: git itself refuses a worktree that became dirty in the meantime.
       const removed = await runGit(out(common), ['worktree', 'remove', '--', row.path], { env, maxBytes: 16 * 1024 });
       if (removed.code !== 0) return fail('git_failed', 'worktree remove');
-      return markRemoved();
+      return markRemoved(ignoredNames.length ? `${ignoredNames.length} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} deleted` : undefined);
     }
   };
 }

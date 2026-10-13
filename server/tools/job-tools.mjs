@@ -30,10 +30,13 @@ export function registerJobTools(server, getRuntime, options = {}) {
   server.registerTool('jobs_submit', {
     description: 'Run a predefined recipe (test, build or lint) in a worktree of your workspace, on this machine. ' +
       'The command is detected from the worktree (package.json scripts, Package.swift, pyproject.toml/pytest.ini, Cargo.toml, ' +
-      'go.mod, Makefile), never given by you. It runs the repository\'s own scripts on the owner\'s machine as the owner, ' +
-      'at lower priority, without a shell and without secret environment variables; it is not a sandbox. Requires an active ' +
-      'workspace you own, an active worktree of that workspace and a live claim on the worktree\'s Issue. The job keeps ' +
-      `running after this session ends. Timeout default ${TIMEOUT_SECONDS.default / 60} min, max ${TIMEOUT_SECONDS.max / 60} min. ` +
+      'go.mod, Makefile), never given by you. It runs the repository\'s own scripts on the owner\'s machine, at lower ' +
+      'priority and without a shell, inside the job sandbox: writes only to the worktree, loopback network only, no access ' +
+      'to private data or credentials, an allow-listed environment (refused with sandbox_unavailable where there is none; ' +
+      'with MEMO_BRIDGE_JOB_SANDBOX=off the owner runs jobs unsandboxed, owner-equivalent). Requires an active workspace you ' +
+      'own, an active worktree of that workspace and a live claim on the worktree\'s Issue, which the ledger confirms. The ' +
+      'job keeps running after this session ends, and stops when the claim is released or expires or the workspace closes. ' +
+      `Timeout default ${TIMEOUT_SECONDS.default / 60} min, max ${TIMEOUT_SECONDS.max / 60} min. ` +
       'At most MEMO_BRIDGE_MAX_JOBS (default 2) jobs run per host; beyond that the call fails with host_busy (no queue yet). ' +
       'Follow it with job_status, job_events and job_results.',
     inputSchema: z.object({

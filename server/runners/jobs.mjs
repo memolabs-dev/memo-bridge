@@ -5,11 +5,21 @@
 //
 // Execution model, in order:
 //   jobs_submit  -> job row 'queued', log file <stateDir>/jobs/<id>.log (0600), event 'submitted'
-//                -> spawns `node job-runner.mjs <stateDir> <jobId>` detached (own process group)
+//                -> spawns `node job-runner.mjs --protocol=<RUNNER_PROTOCOL> <stateDir> <jobId>`
+//                   detached (own process group)
 //   job-runner   -> CAS queued->running (pid of the job's process group), event 'started'
-//                -> succeeded | failed | timed_out, events 'exit' / 'timeout'
+//                -> runs the recipe inside the job sandbox (sandbox.mjs), follows every process
+//                   it starts (processes.mjs), stops it when the claim, the worktree or the
+//                   workspace goes away
+//                -> succeeded | failed | timed_out | cancelled, events 'exit' / 'timeout'
 //   job_cancel   -> SIGTERM to the job's process group, CAS ->cancelled, SIGKILL after 5 s
-//   any read     -> a running/queued job whose processes are all gone becomes 'interrupted'
+//   workspace_close, task_release, task_complete -> cancelActiveJobs (same as job_cancel)
+//   any read     -> a running/queued job whose processes are all gone becomes 'interrupted';
+//                   a running job past its timeout plus a grace is killed and 'timed_out'
+//                   (the runner itself may have been killed)
+//
+// Signals sent from here check the group leader's start time first (processes.mjs), so a
+// reused process group id never receives them.
 //
 // Bundled build: index.mjs is bundled into plugin/server/dist/. The runner is resolved as
 // './job-runner.mjs' next to the file that contains this code, so the bundle must ship
@@ -18,13 +28,24 @@
 //
 // Queueing is a later phase: when the host already runs its maximum number of jobs,
 // jobs_submit refuses with host_busy instead of waiting.
+//
+// Version skew: `npm run install:local` replaces job-runner.mjs under servers that are still
+// running. The runner protocol is passed first on the runner's command line; a runner refuses
+// a job launched with another protocol, and a runner older than the protocol argument reads
+// it as its state directory and refuses too (not absolute). Bump it on any change to the job
+// rows, the job events or the runner's arguments.
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ownsWorkspace } from '../coordinator/policy.mjs';
+import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
+import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { signalJobGroup } from './processes.mjs';
 import { RECIPE_NAMES, detectRecipes } from './recipes.mjs';
+import { sandboxMode } from './sandbox.mjs';
+
+export const RUNNER_PROTOCOL = 2;
 
 export const JOB_ID_RE = /^job_[A-Za-z0-9_-]{16}$/;
 const WS_RE = /^ws_[A-Za-z0-9_-]{16}$/;
@@ -35,6 +56,9 @@ export const JOB_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'fa
 const ACTIVE = new Set(['queued', 'running']);
 export const TIMEOUT_SECONDS = Object.freeze({ default: 15 * 60, min: 1, max: 60 * 60 });
 export const KILL_GRACE_MS = 5000;
+// A running job past timeout + this grace is killed by the next read, in case its runner died
+// (or was killed) and can no longer enforce the timeout itself.
+export const DEADLINE_GRACE_MS = KILL_GRACE_MS + 30_000;
 export const LOG_CAP_BYTES = 5 * 1024 * 1024;
 export const RESULTS = Object.freeze({ defaultLines: 100, maxLines: 400, maxBytes: 64 * 1024 });
 const MAX_LIST = 200;
@@ -45,7 +69,8 @@ const QUEUED_GRACE_MS = 60_000;
 export const DEFAULT_RUNNER_PATH = fileURLToPath(new URL('./job-runner.mjs', import.meta.url));
 
 // Results the model sees as refusals rather than faults; both are journaled.
-const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_removed', 'wrong_host', 'no_live_claim', 'host_busy']);
+const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_removed', 'wrong_host', 'no_live_claim', 'host_busy',
+  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied']);
 
 const newJobId = () => `job_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -152,11 +177,36 @@ function runnerPidOf(repo, jobId) {
   return pid;
 }
 
-// Report a job whose processes are all gone as interrupted. Runs inside a write
-// transaction; the CAS on status means a runner that finishes at the same moment wins.
-export function reconcileJob(repo, job, at, { alive = processAlive, aliveGroup = groupAlive } = {}) {
+// Start time of the job's group leader, recorded by the runner in its 'started' event.
+export function leaderStartOf(repo, jobId) {
+  for (const e of repo.listJobEvents(jobId, 0, 20)) {
+    if (e.kind !== 'started') continue;
+    const d = parseDetail(e.detail);
+    if (typeof d?.pid_start === 'string') return d.pid_start;
+  }
+  return null;
+}
+
+// Signal a job's process group, only if it is still that job's group.
+function signalJob(repo, job, signal, signalFn = signalJobGroup) {
+  return Number.isInteger(job.pid) ? signalFn(job.pid, leaderStartOf(repo, job.id), signal) : false;
+}
+
+// Report a job whose processes are all gone as interrupted, and stop a running job past its
+// deadline (timeout + grace) as timed_out. Runs inside a write transaction; the CAS on status
+// means a runner that finishes at the same moment wins.
+export function reconcileJob(repo, job, at, { alive = processAlive, aliveGroup = groupAlive, signal = signalJobGroup } = {}) {
   if (!ACTIVE.has(job.status)) return job;
   const runnerPid = runnerPidOf(repo, job.id);
+  if (job.status === 'running' && Number.isInteger(job.started_at) && at > job.started_at + job.timeout_ms + DEADLINE_GRACE_MS) {
+    // The runner should have stopped it long ago: it is gone or stuck. Kill the group; a live
+    // runner sees the status change and also kills every process it tracks.
+    signalJob(repo, job, 'SIGKILL', signal);
+    const patch = { status: 'timed_out', ended_at: at, summary: job.summary ?? 'deadline_exceeded' };
+    if (!repo.updateJob(job.id, patch, 'running')) return repo.getJob(job.id);
+    repo.appendJobEvent({ job_id: job.id, at, kind: 'timeout', detail: JSON.stringify({ by: 'deadline', timeout_seconds: Math.round(job.timeout_ms / 1000) }) });
+    return { ...job, ...patch };
+  }
   if (job.status === 'running') {
     if (aliveGroup(job.pid) || (runnerPid !== null && alive(runnerPid))) return job;
   } else {
@@ -170,23 +220,50 @@ export function reconcileJob(repo, job, at, { alive = processAlive, aliveGroup =
 }
 
 // A live claim in the local mirror: claimed, on this Issue, not expired.
-function liveClaim(repo, workspaceId, issueRef, at) {
+export function liveClaim(repo, workspaceId, issueRef, at) {
   if (!issueRef) return null;
   return repo.claimsOf(workspaceId, 'claimed')
     .find(c => c.issue_ref === issueRef && Date.parse(c.expires_at) > at) ?? null;
 }
 
+// Cancel the active jobs of a workspace (all of them, or those on worktrees of one Issue) when
+// the workspace closes or the claim is released. Runs inside a write transaction; returns what
+// stopCancelledJobs needs to signal them once the transaction is committed. The runner also
+// notices the status change within a second and stops every process of the job.
+export function cancelActiveJobs(repo, { workspaceId, issueRef = null }, at, by) {
+  const stopped = [];
+  for (const status of ACTIVE) {
+    for (const job of repo.listJobs({ workspace_id: workspaceId, status, limit: 1000 })) {
+      if (issueRef && repo.getWorktree(job.worktree_id)?.issue_ref !== issueRef) continue;
+      if (!repo.updateJob(job.id, { status: 'cancelled', ended_at: at }, status)) continue;
+      repo.appendJobEvent({ job_id: job.id, at, kind: 'cancelled', detail: JSON.stringify({ from: status, by, reason: issueRef ? 'claim_released' : 'workspace_closed' }) });
+      stopped.push({ job_id: job.id, pid: job.pid ?? null, pid_start: leaderStartOf(repo, job.id) });
+    }
+  }
+  return stopped;
+}
+
+// SIGTERM now and SIGKILL after the grace, each only while the group is still the job's.
+export function stopCancelledJobs(stopped, { killGraceMs = KILL_GRACE_MS, signal = signalJobGroup } = {}) {
+  for (const job of stopped) {
+    if (!Number.isInteger(job.pid)) continue;
+    signal(job.pid, job.pid_start, 'SIGTERM');
+    setTimeout(() => signal(job.pid, job.pid_start, 'SIGKILL'), killGraceMs).unref();
+  }
+}
+
 // ---------------------------------------------------------------------------------------
 
 export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePath = process.execPath,
-  maxJobs = maxJobsFromEnv(), killGraceMs = KILL_GRACE_MS, spawnRunner } = {}) {
+  maxJobs = maxJobsFromEnv(), killGraceMs = KILL_GRACE_MS, spawnRunner, env = process.env } = {}) {
   const read = fn => rt.store().transaction(repo => fn(repo, rt.now()), { write: false });
   const write = fn => rt.store().transaction(repo => fn(repo, rt.now()));
 
   const launch = spawnRunner ?? ((stateDir, jobId) => new Promise(resolve => {
     let child;
     try {
-      child = spawn(nodePath, [runnerPath, stateDir, jobId], { detached: true, stdio: 'ignore', cwd: stateDir, env: process.env });
+      child = spawn(nodePath, [runnerPath, `--protocol=${RUNNER_PROTOCOL}`, stateDir, jobId],
+        { detached: true, stdio: 'ignore', cwd: stateDir, env });
     } catch (error) {
       return resolve({ ok: false, error: String(error?.code ?? 'spawn_failed') });
     }
@@ -251,6 +328,18 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       if (worktree.status !== 'active') return journal(op, fail('worktree_removed'), issueIds);
       if (worktree.host !== rt.host) return journal(op, fail('wrong_host', worktree.host), issueIds);
       if (!context.claim) return journal(op, fail('no_live_claim', worktree.issue_ref ? 'claim expired or released' : 'worktree has no issue'), issueIds);
+      // Jobs run only inside the job sandbox, unless the owner switched it off.
+      const sandbox = sandboxMode(env);
+      if (!sandbox.ok) return journal(op, fail(sandbox.error, sandbox.detail), issueIds);
+      // Running code is a write boundary like a commit: the ledger confirms the lease is still
+      // this workspace's (the local mirror only knows about expiry).
+      let verified;
+      try {
+        verified = await rt.ledger.verify(parseIssueRef(worktree.issue_ref), workerFor(workspace), context.claim.claim_id, context.claim.fence_sha);
+      } catch {
+        verified = null;
+      }
+      if (!verified?.ok) return journal(op, verified?.error ? fail(verified.error, verified.detail) : fail('ledger_unavailable'), issueIds);
 
       let cwd;
       try {
@@ -403,18 +492,19 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
         const job = repo.getJob(found.job.id);
         if (!ACTIVE.has(job.status)) return { finished: job };
         // Signal first, then record: the runner sees 'cancelled' and escalates to SIGKILL too.
-        if (job.status === 'running') signalGroup(job.pid, 'SIGTERM');
+        if (job.status === 'running') signalJob(repo, job, 'SIGTERM');
         if (!repo.updateJob(job.id, { status: 'cancelled', ended_at: at }, job.status)) return { finished: repo.getJob(job.id) };
         repo.appendJobEvent({ job_id: job.id, at, kind: 'cancelled', detail: JSON.stringify({ from: job.status, by: rt.principal.id }) });
-        return { cancelled: { ...job, status: 'cancelled', ended_at: at } };
+        return { cancelled: { ...job, status: 'cancelled', ended_at: at }, pidStart: leaderStartOf(repo, job.id) };
       });
       if (outcome.finished) {
         return journal(op, fail('job_finished', outcome.finished.status), ids);
       }
       const job = outcome.cancelled;
       if (job.pid) {
-        // Escalation from this process too, in case the runner itself is gone.
-        setTimeout(() => { if (groupAlive(job.pid)) signalGroup(job.pid, 'SIGKILL'); }, killGraceMs).unref();
+        // Escalation from this process too, in case the runner itself is gone; never to a
+        // group id that has been reused since.
+        setTimeout(() => signalJobGroup(job.pid, outcome.pidStart, 'SIGKILL'), killGraceMs).unref();
       }
       return journal(op, { ok: true, job: publicJob(job) }, ids);
     }

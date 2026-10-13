@@ -83,7 +83,10 @@ const transport = new StdioClientTransport({
   cwd: process.cwd(),
   env: { ...gitEnv, MEMO_BRIDGE_PROJECTS_ROOT: root, MEMO_BRIDGE_STATE_DIR: join(root, 'state'),
     MEMO_BRIDGE_WORKTREES_ROOT: join(root, 'worktrees'), MEMO_BRIDGE_GOVERNANCE_ROOT: GOVERNANCE_ROOT,
-    PATH: `${FAKE_GH_DIR}:${process.env.PATH}`, FAKE_GH_STATE: githubState }
+    PATH: `${FAKE_GH_DIR}:${process.env.PATH}`, FAKE_GH_STATE: githubState,
+    // Jobs run inside the macOS job sandbox; there is none on Linux CI, where the smoke runs the
+    // test recipe unsandboxed (the owner's explicit opt-out).
+    ...(process.platform === 'darwin' ? {} : { MEMO_BRIDGE_JOB_SANDBOX: 'off' }) }
 });
 const call = async (name, args = {}) => {
   const response = await client.callTool({ name, arguments: args });

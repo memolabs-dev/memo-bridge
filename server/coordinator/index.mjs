@@ -14,7 +14,8 @@ import { readFile } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { join } from 'node:path';
 import { projectInfo, readProjectRegistry } from '../catalog.mjs';
-import { authorize, ownsWorkspace } from './policy.mjs';
+import { authorize, ownsWorkspace, workerFor } from './policy.mjs';
+import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
 
@@ -230,9 +231,8 @@ export function defaultHost() {
   return platform() === 'darwin' ? 'mac' : 'vps';
 }
 
-// The worker identity recorded in the ledger. It is derived from the workspace, so another
-// workspace, even of the same principal, can never act on this claim.
-export const workerFor = workspace => `mb.${workspace.host}.${workspace.id}`;
+// The worker identity recorded in the ledger (defined in policy.mjs, re-exported here).
+export { workerFor };
 
 export function createCoordinator({ store, principal, ledger, now = Date.now, catalogOptions = {},
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
@@ -313,11 +313,22 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
 
   // task_release and task_complete: release a held claim with an outcome. Allowed on a closed
   // workspace too, so a claim left behind can always be given back.
+  // Jobs never outlive the claim they were submitted under: releasing or completing a task
+  // cancels the workspace's active jobs on that Issue's worktrees, closing a workspace cancels
+  // all of its jobs. The runner also stops a job by itself once its claim is gone.
+  async function cancelJobs(workspaceId, issueRef = null) {
+    const stopped = await write((repo, at) => cancelActiveJobs(repo, { workspaceId, issueRef }, at, principal.id));
+    stopCancelledJobs(stopped);
+    return stopped.map(j => j.job_id);
+  }
+
   async function releaseHeld(args, outcome, summary) {
     const held = await heldClaim(args, { requireActive: false });
     if (held.error) return held.error;
     if (held.claim.state === 'released') {
-      return { ok: true, issue: held.issue.ref, released: true, ...publicOutcome(held.claim.outcome) };
+      const cancelled = await cancelJobs(held.workspace.id, held.issue.ref);
+      return { ok: true, issue: held.issue.ref, released: true, ...publicOutcome(held.claim.outcome),
+        ...(cancelled.length ? { cancelled_jobs: cancelled } : {}) };
     }
     const result = await ledger.release(held.issue, workerFor(held.workspace), args.claim_id, args.fence, outcome);
     let fence;
@@ -328,7 +339,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     } else return result;
     await write((repo, at) => repo.updateClaim(args.claim_id, { state: 'released', outcome: encodeOutcome(outcome, summary),
       fence_sha: fence ?? held.claim.fence_sha, updated_at: at }, held.claim.fence_sha));
-    return { ok: true, issue: held.issue.ref, released: true, outcome, ...(summary ? { summary } : {}) };
+    const cancelled = await cancelJobs(held.workspace.id, held.issue.ref);
+    return { ok: true, issue: held.issue.ref, released: true, outcome, ...(summary ? { summary } : {}),
+      ...(cancelled.length ? { cancelled_jobs: cancelled } : {}) };
   }
   const publicOutcome = stored => {
     const { outcome, summary } = decodeOutcome(stored);
@@ -439,10 +452,13 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     async workspaceClose(args) {
       const ws = await ownedWorkspace(args.workspace_id, { requireActive: false });
       if (ws.error) return ws.error;
-      // Close first, so no new claim can be recorded for this workspace from now on.
-      await write((repo, at) => {
+      // Close first, so no new claim can be recorded for this workspace from now on, and cancel
+      // its jobs in the same transaction: no job runs on for a closed workspace.
+      const stopped = await write((repo, at) => {
         if (ws.workspace.status !== 'closed') repo.updateWorkspace(ws.workspace.id, { status: 'closed', closed_at: at, updated_at: at });
+        return cancelActiveJobs(repo, { workspaceId: ws.workspace.id }, at, principal.id);
       });
+      stopCancelledJobs(stopped);
       const claims = await read(repo => repo.claimsOf(ws.workspace.id, 'claimed'));
       const released = []; const lost = []; const unreleased = [];
       for (const claim of claims) {
@@ -454,7 +470,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         (outcome.state === 'released' ? released : lost).push(claim.issue_ref);
       }
       const workspace = await read(repo => repo.getWorkspace(ws.workspace.id));
-      return { ok: true, workspace: publicWorkspace(workspace), released, lost, unreleased };
+      return { ok: true, workspace: publicWorkspace(workspace), released, lost, unreleased,
+        ...(stopped.length ? { cancelled_jobs: stopped.map(j => j.job_id) } : {}) };
     },
 
     // Read-only snapshot for a session that lost its context: what it holds according to the
