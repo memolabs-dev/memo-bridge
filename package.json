@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Read-only multi-host MCP for Memo Labs \u2014 local Mac and reachable Netcup VPS",
+  "description": "Read-only multi-host MCP for Memo Labs — local Mac and reachable Netcup VPS",
   "scripts": {
     "build": "esbuild server/index.mjs --bundle --platform=node --format=esm --target=node22 --outfile=plugin/server/dist/index.mjs",
     "test": "node --test tests/*.test.mjs",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
+    "jose": "^6.2.12",
     "ws": "^8.22.0",
     "zod": "^4.0.0"
   },

@@ -5,14 +5,16 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { McpServer, WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
 import { bearerValid, nonce, verifyChallenge, keyFingerprint } from './crypto.mjs';
+import { oidcGuard } from './oidc.mjs';
 
 const tags = {readOnlyHint:true, destructiveHint:false,idempotentHint:true,openWorldHint:false};
 const result = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
 const MAX_HTTP_BYTES = 64 * 1024;
 
-export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, port=9443, bind='127.0.0.1', audit=()=>{} }) {
+export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, oidc=null, port=9443, bind='127.0.0.1', audit=()=>{} }) {
   if (!tlsKey || !tlsCert) throw new Error('TLS is mandatory');
-  if (!/^[0-9a-f]{64}$/.test(tokenSha256)) throw new Error('Invalid bearer token digest');
+  const guard = oidc ? oidcGuard(oidc) : null;
+  if (!guard && !/^[0-9a-f]{64}$/.test(tokenSha256)) throw new Error('Invalid bearer token digest');
   const permitted = new Map(Object.entries(allowedAgentKeys || {}).filter(([host])=>['mac','vps'].includes(host)));
   const agents = new Map();
   const pending = new Map();
@@ -79,7 +81,7 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, port
     const mcp=new McpServer({name:'memo-bridge-hub',version:'0.2.0'},{instructions:'Read-only inventory of owner-enrolled Mac and VPS; no arbitrary commands.'});
     mcp.registerTool('list_hosts',{description:'Show authenticated and connected Mac/VPS agents',inputSchema:z.object({}),annotations:tags},async()=>result(inventory()));
     mcp.registerTool('host_status',{description:'Get fixed, read-only host information',inputSchema:z.object({host:z.enum(['mac','vps'])}),annotations:tags},async({host})=>result(await requestAgent(host,'host_status')));
-    mcp.registerTool('bridge_info',{description:'Show current security and feature limitations',inputSchema:z.object({}),annotations:tags},async()=>result({mode:'read-only',transport:'https private-loopback',agent_transport:'authenticated-wss',oauth_connected:false,public_exposure:false,tools:['list_hosts','host_status','bridge_info']}));
+    mcp.registerTool('bridge_info',{description:'Show current security and feature limitations',inputSchema:z.object({}),annotations:tags},async()=>result({mode:'read-only',transport:'https private-loopback',agent_transport:'authenticated-wss',oauth_resource_guard:!!guard,oauth_connected:false,public_exposure:false,tools:['list_hosts','host_status','bridge_info']}));
     return mcp;
   }
   async function handleMcp(req,res) {
@@ -108,10 +110,14 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, port
     if (path==='/health' && req.method==='GET'){
       res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end('{"status":"ok"}');return;
     }
+    if (guard && path==='/.well-known/oauth-protected-resource' && req.method==='GET') {
+      res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify(guard.resourceMetadata));return;
+    }
     if (path!=='/mcp'){res.writeHead(404).end();return;}
-    if(!bearerValid(req.headers.authorization,tokenSha256)){
+    const valid = guard ? await guard.accepts(req.headers.authorization) : bearerValid(req.headers.authorization,tokenSha256);
+    if(!valid){
       record('owner_auth_denied',null);
-      res.writeHead(401,{'www-authenticate':'Bearer realm="memo-bridge"', 'cache-control':'no-store'}).end();return;
+      res.writeHead(401,{'www-authenticate':guard?.challenge || 'Bearer realm="memo-bridge"', 'cache-control':'no-store'}).end();return;
     }
     record('mcp_request',null);
     await handleMcp(req,res);
