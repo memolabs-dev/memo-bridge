@@ -1,4 +1,4 @@
-# Memo Coordinator, contract v1
+# Memo Coordinator, contract v2
 
 The Coordinator is the part of Memo Bridge that lets several AI sessions work in parallel without overlapping. It is an internal module, not a second MCP server.
 
@@ -6,32 +6,78 @@ It follows the ownership decided on 2026-10-13 (Vault `1-Projects/memo-labs-os.m
 
 | Concern | Owner | Memo Bridge's role |
 |---|---|---|
-| Work items | GitHub Issues | exposes them |
+| Work items (tasks) | GitHub Issues | exposes them |
 | Reservation shared by every machine | Git-ref lease ledger in `memolabs-dev/.github` (`scripts/issue_lease.py`, `docs/star-issue-lease-v1.md`) | runs it; never reimplements it |
 | Which session works, under which identity | this module | workspaces; the worker identity is derived by the server |
 | Proof that work can be resumed elsewhere | this module | Git-verified checkpoints |
-| Who did what | this module | append-only audit journal |
+| Who did what | this module writes the journal; `audit_events` and `audit_operation` (`server/tools/audit-tools.mjs`) read it | append-only audit journal |
 | Merge | `memolabs-dev/.github` landing contract | none: agents never merge |
+
+The Mac runner that does the work of a claimed task (worktrees, files, jobs, push, pull requests) is described in `docs/RUNNER.md`.
+
+**A task is a GitHub Issue.** Tools say "task"; the argument that names one stays `issue`, written `owner/repo#n` (for example `memolabs-dev/drop#7`).
+
+## Tools
+
+| Tool | Capability | Contract |
+|---|---|---|
+| `workspace_open({project, client_type?, client_label?, host?, branch?})` | `coordinator:write` | Opens a per-session work context for one registered project; returns `workspace_id` and the server-derived `worker`. |
+| `workspace_status({workspace_id})` | `coordinator:read` | The workspace and the claims its local mirror records as held. |
+| `workspace_list({status?, limit?})` | `coordinator:read` | Your workspaces, newest first (at most 200). |
+| `workspace_close({workspace_id})` | `coordinator:write` | Closes the workspace, then releases its claims (outcome `cancelled`). Safe to repeat. |
+| `workspace_recover({workspace_id})` | `coordinator:read` | Read-only resumption snapshot: claims reconciled with the ledger, active worktrees, last 10 checkpoints, recent jobs, next safe actions. |
+| `tasks_list({project?, limit?})` | `coordinator:read` | Claimable tasks of registered and allowlisted repositories, ranked p0, p1, p2, then oldest first (default 30, at most 100). |
+| `task_status({issue})` | `coordinator:read` | Shared lease state of one task (holder, expiry, current fence) and its checkpoints. |
+| `task_claim({workspace_id, issue, ttl_seconds?})` | `coordinator:write` | Reserves the task through the ledger; returns `claim_id`, `fence`, `epoch`, `expires_at`. |
+| `task_renew({workspace_id, issue, claim_id, fence, ttl_seconds?})` | `coordinator:write` | Extends the lease (60 to 1800 s, default 300); returns a new fence. |
+| `task_checkpoint({workspace_id, issue, claim_id, fence, branch, commit, note?})` | `coordinator:write` | Records a Git-verified checkpoint under a live claim. |
+| `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `completed`, `blocked`, `failed` or `cancelled`, also from a closed workspace. |
+| `task_complete({workspace_id, issue, claim_id, fence, summary?})` | `coordinator:write` | `task_release` with outcome `completed` and an optional plain-text summary (at most 2000 characters) kept with the claim. |
+
+Every tool name is also the policy operation (`server/coordinator/policy.mjs`, `OPERATION_CAPABILITY`) and the `op` written to the audit journal. The pre-v2 names (`issue_status`, `issue_claim`, `issue_heartbeat`, `issue_release`, `issue_checkpoint`, `coordinator_events`) no longer exist and are never authorized.
 
 ## Flow for a client
 
 1. `projects_list` to find the canonical project name.
 2. `workspace_open({project, client_type, client_label})`. Keep `workspace_id` for the whole session. MCP is stateless, so the workspace is always passed explicitly.
-3. Pick an open GitHub Issue of that project, labelled `agent:ready` with exactly one `priority:*` label.
-4. `issue_claim({workspace_id, issue: "owner/repo#n"})`. It returns `claim_id`, `fence`, `epoch` and `expires_at`.
-5. Work in your own branch or worktree. Call `issue_heartbeat` before `expires_at`. Each heartbeat returns a new fence: always send the latest one.
-6. Push, then `issue_checkpoint({..., branch, commit})`. Only `durability: "remote"` lets another machine resume.
-7. `issue_release({..., outcome})` with `completed`, `blocked`, `failed` or `cancelled`. Then `workspace_close`.
+3. `tasks_list({project})` to pick a task. It only lists open Issues the ledger would accept; the ledger still decides at claim time.
+4. `task_claim({workspace_id, issue: "owner/repo#n"})`. It returns `claim_id`, `fence`, `epoch` and `expires_at`.
+5. Work in your own branch or worktree. Call `task_renew` before `expires_at`. Each renewal returns a new fence: always send the latest one.
+6. Push, then `task_checkpoint({..., branch, commit})`. Only `durability: "remote"` lets another machine resume.
+7. `task_complete({..., summary})`, or `task_release({..., outcome})` with `blocked`, `failed` or `cancelled`. Then `workspace_close`.
+
+A session that lost its context (compaction, crash, new conversation) calls `workspace_recover({workspace_id})` first. It never writes, not even to repair the local mirror.
+
+## tasks_list
+
+- **Claimable** means what the ledger's preflight (`scripts/issue_preflight.py`) accepts: an open Issue (not a pull request), labelled `agent:ready`, with exactly one of `priority:p0`, `priority:p1`, `priority:p2`, and none of `status:blocked`, `needs:human`, `type:epic`, `agent:working`.
+- **Repositories searched** are the intersection of two sets. The first is the GitHub origin (`git remote get-url origin`) of each registered project of `PROJECTS.md` available on this host. The second is the ledger allowlist, `PUBLIC_ALLOWLIST` in `<governance root>/scripts/issue_preflight.py`, read as text with a strict parser and never executed; any unexpected entry makes the whole read fail closed (`ledger_unavailable`). The result lists the repositories searched and, in `not_allowed`, registered projects whose origin is not allowlisted.
+- **GitHub call.** `gh api -X GET search/issues` with a fixed query, `is:issue is:open label:"agent:ready" repo:<owner/repo> ...`, sorted by creation date ascending, 100 results per call, at most 10 repositories per call and 5 calls. The other filters and the ranking are applied by Memo Bridge. `truncated: true` means GitHub had more results than were read, or more tasks matched than `limit`.
+- **Text from GitHub** (titles, labels) is stripped of control, zero-width and bidi characters and bounded (titles 200 characters) before it is returned.
+- **Lease state is not included**: it costs one ledger call per Issue. `task_status` gives it for one task, and `task_claim` is the authority.
+
+## workspace_recover
+
+For each claim the local mirror records as held (the 10 most recent, newest first), the ledger status is read and compared with the worker and claim id of this workspace:
+
+| State | Meaning | Safe action |
+|---|---|---|
+| `still_held` | The live lease is ours. `fence` and `expires_at` come from the ledger, and `local_fence` from the mirror: a renewal whose answer was lost shows up here | continue with the ledger `fence`, renew before `expires_at` |
+| `expired` | Our lease, past its expiry | stop writing; `task_status`, then `task_claim` again if the Issue is still ready |
+| `lost` | Released, or held by another worker | do not write; pick another task |
+| `unknown` | The ledger could not be read | do not write until `task_status` confirms |
+
+The snapshot also returns the active worktrees of the workspace, the 10 latest checkpoints of every task this workspace claimed (from any workspace, so a commit pushed from the other machine is visible), the 10 latest jobs, and `next_actions`: short sentences (at most 20, 300 characters each) derived from the above. Local paths (worktree path, job log) are never returned, and job summaries are sanitized and bounded.
 
 ## Guarantees and their source
 
 - **One holder per Issue, across every machine.** The ledger creates the lease ref atomically and advances it only by fast-forward. Two racing claims cannot both succeed. Tested with eight processes in `tests/coordinator-concurrency.test.mjs`, and against the real GitHub API in `memolabs-dev/.github` (`docs/star-issue-lease-live-proof-20261013.md`).
-- **Stale writers are refused.** Heartbeat, checkpoint and release require the same worker, the same claim, the current fence and an unexpired lease. Any mismatch returns `stale_lease`, including when nobody has taken the Issue over. The fence is not a secret, since `issue_status` shows it. It detects stale views; the protection against other sessions is the worker identity, which the server derives.
+- **Stale writers are refused.** Renewal, checkpoint and release require the same worker, the same claim, the current fence and an unexpired lease. Any mismatch returns `stale_lease`, including when nobody has taken the Issue over. The fence is not a secret, since `task_status` shows it. It detects stale views; the protection against other sessions is the worker identity, which the server derives.
 - **The worker identity comes from the server.** It is `mb.<host>.<workspace_id>`, never a tool argument. Another workspace, even of the same principal, cannot act on the claim: it gets `unknown_claim` locally and a refusal from the ledger.
 - **Governance gates are the ledger's.** They cover the public repository allowlist, the open Issue with `agent:ready` and one priority, no blocking label (`status:blocked`, `needs:human`, `type:epic`, `agent:working`), and an Issue that has not changed since the claim. When the workspace project's Git origin is known, Memo Bridge also refuses an Issue from another repository (`project_mismatch`). Otherwise the claim reports `project_origin_verified: false`.
 - **Checkpoints are a write boundary.** The Git checks run first. The ledger then re-verifies the claim, and the checkpoint is recorded right after.
-- **Uncertain outcomes are reconciled, never ignored.** When a claim, heartbeat or release may have reached GitHub without its result coming back (timeout, crash), Memo Bridge reads the lease status and adopts its own lease. This applies to a claim it holds without having seen the result, and to a fence it never saw. The ledger runs in its own process group, so a timeout kills `gh` too and nothing can land afterwards.
-- **Closing is safe to repeat.** `workspace_close` closes the workspace first, so no new claim can be recorded for it. It then releases every claim still recorded as held. Each claim is reported as `released`, `lost` (no longer ours) or `unreleased` (ledger unreachable: call `workspace_close` again or `issue_release` later). `issue_release` also works on a closed workspace.
+- **Uncertain outcomes are reconciled, never ignored.** When a claim, renewal or release may have reached GitHub without its result coming back (timeout, crash), Memo Bridge reads the lease status and adopts its own lease. This applies to a claim it holds without having seen the result, and to a fence it never saw. The ledger runs in its own process group, so a timeout kills `gh` too and nothing can land afterwards.
+- **Closing is safe to repeat.** `workspace_close` closes the workspace first, so no new claim can be recorded for it. It then releases every claim still recorded as held. Each claim is reported as `released`, `lost` (no longer ours) or `unreleased` (ledger unreachable: call `workspace_close` again or `task_release` later). `task_release` and `task_complete` also work on a closed workspace.
 - **Leases are cooperative.** They do not stop an IDE or a plain `git` command. That is why checkpoints check the commit in Git rather than trusting the client.
 
 ## Identity and authorization
@@ -40,10 +86,10 @@ The principal comes from the entry point, never from tool arguments.
 
 | Entry point | Principal | Capabilities |
 |---|---|---|
-| Local stdio plugin | `local:<OS user>` | `coordinator:read`, `coordinator:write`, `coordinator:audit` |
+| Local stdio plugin | `local:<OS user>` | every capability of `policy.mjs` (`coordinator:*`, `runner:execute`, `repo:write`, `github:write`) |
 | Hub (later) | derived from the verified OIDC `sub` and its scopes | mapped per scope |
 
-Authorization is checked before argument validation, so every refusal is journaled. A workspace can only be read or used by its principal. `coordinator_events` returns only the caller's events unless the caller holds `coordinator:audit`.
+Authorization is checked before argument validation, so every refusal is journaled. Write operations journal every outcome (`ok`, `denied`, `error`); read operations journal only refusals. A workspace can only be read or used by its principal. The journal is read with `audit_events` and `audit_operation`, which return only the caller's events unless the caller holds `coordinator:audit`.
 
 ## Errors
 
@@ -61,9 +107,12 @@ Every result is `{ ok: true, ... }` or `{ ok: false, error, detail? }`.
 | `stale_lease` | The fence, worker or expiry does not match the current lease |
 | `issue_not_ready` | The Issue is closed, not `agent:ready`, blocked, or has no single priority label |
 | `issue_changed` | The Issue was edited after the claim; re-plan before writing |
-| `repo_not_allowed` | The repository is not in the ledger's public allowlist |
-| `ledger_unavailable` | The ledger or GitHub cannot be reached. For a claim, the lease status was checked and nothing is held |
-| `ledger_outcome_unknown` | A claim, heartbeat or release may or may not have landed, and the status could not be read; check `issue_status` |
+| `repo_not_allowed` | The repository is not in the ledger's public allowlist (from `task_claim`, or `tasks_list` with a `project`) |
+| `project_origin_unknown` | `tasks_list` with a `project` whose GitHub origin cannot be read on this host |
+| `github_unavailable` | The GitHub search behind `tasks_list` failed (gh missing, not logged in, timeout, unexpected answer) |
+| `catalog_unavailable` | `PROJECTS.md` cannot be read, so `tasks_list` has no project to search |
+| `ledger_unavailable` | The ledger or GitHub cannot be reached. For a claim, the lease status was checked and nothing is held. For `tasks_list`, the allowlist could not be read |
+| `ledger_outcome_unknown` | A claim, renewal or release may or may not have landed, and the status could not be read; check `task_status` |
 | `lease_denied` | Another ledger refusal; `detail` carries its fixed message |
 | `commit_not_found` | The commit does not exist in the project repository |
 | `store_unavailable` | The local private store cannot be opened or written. If this happens after a successful claim, the claim is given back first (`detail`) |
@@ -80,7 +129,7 @@ Memo Bridge never fetches, pushes or writes to the repository. Uncommitted files
 
 ## Local state
 
-The local store holds workspaces, a mirror of the claims held here, checkpoints and the audit journal. It never holds the lease itself, and `workspace_status` shows this mirror. Use `issue_status` for the authoritative state. All access to it goes through `server/coordinator/store.mjs`. The contract tests in `tests/coordinator-store-contract.test.mjs` are written per engine, so a Postgres adapter can follow when the hub owns this state.
+The local store holds workspaces, a mirror of the claims held here, checkpoints and the audit journal. It never holds the lease itself, and `workspace_status` shows this mirror. Use `task_status` or `workspace_recover` for the authoritative state. A `task_complete` summary is stored in the claim's outcome column after the keyword (`completed: <summary>`) and returned split as `outcome` and `summary`. All access to it goes through `server/coordinator/store.mjs`. The contract tests in `tests/coordinator-store-contract.test.mjs` are written per engine, so a Postgres adapter can follow when the hub owns this state.
 
 - **Engine.** The built-in `node:sqlite`, with no added dependency. WAL journal, `busy_timeout` 5 s. Writes use `BEGIN IMMEDIATE`; reads use a deferred `BEGIN`.
 - **Concurrent opening.** When many sessions open a brand-new store at once, the switch to WAL is retried.
@@ -111,5 +160,6 @@ The local store holds workspaces, a mirror of the claims held here, checkpoints 
 - **Public allowlist only.** The ledger covers only the public repositories on its allowlist; private repositories (emargo, kollio) are not covered yet. Adding a repository is a change to `scripts/issue_preflight.py` in `memolabs-dev/.github`.
 - **No degraded mode.** If GitHub is unreachable, nothing can be claimed. The Mac and the VPS keep working with plain Git; coordination resumes when GitHub returns.
 - **No hub exposure yet.** The hub does not expose these tools. They stay local until the root CI runners on the VPS are isolated (lab-infra #161).
-- **Not covered here.** Runners, worktree creation and job execution are separate milestones.
+- **Not covered here.** Worktrees, files and jobs have their own tools (`worktree_*`, `jobs_*`); `workspace_recover` only reads their records.
 - **No retention policy.** The audit journal has no retention policy yet.
+- **Summary storage.** The completion summary shares the claim's `outcome` column until the store gets a dedicated column.

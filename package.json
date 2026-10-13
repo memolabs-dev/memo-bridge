@@ -1,14 +1,14 @@
 {
   "name": "memo-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Memo Labs MCP: read-only Mac and VPS observation, project catalogue, and coordination of AI work sessions on GitHub Issues",
+  "description": "Memo Labs MCP: read-only Mac and VPS observation, project catalogue, coordination of AI work sessions on GitHub Issues, and a Mac runner (worktrees, test/build/lint jobs, pull requests)",
   "engines": {
     "node": ">=22.16"
   },
   "scripts": {
-    "build": "esbuild server/index.mjs --bundle --platform=node --format=esm --target=node22 --outfile=plugin/server/dist/index.mjs",
+    "build": "esbuild server/index.mjs server/runners/job-runner.mjs --bundle --platform=node --format=esm --target=node22 --outdir=plugin/server/dist --entry-names=[name] --out-extension:.js=.mjs",
     "test": "node --test tests/*.test.mjs",
     "smoke": "node tests/mcp-smoke.mjs",
     "package:plugin": "npm run build && node scripts/package-plugin.mjs",

@@ -25,7 +25,7 @@ async function guardianFixture(t, report) {
 }
 
 test('guardian: summary per section, most severe findings first, freshness from the report', async t => {
-  const finding = (status, check) => ({ check, status, title: `${check} ‮title\nwith break`, criterion: 'x' });
+  const finding = (status, check) => ({ check, status, title: `${check} \u202etitle\nwith break`, criterion: 'x' });
   const catalogOptions = await guardianFixture(t, {
     schema: 'guardian.report/v1', generated_at: '2026-10-13T09:20:05+02:00', run_id: 'r1', status: 'CRIT',
     sections: {

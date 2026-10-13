@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertPrivateLocation, openSqliteStore } from '../server/coordinator/store.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { SCHEMA_VERSION, assertPrivateLocation, openSqliteStore } from '../server/coordinator/store.mjs';
 import { tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const STORES = [{ engine: 'sqlite', open: dir => openSqliteStore({ dir }) }];
@@ -24,7 +25,7 @@ for (const { engine, open } of STORES) {
     await store.transaction(repo => {
       repo.insertWorkspace(workspace('ws_1'));
       repo.insertClaim(claim('c1', fence(1)));
-      repo.appendEvent({ at: T, principal: 'local:owner', op: 'issue_claim', outcome: 'ok', issue_ref: 'memolabs-dev/drop#7' });
+      repo.appendEvent({ at: T, principal: 'local:owner', op: 'task_claim', outcome: 'ok', issue_ref: 'memolabs-dev/drop#7' });
     });
     const changed = await store.transaction(repo => repo.updateClaim('c1', { fence_sha: fence(2), updated_at: T }, fence(1)));
     assert.equal(changed, 1);
@@ -106,7 +107,24 @@ test('[sqlite] AC-09: refuses synced, repository, relative and shared locations'
 test('[sqlite] REQ-002: WAL, busy timeout, foreign keys and schema version are applied', async t => {
   const store = openSqliteStore({ dir: await tempStateDir(t) });
   t.after(() => store.close());
-  assert.deepEqual(store.settings(), { journal_mode: 'wal', busy_timeout: 5000, foreign_keys: 1, schema_version: 1 });
+  assert.equal(SCHEMA_VERSION, 2);
+  assert.deepEqual(store.settings(), { journal_mode: 'wal', busy_timeout: 5000, foreign_keys: 1, schema_version: SCHEMA_VERSION });
+});
+
+test('[sqlite] a version 1 store (Phase 2) is upgraded in place to version 2 without losing data', async t => {
+  const dir = await tempStateDir(t);
+  const first = openSqliteStore({ dir });
+  await first.transaction(repo => repo.insertWorkspace(workspace('ws_v1')));
+  await first.close();
+  // Turn the file back into what a Phase 2 install left behind: no runner tables, user_version 1.
+  const raw = new DatabaseSync(join(dir, 'coordinator.sqlite'));
+  raw.exec('DROP TABLE job_events; DROP TABLE jobs; DROP TABLE worktrees; PRAGMA user_version = 1;');
+  raw.close();
+  const upgraded = openSqliteStore({ dir });
+  t.after(() => upgraded.close());
+  assert.equal(upgraded.settings().schema_version, SCHEMA_VERSION);
+  assert.equal((await upgraded.transaction(repo => repo.getWorkspace('ws_v1'), { write: false })).id, 'ws_v1');
+  assert.deepEqual(await upgraded.transaction(repo => repo.listWorktrees({ limit: 5 }), { write: false }), []);
 });
 
 test('[sqlite] readers are not blocked by a writer holding the lock in another connection', async t => {

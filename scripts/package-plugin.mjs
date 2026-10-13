@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const root = resolve(process.cwd());
-const bundled = join(root, 'plugin/server/dist/index.mjs');
-if (!existsSync(bundled)) {
+// The server and the detached job runner it starts from its own directory ship together.
+const bundled = ['plugin/server/dist/index.mjs', 'plugin/server/dist/job-runner.mjs'].map(file => join(root, file));
+if (!bundled.every(file => existsSync(file))) {
   console.error('First run npm run build');
   process.exit(1);
 }

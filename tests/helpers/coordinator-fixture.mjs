@@ -77,9 +77,37 @@ export function ledgerFor(github, root = GOVERNANCE_ROOT) {
   return createIssueLeaseClient({ root, env: github.env, timeoutMs: 30000 });
 }
 
-export function coordinatorOn(stateDir, { principal = OWNER, now = Date.now, repos, ledger } = {}) {
+// `tasks` overrides the tasks_list sources (listProjectRepos, readAllowlist, searchIssues) so no
+// test ever reads the real catalog, the real governance checkout or the real GitHub.
+export function coordinatorOn(stateDir, { principal = OWNER, now = Date.now, repos, ledger, tasks = {} } = {}) {
   const store = openSqliteStore({ dir: stateDir });
   const coordinator = createCoordinator({ store, principal, now, ledger, resolveProject: stubProjects(repos),
-    projectRemote: stubRemote, host: 'mac' });
+    projectRemote: stubRemote, host: 'mac',
+    listProjectRepos: async () => Object.keys(PROJECT_ORIGINS).map(name => ({ name, repoPath: null })),
+    readAllowlist: async () => ({ ok: true, repos: ['memolabs-dev/drop', 'memolabs-dev/cuesheet'] }),
+    searchIssues: async () => ({ ok: false, error: 'github_unavailable', detail: 'not stubbed' }),
+    ...tasks });
   return { store, coordinator };
+}
+
+// The audit journal, newest first, read straight from the store (the journal tools live in
+// server/tools/audit-tools.mjs).
+export function journal(store, { issue, workspace_id, limit = 200 } = {}) {
+  return store.transaction(repo => repo.listEvents({ issue_ref: issue, workspace_id, limit }), { write: false });
+}
+
+// A ledger that always grants, for tests that need a lease but not the canonical script.
+export function stubLedger({ worker } = {}) {
+  const fence = 'b'.repeat(40);
+  const receipt = { state: 'claimed', expired: false, worker: worker ?? null, claim_id: 'c'.repeat(32), fence_sha: fence,
+    epoch: 1, expires_at: '2099-01-01T00:00:00+00:00' };
+  const ok = extra => Promise.resolve({ ok: true, receipt: { ...receipt, ...extra } });
+  return {
+    receipt,
+    status: () => ok(),
+    claim: (issue, w) => ok({ worker: w }),
+    verify: () => ok(),
+    heartbeat: () => ok(),
+    release: () => ok({ state: 'released' })
+  };
 }

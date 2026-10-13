@@ -12,7 +12,7 @@ process.send({ type: 'ready', workspace: opened });
 
 process.on('message', async message => {
   if (message.type === 'claim') {
-    const claim = await coordinator.issueClaim({ workspace_id: opened.workspace.workspace_id, issue: message.issue, ttl_seconds: 600 });
+    const claim = await coordinator.taskClaim({ workspace_id: opened.workspace.workspace_id, issue: message.issue, ttl_seconds: 600 });
     process.send({ type: 'claimed', claim });
   }
   if (message.type === 'exit') {
