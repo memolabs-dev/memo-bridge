@@ -6,9 +6,9 @@ import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createCoordinator } from '../server/coordinator/index.mjs';
-import { createIssueLeaseClient } from '../server/coordinator/issue-lease.mjs';
+import { createIssueLeaseClient, parseIssueRef as parseRef } from '../server/coordinator/issue-lease.mjs';
 import { CAPABILITIES, authorize, localOwnerPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
-import { OWNER, coordinatorOn, fakeGitHub, ledgerFor, skipWithoutLedger, stubProjects, tempDir, tempStateDir } from './helpers/coordinator-fixture.mjs';
+import { GOVERNANCE_ROOT, OWNER, coordinatorOn, fakeGitHub, ledgerFor, skipWithoutLedger, stubProjects, tempDir, tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const DROP = 'memolabs-dev/drop#7';
 
@@ -205,6 +205,7 @@ test('invalid inputs are rejected before reaching the ledger', { skip: skipWitho
     [coordinator.workspaceOpen({ project: 'drop', branch: '-x' }), 'invalid_input'],
     [coordinator.issueClaim({ workspace_id: a, issue: 'drop#7' }), 'invalid_input'],
     [coordinator.issueClaim({ workspace_id: a, issue: 'a-/b#1' }), 'invalid_input'],
+    [coordinator.issueClaim({ workspace_id: a, issue: 'memolabs-dev/drop#123456789' }), 'invalid_input'],
     [coordinator.issueClaim({ workspace_id: a, issue: 'memolabs-dev/drop#7; rm -rf /' }), 'invalid_input'],
     [coordinator.issueClaim({ workspace_id: a, issue: DROP, ttl_seconds: 59 }), 'invalid_input'],
     [coordinator.issueClaim({ workspace_id: a, issue: DROP, ttl_seconds: 1801 }), 'invalid_input'],
@@ -239,4 +240,119 @@ test('policy: unknown operations are never authorized; local owner holds all cap
   assert.match(local.id, /^local:/);
   assert.throws(() => makePrincipal('no colon', []));
   assert.throws(() => createCoordinator({ principal: OWNER, resolveProject: stubProjects() }));
+});
+
+// Ledger whose calls can be paused or failed, around the real one. Used to reproduce the
+// races and outages found by the adversarial review of #12.
+function controllable(real) {
+  const gates = {}; const down = new Set(); const lose = new Set();
+  const wrap = name => async (...args) => {
+    if (down.has(name)) return { ok: false, error: name === 'status' ? 'ledger_unavailable' : 'ledger_outcome_unknown', detail: 'down' };
+    if (gates[name]) await gates[name];
+    const result = await real[name](...args);
+    // The write landed but its outcome never reached us.
+    if (lose.has(name) && result.ok) return { ok: false, error: 'ledger_outcome_unknown', detail: 'lost' };
+    return result;
+  };
+  return {
+    api: Object.fromEntries(['status', 'claim', 'verify', 'heartbeat', 'release'].map(n => [n, wrap(n)])),
+    pause(name) { let open; gates[name] = new Promise(r => { open = r; }); return () => { delete gates[name]; open(); }; },
+    down, lose
+  };
+}
+
+async function setupControlled(t) {
+  const github = await fakeGitHub(t);
+  const real = ledgerFor(github);
+  const ctl = controllable(real);
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { ledger: ctl.api });
+  t.after(() => store.close());
+  const a = (await coordinator.workspaceOpen({ project: 'drop' })).workspace.workspace_id;
+  return { github, real, ctl, coordinator, a };
+}
+
+test('a claim racing workspace_close never leaves an orphan lease', { skip: skipWithoutLedger }, async t => {
+  const { real, ctl, coordinator, a } = await setupControlled(t);
+  const resume = ctl.pause('claim');
+  const pending = coordinator.issueClaim({ workspace_id: a, issue: DROP });
+  const closed = await coordinator.workspaceClose({ workspace_id: a });
+  assert.deepEqual(closed.released, []);
+  resume();
+  const claim = await pending;
+  assert.equal(claim.error, 'workspace_closed');
+  assert.equal(claim.detail, 'claim released');
+  assert.equal((await real.status(parseRef(DROP))).receipt.state, 'released');
+});
+
+test('workspace_close can be retried after a ledger outage', { skip: skipWithoutLedger }, async t => {
+  const { real, ctl, coordinator, a } = await setupControlled(t);
+  await coordinator.issueClaim({ workspace_id: a, issue: DROP });
+  ctl.down.add('release'); ctl.down.add('status');
+  const first = await coordinator.workspaceClose({ workspace_id: a });
+  assert.equal(first.workspace.status, 'closed');
+  assert.deepEqual(first.unreleased.map(u => u.issue), [DROP]);
+  assert.equal((await real.status(parseRef(DROP))).receipt.state, 'claimed');
+  ctl.down.clear();
+  const second = await coordinator.workspaceClose({ workspace_id: a });
+  assert.deepEqual(second.released, [DROP]);
+  assert.equal((await real.status(parseRef(DROP))).receipt.state, 'released');
+});
+
+test('workspace_close reconciles a stale local fence instead of claiming a release', { skip: skipWithoutLedger }, async t => {
+  const { real, coordinator, a } = await setupControlled(t);
+  const claim = await coordinator.issueClaim({ workspace_id: a, issue: DROP });
+  // A heartbeat landed in the ledger but the local mirror never saw the new fence.
+  await real.heartbeat(parseRef(DROP), claim.worker, claim.claim_id, claim.fence, 300);
+  const closed = await coordinator.workspaceClose({ workspace_id: a });
+  assert.deepEqual(closed.released, [DROP]);
+  assert.deepEqual(closed.lost, []);
+  assert.equal((await real.status(parseRef(DROP))).receipt.state, 'released');
+});
+
+test('a claim whose outcome was lost is recovered, not orphaned', { skip: skipWithoutLedger }, async t => {
+  const { real, ctl, coordinator, a } = await setupControlled(t);
+  ctl.lose.add('claim');
+  const claim = await coordinator.issueClaim({ workspace_id: a, issue: DROP });
+  assert.equal(claim.ok, true, JSON.stringify(claim));
+  assert.equal(claim.recovered, true);
+  ctl.lose.clear();
+  const done = await coordinator.issueRelease({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence, outcome: 'completed' });
+  assert.equal(done.ok, true, JSON.stringify(done));
+  assert.equal((await real.status(parseRef(DROP))).receipt.state, 'released');
+});
+
+test('a heartbeat whose outcome was lost adopts the new fence', { skip: skipWithoutLedger }, async t => {
+  const { ctl, coordinator, a } = await setupControlled(t);
+  const claim = await coordinator.issueClaim({ workspace_id: a, issue: DROP });
+  ctl.lose.add('heartbeat');
+  const beat = await coordinator.issueHeartbeat({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence });
+  assert.equal(beat.ok, true, JSON.stringify(beat));
+  assert.notEqual(beat.fence, claim.fence);
+  ctl.lose.clear();
+  const status = await coordinator.workspaceStatus({ workspace_id: a });
+  assert.equal(status.claims[0].fence, beat.fence, 'the local mirror follows the ledger');
+});
+
+test('a ledger timeout kills the whole process group: nothing is written afterwards', { skip: skipWithoutLedger, timeout: 60000 }, async t => {
+  const github = await fakeGitHub(t);
+  const slow = createIssueLeaseClient({ root: GOVERNANCE_ROOT, timeoutMs: 1500, env: { ...github.env, FAKE_GH_SLOW_REFS: '3' } });
+  const result = await slow.claim(parseRef(DROP), 'mb.mac.ws_aaaaaaaaaaaaaaaa', 300);
+  assert.equal(result.error, 'ledger_outcome_unknown');
+  assert.equal(result.detail, 'timeout');
+  await new Promise(r => setTimeout(r, 3500));
+  assert.equal((await ledgerFor(github).status(parseRef(DROP))).receipt.state, 'unclaimed');
+});
+
+test('release works on a closed workspace and a lost race reads as lease_held', { skip: skipWithoutLedger }, async t => {
+  const { real, ctl, coordinator, a } = await setupControlled(t);
+  const claim = await coordinator.issueClaim({ workspace_id: a, issue: DROP });
+  ctl.down.add('release'); ctl.down.add('status');
+  await coordinator.workspaceClose({ workspace_id: a });
+  ctl.down.clear();
+  const done = await coordinator.issueRelease({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence, outcome: 'cancelled' });
+  assert.equal(done.ok, true, JSON.stringify(done));
+  const b = (await coordinator.workspaceOpen({ project: 'drop' })).workspace.workspace_id;
+  await real.claim(parseRef(DROP), 'someone-else', 300);
+  ctl.lose.add('claim');
+  assert.equal((await coordinator.issueClaim({ workspace_id: b, issue: DROP })).error, 'lease_held');
 });

@@ -57,7 +57,7 @@ export function registerCoordinatorTools(server, getCoordinator) {
   }, call('workspaceList'));
 
   server.registerTool('workspace_close', {
-    description: 'Close a workspace you own and release its Issue claims (outcome cancelled). Idempotent.',
+    description: 'Close a workspace you own and release its Issue claims (outcome cancelled). Safe to repeat: claims the ledger could not release yet are listed as unreleased and retried on the next call.',
     inputSchema: z.object({ workspace_id: workspaceId }),
     annotations: { ...write, idempotentHint: true }
   }, call('workspaceClose'));
@@ -69,7 +69,7 @@ export function registerCoordinatorTools(server, getCoordinator) {
   }, call('issueStatus'));
 
   server.registerTool('issue_claim', {
-    description: 'Reserve a GitHub Issue for a workspace through the Memo Labs lease ledger (a Git ref in memolabs-dev/.github, visible to every machine). The Issue must be open, labelled agent:ready with one priority label, and belong to the workspace project. Exactly one worker can hold it.',
+    description: 'Reserve a GitHub Issue for a workspace through the Memo Labs lease ledger (a Git ref in memolabs-dev/.github, visible to every machine). The Issue must be open and labelled agent:ready with one priority label, and it must belong to the workspace project when the project Git origin is known. Exactly one worker can hold it.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl }),
     annotations: write
   }, call('issueClaim'));
@@ -81,7 +81,7 @@ export function registerCoordinatorTools(server, getCoordinator) {
   }, call('issueHeartbeat'));
 
   server.registerTool('issue_release', {
-    description: 'Release a claim with an outcome. Never closes the Issue and never deploys.',
+    description: 'Release a claim with an outcome, also from a closed workspace. Never closes the Issue and never deploys.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence, outcome: z.enum(OUTCOMES) }),
     annotations: write
   }, call('issueRelease'));

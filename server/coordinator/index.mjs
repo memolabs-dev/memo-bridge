@@ -22,6 +22,7 @@ const CLAIM_RE = /^[0-9a-f]{32}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_closed', 'project_mismatch',
   'repo_not_allowed', 'issue_not_ready', 'issue_changed', 'lease_race_lost', 'lease_denied']);
+const UNCERTAIN = new Set(['ledger_unavailable', 'ledger_outcome_unknown']);
 const MAX_LIST = 200;
 const WRITES = new Set(['workspace_open', 'workspace_close', 'issue_claim', 'issue_heartbeat', 'issue_release', 'issue_checkpoint']);
 
@@ -84,7 +85,8 @@ export function gitHubRemote({ repoPath } = {}) {
       timeout: 6000, maxBuffer: 4096, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
     }, (error, stdout) => {
       if (error) return resolve(null);
-      const match = /github\.com[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\s*$/.exec(stdout);
+      // Any host spelling (github.com, an SSH alias…): only the owner/repo tail is compared.
+      const match = /[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?\s*$/.exec(stdout.trim());
       resolve(match ? `${match[1]}/${match[2]}` : null);
     });
   });
@@ -130,16 +132,46 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
 
   // Precondition for operations on a held claim: owned active workspace, and a claim this
   // workspace recorded. The ledger then checks worker, claim id and fence itself.
-  async function heldClaim(args) {
+  async function heldClaim(args, { requireActive = true } = {}) {
     const issue = parseIssueRef(args.issue);
     if (!issue) return { error: fail('invalid_input', 'issue') };
     if (!CLAIM_RE.test(args.claim_id ?? '')) return { error: fail('invalid_input', 'claim_id') };
     if (!SHA_RE.test(args.fence ?? '')) return { error: fail('invalid_input', 'fence') };
-    const ws = await ownedWorkspace(args.workspace_id);
+    const ws = await ownedWorkspace(args.workspace_id, { requireActive });
     if (ws.error) return ws;
     const claim = await read(repo => repo.getClaim(args.claim_id));
     if (!claim || claim.workspace_id !== ws.workspace.id || claim.issue_ref !== issue.ref) return { error: fail('unknown_claim') };
     return { issue, workspace: ws.workspace, claim };
+  }
+
+  // Ask the ledger who holds the Issue. Used whenever the outcome of a write is uncertain:
+  // { mine } is our live lease (possibly with a fence we never saw), { other } is someone
+  // else's live lease, null means nobody holds it, { error } means we cannot tell.
+  async function whoHolds(issue, worker) {
+    const status = await ledger.status(issue);
+    if (!status.ok) return { error: status };
+    const r = status.receipt;
+    if (r.state !== 'claimed' || r.expired) return null;
+    return r.worker === worker ? { mine: r } : { other: r };
+  }
+
+  // Release one locally recorded claim, reconciling a stale local fence with the ledger.
+  // Returns released (ours, now released), lost (no longer ours) or unreleased (try again).
+  async function releaseRecorded(workspace, claim, outcome) {
+    const issue = parseIssueRef(claim.issue_ref);
+    const worker = workerFor(workspace);
+    let result = await ledger.release(issue, worker, claim.claim_id, claim.fence_sha, outcome);
+    if (result.ok) return { state: 'released', fence: result.receipt.fence_sha };
+    if (result.error === 'stale_lease' || UNCERTAIN.has(result.error)) {
+      const holder = await whoHolds(issue, worker);
+      if (holder?.error) return { state: 'unreleased', error: holder.error.error };
+      if (holder?.mine && holder.mine.claim_id === claim.claim_id) {
+        result = await ledger.release(issue, worker, claim.claim_id, holder.mine.fence_sha, outcome);
+        return result.ok ? { state: 'released', fence: result.receipt.fence_sha } : { state: 'unreleased', error: result.error };
+      }
+      return { state: 'lost' };
+    }
+    return { state: 'unreleased', error: result.error };
   }
 
   async function resolve(name) {
@@ -189,29 +221,28 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       return { ok: true, count: rows.length, workspaces: rows.map(publicWorkspace) };
     },
 
-    // Closing releases this workspace's claims in the ledger (outcome cancelled). A claim the
-    // ledger cannot release now is reported; it expires on its own within its TTL.
+    // Closing releases this workspace's claims in the ledger (outcome cancelled). It is safe
+    // to call again: a closed workspace still releases any claim left recorded as held, for
+    // example when the ledger was unreachable the first time.
     async workspaceClose(args) {
       const ws = await ownedWorkspace(args.workspace_id, { requireActive: false });
       if (ws.error) return ws.error;
-      if (ws.workspace.status === 'closed') return { ok: true, workspace: publicWorkspace(ws.workspace), released: [], unreleased: [] };
-      const claims = await read(repo => repo.claimsOf(ws.workspace.id, 'claimed'));
-      const released = []; const unreleased = [];
-      for (const claim of claims) {
-        const issue = parseIssueRef(claim.issue_ref);
-        const result = await ledger.release(issue, workerFor(ws.workspace), claim.claim_id, claim.fence_sha, 'cancelled');
-        if (result.ok || result.error === 'stale_lease') released.push({ claim, result });
-        else unreleased.push({ issue: claim.issue_ref, error: result.error });
-      }
-      return write((repo, at) => {
-        for (const { claim, result } of released) {
-          repo.updateClaim(claim.claim_id, { state: 'released', outcome: result.ok ? 'cancelled' : 'lost',
-            fence_sha: result.ok ? result.receipt.fence_sha : claim.fence_sha, updated_at: at }, claim.fence_sha);
-        }
-        repo.updateWorkspace(ws.workspace.id, { status: 'closed', closed_at: at, updated_at: at });
-        return { ok: true, workspace: publicWorkspace(repo.getWorkspace(ws.workspace.id)),
-          released: released.map(r => r.claim.issue_ref), unreleased };
+      // Close first, so no new claim can be recorded for this workspace from now on.
+      await write((repo, at) => {
+        if (ws.workspace.status !== 'closed') repo.updateWorkspace(ws.workspace.id, { status: 'closed', closed_at: at, updated_at: at });
       });
+      const claims = await read(repo => repo.claimsOf(ws.workspace.id, 'claimed'));
+      const released = []; const lost = []; const unreleased = [];
+      for (const claim of claims) {
+        const outcome = await releaseRecorded(ws.workspace, claim, 'cancelled');
+        if (outcome.state === 'unreleased') { unreleased.push({ issue: claim.issue_ref, error: outcome.error }); continue; }
+        await write((repo, at) => repo.updateClaim(claim.claim_id, { state: 'released',
+          outcome: outcome.state === 'released' ? 'cancelled' : 'lost', fence_sha: outcome.fence ?? claim.fence_sha, updated_at: at },
+        claim.fence_sha));
+        (outcome.state === 'released' ? released : lost).push(claim.issue_ref);
+      }
+      const workspace = await read(repo => repo.getWorkspace(ws.workspace.id));
+      return { ok: true, workspace: publicWorkspace(workspace), released, lost, unreleased };
     },
 
     async issueStatus(args) {
@@ -230,20 +261,45 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (ttl === undefined) return fail('invalid_input', 'ttl_seconds');
       const ws = await ownedWorkspace(args.workspace_id);
       if (ws.error) return ws.error;
-      // The issue must belong to the workspace's project when its GitHub origin is known.
+      // The issue must belong to the workspace's project when its origin is known.
       const project = await resolveProject(ws.workspace.project_id);
       const origin = project.ok ? await projectRemote(project.project) : null;
       if (origin && origin.toLowerCase() !== issue.repo.toLowerCase()) return fail('project_mismatch');
       const worker = workerFor(ws.workspace);
+      let receipt; let recovered = false;
       const result = await ledger.claim(issue, worker, ttl);
-      if (!result.ok) return result;
-      const r = result.receipt;
-      return write((repo, at) => {
-        repo.insertClaim({ claim_id: r.claim_id, workspace_id: ws.workspace.id, issue_ref: issue.ref, fence_sha: r.fence_sha,
-          epoch: r.epoch, expires_at: r.expires_at, updated_at: at });
-        return { ok: true, issue: issue.ref, worker, claim_id: r.claim_id, fence: r.fence_sha, epoch: r.epoch,
-          expires_at: r.expires_at, project_origin_verified: Boolean(origin) };
-      });
+      if (result.ok) {
+        receipt = result.receipt;
+      } else if (UNCERTAIN.has(result.error)) {
+        // The write may have landed (timeout) or lost a ref race reported as an API failure.
+        const holder = await whoHolds(issue, worker);
+        if (holder?.mine) { receipt = holder.mine; recovered = true; }
+        else if (holder?.other) return fail('lease_held');
+        else if (holder === null) return fail('ledger_unavailable', 'nothing was claimed');
+        else return result;
+      } else {
+        return result;
+      }
+      let recorded;
+      try {
+        recorded = await write((repo, at) => {
+          // Re-read inside the transaction: a concurrent workspace_close must win.
+          if (repo.getWorkspace(ws.workspace.id)?.status !== 'active') return false;
+          repo.insertClaim({ claim_id: receipt.claim_id, workspace_id: ws.workspace.id, issue_ref: issue.ref,
+            fence_sha: receipt.fence_sha, epoch: receipt.epoch, expires_at: receipt.expires_at, updated_at: at });
+          return true;
+        });
+      } catch {
+        recorded = null;
+      }
+      if (!recorded) {
+        // Never leave a lease nobody can release: give it back before reporting the failure.
+        const back = await ledger.release(issue, worker, receipt.claim_id, receipt.fence_sha, 'cancelled');
+        return fail(recorded === false ? 'workspace_closed' : 'store_unavailable',
+          back.ok ? 'claim released' : `claim may remain until ${receipt.expires_at}`);
+      }
+      return { ok: true, issue: issue.ref, worker, claim_id: receipt.claim_id, fence: receipt.fence_sha, epoch: receipt.epoch,
+        expires_at: receipt.expires_at, project_origin_verified: Boolean(origin), ...(recovered ? { recovered: true } : {}) };
     },
 
     async issueHeartbeat(args) {
@@ -251,26 +307,39 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (ttl === undefined) return fail('invalid_input', 'ttl_seconds');
       const held = await heldClaim(args);
       if (held.error) return held.error;
-      const result = await ledger.heartbeat(held.issue, workerFor(held.workspace), args.claim_id, args.fence, ttl);
-      if (!result.ok) return result;
-      const r = result.receipt;
-      return write((repo, at) => {
-        repo.updateClaim(args.claim_id, { fence_sha: r.fence_sha, expires_at: r.expires_at, updated_at: at }, held.claim.fence_sha);
-        return { ok: true, issue: held.issue.ref, claim_id: args.claim_id, fence: r.fence_sha, expires_at: r.expires_at };
-      });
+      const worker = workerFor(held.workspace);
+      let r;
+      const result = await ledger.heartbeat(held.issue, worker, args.claim_id, args.fence, ttl);
+      if (result.ok) {
+        r = result.receipt;
+      } else if (result.error === 'ledger_outcome_unknown') {
+        const holder = await whoHolds(held.issue, worker);
+        if (holder?.mine?.claim_id !== args.claim_id) return result;
+        r = holder.mine;
+      } else {
+        return result;
+      }
+      await write((repo, at) => repo.updateClaim(args.claim_id, { fence_sha: r.fence_sha, expires_at: r.expires_at, updated_at: at },
+        held.claim.fence_sha));
+      return { ok: true, issue: held.issue.ref, claim_id: args.claim_id, fence: r.fence_sha, expires_at: r.expires_at };
     },
 
+    // Allowed on a closed workspace too, so a claim left behind can always be given back.
     async issueRelease(args) {
       if (!OUTCOMES.includes(args.outcome)) return fail('invalid_input', 'outcome');
-      const held = await heldClaim(args);
+      const held = await heldClaim(args, { requireActive: false });
       if (held.error) return held.error;
+      if (held.claim.state === 'released') return { ok: true, issue: held.issue.ref, released: true, outcome: held.claim.outcome };
       const result = await ledger.release(held.issue, workerFor(held.workspace), args.claim_id, args.fence, args.outcome);
-      if (!result.ok) return result;
-      return write((repo, at) => {
-        repo.updateClaim(args.claim_id, { state: 'released', outcome: args.outcome, fence_sha: result.receipt.fence_sha,
-          updated_at: at }, held.claim.fence_sha);
-        return { ok: true, issue: held.issue.ref, released: true, outcome: args.outcome };
-      });
+      let fence;
+      if (result.ok) fence = result.receipt.fence_sha;
+      else if (result.error === 'ledger_outcome_unknown') {
+        const holder = await whoHolds(held.issue, workerFor(held.workspace));
+        if (holder?.error || holder?.mine) return result;
+      } else return result;
+      await write((repo, at) => repo.updateClaim(args.claim_id, { state: 'released', outcome: args.outcome,
+        fence_sha: fence ?? held.claim.fence_sha, updated_at: at }, held.claim.fence_sha));
+      return { ok: true, issue: held.issue.ref, released: true, outcome: args.outcome };
     },
 
     // The checkpoint is a write boundary: the ledger verifies the fence immediately before it.
@@ -282,11 +351,12 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (note === undefined) return fail('invalid_input', 'note');
       const held = await heldClaim(args);
       if (held.error) return held.error;
-      const verified = await ledger.verify(held.issue, workerFor(held.workspace), args.claim_id, args.fence);
-      if (!verified.ok) return verified;
+      // Git first (it can be slow), then the ledger verify, then the insert at once.
       const project = await resolveProject(held.workspace.project_id);
       const check = await verifyCheckpoint({ repoPath: project.ok ? project.project.repoPath : null, branch: args.branch, commit });
       if (!check.ok) return fail(check.error);
+      const verified = await ledger.verify(held.issue, workerFor(held.workspace), args.claim_id, args.fence);
+      if (!verified.ok) return verified;
       return write((repo, at) => {
         repo.insertCheckpoint({ issue_ref: held.issue.ref, claim_id: args.claim_id, workspace_id: held.workspace.id,
           fence_sha: args.fence, branch: args.branch, commit_sha: commit, durability: check.durability, note, at });

@@ -17,12 +17,15 @@ Intent: several AI sessions on several machines coordinate on GitHub Issues with
 | R9 | Bundled MCP server exposes 17 tools and a full round trip | smoke | `npm run smoke` |
 | R10 | CI runs the real ledger offline on Node 22 and 24, failing if it is missing | `MEMO_BRIDGE_REQUIRE_GOVERNANCE=1` | CI run on the PR |
 
+| R11 | Uncertain ledger outcomes and close races never leave an orphan lease | claim racing close; close retried after an outage; stale local fence at close; lost claim and heartbeat outcomes recovered; timeout kills the process group | `tests/coordinator.test.mjs` |
+
+## Independent review
+The first adversarial pass found four medium defects at the boundary between the mirror and the ledger (F1 to F4), plus several low ones. All are fixed with regression tests. Two of them were also mutation-checked: removing the re-read in the claim transaction, or killing only python on timeout, makes the tests fail. Supporting ledger change: memolabs-dev/.github#55 (status returns its public owner fields). memo-bridge was added to the ledger allowlist in memolabs-dev/.github#54.
+
 ## Open (P1)
-- Independent adversarial review of this change.
-- CI green on the PR.
+- CI green on the PR after these fixes.
 
 ## Deferred (P2)
-- Add memolabs-dev/memo-bridge and other public repos to the ledger allowlist (memolabs-dev/.github).
 - Private repositories in the ledger (needs a private ledger repository).
 - Expose read tools, then write tools, on the hub after root runner isolation.
 - Event journal retention.

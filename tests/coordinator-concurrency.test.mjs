@@ -41,7 +41,7 @@ test('eight sessions in eight processes race for one Issue: the ledger grants ex
     await stopWorkers(workers);
     const winners = results.filter(r => r.ok);
     assert.equal(winners.length, 1, JSON.stringify(results));
-    assert.ok(results.filter(r => !r.ok).every(r => ['lease_held', 'lease_race_lost', 'ledger_unavailable'].includes(r.error)),
+    assert.ok(results.filter(r => !r.ok).every(r => r.error === 'lease_held'),
       JSON.stringify(results.filter(r => !r.ok)));
     const { store, coordinator } = coordinatorOn(stateDir, { ledger: ledgerFor(github) });
     t.after(() => store.close());

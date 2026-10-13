@@ -26,6 +26,6 @@
 **Result.** The evidence is in `.agent/project/README.md` and the PR CI.
 
 **Next.**
-- Allowlist memo-bridge in the ledger.
-- Hub exposure after root runner isolation.
+- Expose the read tools on the hub, then the write tools once the root CI runners are isolated.
 - Mac and VPS runners.
+- Read the existing observers (guardian, agents-observe, autodeploy) instead of probing.
