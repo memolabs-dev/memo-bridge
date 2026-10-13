@@ -7,8 +7,12 @@ Private open-source-ready MCP controller for Memo Labs. MVP v0.1 is **strictly r
 - `list_hosts`: check reachability for `mac` and `vps`
 - `host_status({host})`: bounded OS, load, CPU, disk, container-count inventory
 - `bridge_info`: capabilities and limitations
+- `projects_list`: read the canonical `~/projects/PROJECTS.md` register
+- `project_info`: inspect a registered project and its verified local location
+- `project_git_status`: read live Git branch, change count and worktree count
+- `projects_audit`: report unregistered repository candidates without granting access
 
-There is no arbitrary shell, no file reading, no writes, no production control. All commands are hardcoded and executed without a local shell.
+There is no arbitrary shell, no arbitrary file reading, no writes, no production control. All commands are hardcoded and executed without a local shell.
 
 ## Development
 
