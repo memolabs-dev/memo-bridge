@@ -25,7 +25,10 @@ npm ci
 npm test
 npm run build
 npm run smoke
+npm run install:local   # stable copy for AI clients: ~/.local/share/memo-bridge/stdio/index.mjs
 ```
+
+AI clients are configured from the shared MCP registry (Vault `4-Tools/mcp/mcp.json`, applied by `agents-mcp-sync --apply`). They run the installed copy, never this working tree.
 
 The plugin package is under `plugin/`. It is a **local stdio plugin**, not a cloud-hosted ChatGPT MCP. Its runtime depends on local Node 22.16+ (for the built-in `node:sqlite`), `python3` and a logged-in `gh` for the lease ledger, and a working SSH alias `lab` with BatchMode and a pinned host key.
 
