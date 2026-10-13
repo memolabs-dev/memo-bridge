@@ -21,3 +21,5 @@
 **Result** — Local tests PASSED 4/4, SDK build and local MCP smoke PASSED. Persistent host deployment is pending verification.
 
 **Next** — Connect owner-only OAuth 2.1 + MFA, then independently verify Mac/VPS agents, and address privileged root runner before adding writes.
+
+**Live Result (VPS + Mac deployment)** — PASSED: both systemd services running; Mac launchd tunnel and agent connected. TLS /health 200; unauthorized and wrong bearer requests 401; actual authenticated MCP calls returned online status for both machines. VPS bound only to 127.0.0.1:9443, service runs as memo-bridge without privileges. PR CI PASSED. No internet ingress. **OAuth and remote ChatGPT activation remain BLOCKED by design** pending standards-compliant owner-only authentication.
