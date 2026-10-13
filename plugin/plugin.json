@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "memo-bridge",
+  "version": "0.1.0",
+  "description": "Private, read-only MCP for Memo Labs: one interface to inspect a Mac and a Netcup VPS without relying on the Sentinel X commercial hub.",
+  "author": { "name": "Memo Labs" },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Memo Bridge",
+        "shortDescription": "Mac + VPS diagnostics",
+        "longDescription": "Inspect the status of the Memo Labs Mac and VPS from one MCP, using only fixed read-only probes. Requires a local Mac runtime and SSH access to the VPS.",
+        "developerName": "Memo Labs",
+        "category": "Developer Tools",
+        "capabilities": ["Interactive"],
+        "defaultPrompt": "Check the status of my Mac and VPS through Memo Bridge."
+      }
+    }
+  }
+}
