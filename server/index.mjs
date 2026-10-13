@@ -8,6 +8,9 @@ import { createIssueLeaseClient } from './coordinator/issue-lease.mjs';
 import { localOwnerPrincipal } from './coordinator/policy.mjs';
 import { openSqliteStore } from './coordinator/store.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from './tools/coordinator-tools.mjs';
+import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
+
+const OBSERVER_TOOLS = ['observe_guardian', 'observe_agents', 'observe_live_state', 'observe_focus'];
 
 const VERSION = '0.3.0';
 
@@ -45,7 +48,8 @@ server.registerTool('bridge_info', {
   hosts: ['mac', 'vps'],
   vps_connection: 'SSH through the Mac; no incoming connection to the Mac',
   allowed_tools: ['list_hosts', 'host_status', 'bridge_info', 'projects_list', 'project_info', 'project_git_status', 'projects_audit',
-    ...COORDINATOR_TOOLS],
+    ...OBSERVER_TOOLS, ...COORDINATOR_TOOLS],
+  observation: 'host_status checks reachability only; health comes from the existing observers (observe_*), never from new probes',
   coordinator: {
     principal: principal.id,
     work_items: 'GitHub Issues',
@@ -80,6 +84,30 @@ server.registerTool('projects_audit', {
   inputSchema: z.object({}),
   annotations: readonly
 }, async () => result(await auditProjectRegistry()));
+
+server.registerTool('observe_guardian', {
+  description: 'Latest infrastructure-guardian audit of the Mac, the VPS, skills and owners: overall status, per-section status, finding counts and the most severe findings, with freshness. Read-only; no new probe.',
+  inputSchema: z.object({}),
+  annotations: readonly
+}, async () => result(await guardianReport()));
+
+server.registerTool('observe_agents', {
+  description: 'State of the VPS agent workflows from agents-observe (status, uptime, restarts, alerts), with freshness. Read-only.',
+  inputSchema: z.object({}),
+  annotations: readonly
+}, async () => result(await agentsObserve()));
+
+server.registerTool('observe_live_state', {
+  description: 'Operational sections of LIVE-STATE (CI failures, agent configuration health, unpublished Git work), with freshness. Other sections are withheld. Read-only.',
+  inputSchema: z.object({}),
+  annotations: readonly
+}, async () => result(await liveState()));
+
+server.registerTool('observe_focus', {
+  description: 'Active Stasis focus (project, bet, kill criterion, review due) or the last closed bet. Read-only; Stasis decides, Memo Bridge only reports.',
+  inputSchema: z.object({}),
+  annotations: readonly
+}, async () => result(await focusStatus()));
 
 let coordinator;
 registerCoordinatorTools(server, () => {

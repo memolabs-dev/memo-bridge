@@ -45,9 +45,15 @@ try {
   const names = tools.tools.map(x => x.name).sort();
   const coordinatorTools = ['coordinator_events','issue_checkpoint','issue_claim','issue_heartbeat','issue_release',
     'issue_status','workspace_close','workspace_list','workspace_open','workspace_status'];
+  const observerTools = ['observe_agents','observe_focus','observe_guardian','observe_live_state'];
   assert.deepEqual(names, ['bridge_info','host_status','list_hosts','project_git_status','project_info','projects_audit',
-    'projects_list', ...coordinatorTools].sort());
-  for (const name of names.filter(n => !coordinatorTools.includes(n))) {
+    'projects_list', ...observerTools, ...coordinatorTools].sort());
+  for (const name of observerTools) {
+    const payload = JSON.parse((await client.callTool({ name, arguments: {} })).content[0].text);
+    assert.equal(typeof payload.ok, 'boolean', `${name}: ${JSON.stringify(payload)}`);
+    if (!payload.ok) assert.equal(payload.error, 'source_unavailable');
+  }
+  for (const name of names.filter(n => !coordinatorTools.includes(n) && !observerTools.includes(n))) {
     const args = name === 'host_status' ? { host: 'mac' } :
       ['project_info','project_git_status'].includes(name) ? { project: 'memo-bridge' } : {};
     const response = await client.callTool({ name, arguments: args });
@@ -69,7 +75,7 @@ try {
   const ws = await call('workspace_open', { project: 'memo-bridge', client_type: 'cli', client_label: 'smoke' });
   assert.equal(ws.ok, true, JSON.stringify(ws));
   const workspace_id = ws.workspace.workspace_id;
-  assert.equal((await call('bridge_info', {})).allowed_tools.length, 17);
+  assert.equal((await call('bridge_info', {})).allowed_tools.length, 21);
   let coordinated = false;
   if (HAS_GOVERNANCE) {
     const issue = 'memolabs-dev/cuesheet#3';
