@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_PROJECTS_ROOT = join(homedir(), 'projects');
+const DEFAULT_PROJECTS_ROOT = process.env.MEMO_BRIDGE_PROJECTS_ROOT || join(homedir(), 'projects');
 const MAX_REGISTRY_BYTES = 1024 * 1024;
 const MAX_PROJECTS = 500;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;

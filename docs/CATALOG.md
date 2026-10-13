@@ -14,3 +14,5 @@ This is a foundation for coordination, **not yet** a shared coordinator, VPS run
 The canonical `PROJECTS.md` is preserved. The `~/memolabs/workspace/atlas` information remains a derived knowledge layer.
 
 Run: `npm test && npm run build && npm run smoke`.
+
+CI smoke uses a temporary Git repository and operator-controlled MEMO_BRIDGE_PROJECTS_ROOT environment variable, so the owner's local home directory is not required. This variable is set at process start, never by an MCP tool caller.
