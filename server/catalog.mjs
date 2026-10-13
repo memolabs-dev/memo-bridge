@@ -1,0 +1,180 @@
+import { readFile, realpath, stat, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { resolve, relative, isAbsolute, join, basename } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const DEFAULT_PROJECTS_ROOT = join(homedir(), 'projects');
+const MAX_REGISTRY_BYTES = 1024 * 1024;
+const MAX_PROJECTS = 500;
+const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
+
+function contained(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === '' || (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') && !isAbsolute(rel));
+}
+function safeRelativePath(value) {
+  if (typeof value !== 'string' || !value || value.startsWith('.') || isAbsolute(value) || value.includes('\\')) return false;
+  const parts = value.split('/');
+  return parts.every(p => p && p !== '.' && p !== '..' && !p.startsWith('.'));
+}
+function tableColumns(line) {
+  if (!line.startsWith('|') || !line.endsWith('|')) return null;
+  return line.slice(1, -1).split('|').map(x => x.trim());
+}
+function parseMainTable(document) {
+  const lines = document.split(/\r?\n/);
+  let inside = false;
+  const records = [];
+  const seen = new Set();
+  for (const line of lines) {
+    if (line.startsWith('## Projets appartenant')) { inside = true; continue; }
+    if (inside && line.startsWith('## ')) break;
+    if (!inside) continue;
+    const cells = tableColumns(line);
+    if (!cells || cells.length < 7 || cells[0] === 'Name' || /^-+$/.test(cells[0])) continue;
+    const [name, pathRelative, kind, status, nature, stack, vaultNote] = cells;
+    if (!NAME_RE.test(name) || !safeRelativePath(pathRelative) || seen.has(name)) continue;
+    seen.add(name);
+    records.push({ name, pathRelative, kind, status, nature, stack, vaultNote: vaultNote === '-' ? null : vaultNote });
+    if (records.length > MAX_PROJECTS) throw new Error('registry_too_large');
+  }
+  if (!inside) throw new Error('projects_section_missing');
+  return records;
+}
+
+export async function readProjectRegistry(options = {}) {
+  const projectsRoot = options.projectsRoot ?? DEFAULT_PROJECTS_ROOT;
+  const registryFile = options.registryFile ?? join(projectsRoot, 'PROJECTS.md');
+  const info = await stat(registryFile);
+  if (info.size > MAX_REGISTRY_BYTES) throw new Error('registry_too_large');
+  const root = await realpath(projectsRoot);
+  const records = parseMainTable(await readFile(registryFile, 'utf8'));
+  const projects = await Promise.all(records.map(async record => {
+    const candidate = resolve(root, record.pathRelative);
+    let safePath = null;
+    let available = false;
+    if (contained(root, candidate)) {
+      try {
+        const resolved = await realpath(candidate);
+        if (contained(root, resolved)) {
+          const dir = await stat(resolved);
+          if (dir.isDirectory()) {
+            safePath = resolved;
+            available = true;
+          }
+        }
+      } catch { /* missing project is reported, never guessed */ }
+    }
+    return { ...record, available, path: safePath };
+  }));
+  return { source: 'PROJECTS.md', projects, count: projects.length };
+}
+
+function publicProject(p, includePath = false) {
+  const { name, kind, status, nature, stack, vaultNote, available, pathRelative, path } = p;
+  return { name, kind, status, nature, stack, vault_note: vaultNote, path_relative: pathRelative,
+    available, ...(includePath && available ? { local_path: path } : {}) };
+}
+
+export async function listProjects(filters = {}, options = {}) {
+  const catalog = await readProjectRegistry(options);
+  const query = (filters.search ?? '').trim().toLowerCase();
+  const status = filters.status ?? '';
+  const projects = catalog.projects.filter(p =>
+    (!query || p.name.toLowerCase().includes(query) || p.nature.toLowerCase().includes(query)) &&
+    (!status || p.status === status)
+  ).map(p => publicProject(p));
+  return { source: catalog.source, total: catalog.count, count: projects.length, projects };
+}
+
+export async function projectInfo(name, options = {}) {
+  if (!NAME_RE.test(name)) return { ok: false, error: 'invalid_project_name' };
+  const catalog = await readProjectRegistry(options);
+  const project = catalog.projects.find(p => p.name === name);
+  if (!project) return { ok: false, error: 'unknown_project' };
+  return { ok: true, project: publicProject(project, true), source: catalog.source };
+}
+
+async function runGit(path, args) {
+  const { stdout } = await execFileAsync('git', ['-C', path, ...args], {
+    timeout: 6000, maxBuffer: 50000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+  });
+  return stdout;
+}
+
+export async function projectGitStatus(name, options = {}) {
+  if (!NAME_RE.test(name)) return { ok: false, error: 'invalid_project_name' };
+  const catalog = await readProjectRegistry(options);
+  const project = catalog.projects.find(p => p.name === name);
+  if (!project) return { ok: false, error: 'unknown_project' };
+  if (!project.available || project.kind !== 'repo') return { ok: false, error: 'project_unavailable' };
+  try {
+    const [branch, status, worktrees] = await Promise.all([
+      runGit(project.path, ['branch', '--show-current']),
+      runGit(project.path, ['status', '--porcelain=v1']),
+      runGit(project.path, ['worktree', 'list', '--porcelain'])
+    ]);
+    return { ok: true, project: name, branch: branch.trim(),
+      changes: status.trim() ? status.trimEnd().split('\n').length : 0,
+      worktrees: worktrees.split('\n').filter(line => line.startsWith('worktree ')).length,
+      checked_live: true };
+  } catch {
+    return { ok: false, error: 'git_status_unavailable', project: name };
+  }
+}
+
+// Compare observed repositories with the canonical registry without silently promoting them.
+// Inventory and navigational aliases are advisory; only PROJECTS.md grants registration.
+export async function auditProjectRegistry(options = {}) {
+  const catalog = await readProjectRegistry(options);
+  const registered = new Set(catalog.projects.map(p => p.name));
+  const observed = new Map();
+  function record(name, source) {
+    if (!NAME_RE.test(name) || registered.has(name)) return;
+    if (!observed.has(name)) observed.set(name, new Set());
+    observed.get(name).add(source);
+  }
+
+  const inventoryFile = options.inventoryFile ??
+    join(homedir(), 'memolabs', 'workspace', 'inventory', 'repos.json');
+  try {
+    const info = await stat(inventoryFile);
+    if (info.size > MAX_REGISTRY_BYTES) throw new Error('inventory_too_large');
+    const data = JSON.parse(await readFile(inventoryFile, 'utf8'));
+    if (Array.isArray(data.repos)) {
+      for (const item of data.repos.slice(0, MAX_PROJECTS)) record(item.name, 'inventory');
+    }
+  } catch { /* an optional inventory must never block the canonical registry */ }
+
+  const aliasesRoot = options.aliasesRoot ?? join(homedir(), 'memolabs');
+  const projectsRoot = await realpath(options.projectsRoot ?? DEFAULT_PROJECTS_ROOT);
+  async function walk(directory, depth) {
+    if (depth > 5) return;
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'workspace') continue;
+      const candidate = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(candidate, depth + 1);
+      } else if (entry.isSymbolicLink()) {
+        try {
+          const target = await realpath(candidate);
+          if (!contained(projectsRoot, target)) continue;
+          const git = await stat(join(target, '.git'));
+          if (git.isDirectory() || git.isFile()) record(basename(target), 'memolabs_alias');
+        } catch { /* broken links are ignored */ }
+      }
+    }
+  }
+  await walk(aliasesRoot, 0);
+  return {
+    source: 'PROJECTS.md',
+    registered_count: catalog.count,
+    missing_registered: catalog.projects.filter(p => !p.available).map(p => p.name),
+    unregistered: [...observed].map(([name, sources]) => ({ name, detected_via: [...sources].sort() }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  };
+}
