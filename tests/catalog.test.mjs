@@ -69,3 +69,23 @@ test('audit flags unregistered repos and aliases without authorizing access', as
   assert.deepEqual(report.unregistered.map(x=>x.name), ['emargo','missing-catalogue']);
   assert.equal((await projectInfo('emargo', options)).error,'unknown_project');
 });
+
+test('a repository moved into the layout root and linked back from ~/projects stays available', async t => {
+  const {root, options} = await fixture(t, [
+    '| moved | moved | repo | active | app | JS | - |',
+    '| escaped | escaped | repo | active | app | JS | - |'
+  ]);
+  const layout = join(root, '..', `layout-${Date.now()}`);
+  t.after(async () => { await rm(layout, { recursive: true, force: true }); });
+  await mkdir(join(layout, 'products', 'moved'), { recursive: true });
+  await symlink(join(layout, 'products', 'moved'), join(root, 'moved'));
+  const outside = await mkdtemp(join(tmpdir(), 'memo-outside-'));
+  t.after(async () => { await rm(outside, { recursive: true, force: true }); });
+  await symlink(outside, join(root, 'escaped'));
+  const withLayout = { ...options, layoutRoot: layout };
+  const info = await projectInfo('moved', withLayout);
+  assert.equal(info.project.available, true);
+  assert.match(info.project.local_path, /layout-\d+\/products\/moved$/);
+  assert.equal((await projectInfo('escaped', withLayout)).project.available, false, 'other symlink escapes stay refused');
+  assert.equal((await projectInfo('moved', { ...options, layoutRoot: join(root, 'nope') })).project.available, false);
+});
