@@ -1,6 +1,6 @@
 {
   "name": "memo-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Read-only multi-host MCP for Memo Labs — local Mac and reachable Netcup VPS",
