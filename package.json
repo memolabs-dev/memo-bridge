@@ -1,9 +1,12 @@
 {
   "name": "memo-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Read-only multi-host MCP for Memo Labs — local Mac and reachable Netcup VPS",
+  "description": "Memo Labs MCP: read-only Mac and VPS observation, project catalogue, and coordination of AI work sessions on GitHub Issues",
+  "engines": {
+    "node": ">=22.16"
+  },
   "scripts": {
     "build": "esbuild server/index.mjs --bundle --platform=node --format=esm --target=node22 --outfile=plugin/server/dist/index.mjs",
     "test": "node --test tests/*.test.mjs",
