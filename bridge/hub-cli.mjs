@@ -1,0 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { createHub } from './hub.mjs';
+const dir=process.env.MEMO_BRIDGE_SECRETS;
+if(!dir)throw new Error('MEMO_BRIDGE_SECRETS required');
+const get=file=>readFileSync(dir+'/'+file,'utf8');
+const tlsKey=get('tls.key'),tlsCert=get('tls.crt');
+const tokenSha256=createHash('sha256').update(get('owner.token').trim()).digest('hex');
+const allowedAgentKeys={mac:get('mac.pub'),vps:get('vps.pub')};
+const hub=createHub({tlsKey,tlsCert,tokenSha256,allowedAgentKeys,audit:ev=>console.error(JSON.stringify(ev))});
+await hub.start();
+console.error('Memo Bridge private hub listening on 127.0.0.1:9443 (not public)');
+process.on('SIGTERM',async()=>{await hub.stop();process.exit(0);});

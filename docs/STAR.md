@@ -9,3 +9,15 @@
 **Result** — PASSED: npm test (3/3); npm run build; npm run smoke; both Mac and VPS returned valid host status. No Sentinel X configuration changed.
 
 **Next** — Design separately deployed HTTPS hub with proper OAuth 2.1 and agents.
+
+## Cycle 2 — Private secure hub (2026-10-13)
+
+**Situation** — No existing OIDC provider; root/deploy retired Coolify key removed and SSH reconnect verified.
+
+**Task** — Secure staging hub with read-only, authenticated multi-host agents, no public ingress.
+
+**Action** — Implemented TLS hub, Ed25519 agent challenges, pinned-cert WebSockets, timing-safe bearer validation, bounded MCP tools, negative tests.
+
+**Result** — Local tests PASSED 4/4, SDK build and local MCP smoke PASSED. Persistent host deployment is pending verification.
+
+**Next** — Connect owner-only OAuth 2.1 + MFA, then independently verify Mac/VPS agents, and address privileged root runner before adding writes.
