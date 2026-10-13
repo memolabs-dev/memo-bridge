@@ -464,7 +464,10 @@ test('github_create_pr validates its input', async t => {
     { workspace_id: WS, worktree_id: WT, title: 'x'.repeat(257) },
     { workspace_id: WS, worktree_id: WT, title: 'x', body: 'x'.repeat(20001) },
     { workspace_id: WS, worktree_id: WT, title: 'x', body: 'nul\u0000' },
-    { workspace_id: WS, worktree_id: WT, title: 'x', draft: 'yes' }
+    { workspace_id: WS, worktree_id: WT, title: 'x', draft: 'yes' },
+    // Pull requests go out under the owner's name: no AI attribution (re-check P1).
+    { workspace_id: WS, worktree_id: WT, title: 'Fix parser', body: 'Done.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)' },
+    { workspace_id: WS, worktree_id: WT, title: 'Fix parser', body: 'Co-Authored-By: Claude <noreply@anthropic.com>' }
   ];
   for (const args of bad) assert.equal((await server.call('github_create_pr', args)).error, 'invalid_input', JSON.stringify(args).slice(0, 80));
   assert.equal((await server.call('github_create_pr', { workspace_id: 'ws_ZZZZZZZZZZZZZZZZ', worktree_id: WT, title: 'x' })).error, 'unknown_workspace');

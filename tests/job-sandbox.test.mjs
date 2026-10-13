@@ -233,3 +233,26 @@ test('finding 4: the security contract no longer claims what jobs could break', 
   }
   assert.match(security, /residual/i, 'SECURITY.md lists the residual risks');
 });
+
+test('re-check C1: a job cannot signal processes outside its sandbox, but can signal its own children', { skip: !DARWIN && 'Seatbelt is macOS only' }, async t => {
+  const w = await world(t);
+  const paths = sandboxPaths({ worktree: w.worktree, stateDir: w.stateDir, jobTmp: w.jobTmp, worktreesRoot: w.worktrees, home: w.home });
+  // An owner process outside the sandbox: the MCP server, another session, an editor.
+  const victim = (await import('node:child_process')).spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => { try { victim.kill('SIGKILL'); } catch { /* gone */ } });
+  const [command, args] = sandboxCommand([process.execPath, '-e',
+    `try { process.kill(${victim.pid}, 'SIGKILL'); console.log('SENT') } catch (e) { console.log(e.code) }
+     const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)']);
+     setTimeout(() => { try { process.kill(c.pid, 'SIGKILL'); console.log('CHILD_OK') } catch (e) { console.log('CHILD_' + e.code) } }, 200);`], paths);
+  const r = spawnSync(command, args, { cwd: w.worktree, encoding: 'utf8', timeout: 20000, env: { PATH: process.env.PATH, HOME: w.jobTmp } });
+  assert.match(r.stdout, /EPERM/, r.stdout + r.stderr);
+  assert.match(r.stdout, /CHILD_OK/, 'its own children stay controllable');
+  assert.equal(victim.exitCode, null, 'the outside process is still running');
+  assert.equal(victim.signalCode, null);
+});
+
+test('re-check: the private-data denylist covers the Memo Labs layout and other credential stores', () => {
+  for (const entry of ['memolabs', 'projects', 'jobs', '.cloudflared', '.wrangler', '.vercel', '.zsh_history', '.cargo/credentials.toml']) {
+    assert.ok(HOME_DENY_READ.includes(entry), entry);
+  }
+});

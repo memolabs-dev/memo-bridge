@@ -28,11 +28,15 @@ export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
 // Folders and files under the owner's home that a job never reads.
 export const HOME_DENY_READ = Object.freeze([
-  '.agent', 'Vault', 'projects', 'Documents', 'Desktop', 'Downloads',
+  '.agent', 'Vault', 'projects', 'memolabs', 'jobs', '.home', 'sentinelx', 'Documents', 'Desktop', 'Downloads',
   '.ssh', '.gnupg', '.aws', '.azure', '.config/gh', '.config/gcloud', '.config/op', '.docker', '.kube',
   '.netrc', '.git-credentials', '.gitconfig', '.config/git', '.npmrc', '.yarnrc', '.yarnrc.yml', '.pypirc',
   '.claude', '.claude.json', '.codex', '.cursor', '.local/share/memo-bridge', '.local/state/memo-bridge',
   'Library/Keychains', 'Library/Application Support', 'Library/Cookies', 'Library/Mail', 'Library/Messages',
+  // Other credential stores and shell history (review of 2026-10-14).
+  '.config/configstore', '.config/rclone', '.config/stripe', '.cloudflared', '.wrangler', '.vercel', '.netlify',
+  '.fly', '.railway', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml', '.gem/credentials',
+  '.zsh_history', '.bash_history', '.python_history', '.node_repl_history',
   'Library/Mobile Documents', 'Library/CloudStorage', 'Library/Containers', 'Library/Group Containers', 'Library/Safari'
 ]);
 
@@ -108,6 +112,11 @@ export function sandboxProfile({ denyReadCount, gitCommon }) {
     '(deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.mDNSResponder"))',
     // Nothing started outside the sandbox: no launchd job, no Launch Services, no Apple Events.
     '(deny job-creation)',
+    // Signals only inside the sandbox: a job can stop its own children, never the owner's other
+    // processes (the MCP server, other sessions, editors, its own runner). The unsandboxed
+    // server can still signal into the sandbox to stop a job.
+    '(deny signal)',
+    '(allow signal (target same-sandbox))',
     '(deny lsopen)',
     '(deny appleevent-send)',
     // No keychain (Git and gh credentials) and no pasteboard.

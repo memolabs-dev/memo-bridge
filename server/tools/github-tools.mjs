@@ -9,6 +9,7 @@ import { ownsWorkspace } from '../coordinator/policy.mjs';
 import { validBranch } from '../coordinator/checkpoints.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
+import { AI_ATTRIBUTION } from '../runners/worktrees.mjs';
 
 export const GITHUB_TOOLS = Object.freeze(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
   'github_create_pr']);
@@ -173,6 +174,8 @@ async function createPr(rt, github, args, ids) {
   if (!WORKTREE_RE.test(args.worktree_id ?? '')) return fail('invalid_input', 'worktree_id');
   if (!validInputText(args.title, LIMITS.title) || !args.title.trim()) return fail('invalid_input', 'title');
   if (args.body !== undefined && !validInputText(args.body, LIMITS.body, { multiline: true })) return fail('invalid_input', 'body');
+  // Pull requests go out under the owner's name: no AI attribution, as for commit messages.
+  if (AI_ATTRIBUTION.some(rx => rx.test(`${args.title}\n${args.body ?? ''}`))) return fail('invalid_input', 'AI attribution');
   if (args.draft !== undefined && typeof args.draft !== 'boolean') return fail('invalid_input', 'draft');
 
   // Local preconditions in one consistent read: owned active workspace, its active worktree on
