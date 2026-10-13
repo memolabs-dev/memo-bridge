@@ -1,0 +1,27 @@
+# Memo Labs landing contract (pilot): lands a pull request once its exact commit is verified.
+# Rules: https://github.com/memolabs-dev/.github/blob/main/docs/landing-contract.md
+# Add the label `hold-merge` to a pull request to keep it open.
+name: Land
+
+on:
+  workflow_run:
+    # Every workflow whose result should gate landing. The last one to finish lands the PR.
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  land:
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      checks: read
+      statuses: read
+    uses: memolabs-dev/.github/.github/workflows/land.yml@main
+    with:
+      method: squash
+      # Workflows to run on main after landing (pushes made with GITHUB_TOKEN trigger nothing).
+      dispatch: ci.yml
