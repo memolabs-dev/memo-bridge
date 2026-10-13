@@ -12,7 +12,7 @@
 | T-09 | P1 | DONE | 013 | T-07 | docs COORDINATOR, SECURITY, README, skill, STAR | AC-12 |
 | T-10 | P1 | DONE | - | T-08 | runtime check vs real registry | AC-13 |
 | T-11 | P1 | DONE | - | T-10 | independent verification + code review | - |
-| T-12 | P1 | IN_PROGRESS | - | T-11 | push branch, open PR, CI green | AC-14 |
+| T-12 | P1 | DONE | - | T-11 | push branch, open PR, CI green | AC-14 |
 | T-13 | P2 | TODO | - | - | Follow-up: unify hub/stdio registry when #5 merges | - |
 | T-14 | P2 | TODO | - | - | Follow-up: Postgres store adapter when hub becomes central | - |
 | T-15 | P2 | TODO | - | - | Follow-up: event journal retention policy | - |

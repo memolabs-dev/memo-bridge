@@ -16,4 +16,4 @@ EV-13 AC-12: COORDINATOR.md, SECURITY.md, README, plugin.json, package.json and 
 EV-14 AC-13: runtime check of the bundled server against the real ~/projects/PROJECTS.md with a temporary state dir. Principal local:memo, claim ok, checkpoint of origin/main bf600f8 gives durability remote, unknown project gives unknown_project. PASS.
 EV-15 Mutation testing: removing the lease_held check fails AC-01 and AC-03; removing the generation check fails AC-04; BEGIN DEFERRED for writes fails AC-01.
 EV-16 Independent verifier: 9 findings (2 medium, 1 low-medium, 6 low). All fixed with regression tests (28 tests total). No fencing defect was found.
-EV-17 AC-14: see the PR CI run (recorded in 09-closure.md).
+EV-17 AC-14: PR memolabs-dev/memo-bridge#10, GitHub Actions CI on Node 22 and Node 24: 2/2 checks passed (npm ci, test, build, smoke).
