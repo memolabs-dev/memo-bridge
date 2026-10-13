@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { coordinatorOn, fakeGitHub, ledgerFor, skipWithoutLedger, tempStateDir } from './helpers/coordinator-fixture.mjs';
+import { coordinatorOn, fakeGitHub, journal, ledgerFor, skipWithoutLedger, tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const WORKER = fileURLToPath(new URL('./helpers/claim-worker.mjs', import.meta.url));
 const DROP = 'memolabs-dev/drop#7';
@@ -45,11 +45,11 @@ test('eight sessions in eight processes race for one Issue: the ledger grants ex
       JSON.stringify(results.filter(r => !r.ok)));
     const { store, coordinator } = coordinatorOn(stateDir, { ledger: ledgerFor(github) });
     t.after(() => store.close());
-    const status = await coordinator.issueStatus({ issue: DROP });
+    const status = await coordinator.taskStatus({ issue: DROP });
     assert.equal(status.lease.state, 'claimed');
     assert.equal(status.lease.fence_sha, winners[0].fence);
     assert.equal(status.lease.epoch, 1);
-    const ok = (await coordinator.events({ issue: DROP, limit: 200 })).events.filter(e => e.op === 'issue_claim' && e.outcome === 'ok');
+    const ok = (await journal(store, { issue: DROP })).filter(e => e.op === 'task_claim' && e.outcome === 'ok');
     assert.equal(ok.length, 1);
   });
 

@@ -5,20 +5,59 @@ import { userInfo } from 'node:os';
 export const CAPABILITIES = Object.freeze({
   READ: 'coordinator:read',
   WRITE: 'coordinator:write',
-  AUDIT: 'coordinator:audit'
+  AUDIT: 'coordinator:audit',
+  // Phase 3, runners: separate capabilities so a remote principal can be granted reading
+  // without execution or repository writes.
+  EXECUTE: 'runner:execute',
+  REPO_WRITE: 'repo:write',
+  GITHUB_WRITE: 'github:write'
 });
 
 export const OPERATION_CAPABILITY = Object.freeze({
+  // Workspaces
   workspace_open: CAPABILITIES.WRITE,
   workspace_close: CAPABILITIES.WRITE,
   workspace_status: CAPABILITIES.READ,
   workspace_list: CAPABILITIES.READ,
-  issue_status: CAPABILITIES.READ,
-  issue_claim: CAPABILITIES.WRITE,
-  issue_heartbeat: CAPABILITIES.WRITE,
-  issue_release: CAPABILITIES.WRITE,
-  issue_checkpoint: CAPABILITIES.WRITE,
-  coordinator_events: CAPABILITIES.READ
+  workspace_recover: CAPABILITIES.READ,
+  // Tasks (GitHub Issues + lease ledger)
+  tasks_list: CAPABILITIES.READ,
+  task_status: CAPABILITIES.READ,
+  task_claim: CAPABILITIES.WRITE,
+  task_renew: CAPABILITIES.WRITE,
+  task_release: CAPABILITIES.WRITE,
+  task_complete: CAPABILITIES.WRITE,
+  task_checkpoint: CAPABILITIES.WRITE,
+  // Worktrees and files inside them
+  worktrees_list: CAPABILITIES.READ,
+  worktree_status: CAPABILITIES.READ,
+  worktree_read_file: CAPABILITIES.READ,
+  worktree_list_files: CAPABILITIES.READ,
+  worktree_diff: CAPABILITIES.READ,
+  worktree_create: CAPABILITIES.REPO_WRITE,
+  worktree_write_file: CAPABILITIES.REPO_WRITE,
+  worktree_commit: CAPABILITIES.REPO_WRITE,
+  worktree_push: CAPABILITIES.REPO_WRITE,
+  worktree_remove: CAPABILITIES.REPO_WRITE,
+  // Jobs
+  jobs_list: CAPABILITIES.READ,
+  job_status: CAPABILITIES.READ,
+  job_events: CAPABILITIES.READ,
+  job_results: CAPABILITIES.READ,
+  jobs_submit: CAPABILITIES.EXECUTE,
+  job_cancel: CAPABILITIES.EXECUTE,
+  // Hosts
+  host_capabilities: CAPABILITIES.READ,
+  host_resources: CAPABILITIES.READ,
+  // GitHub
+  github_issues: CAPABILITIES.READ,
+  github_pull_requests: CAPABILITIES.READ,
+  github_workflows: CAPABILITIES.READ,
+  github_checks: CAPABILITIES.READ,
+  github_create_pr: CAPABILITIES.GITHUB_WRITE,
+  // Audit
+  audit_events: CAPABILITIES.READ,
+  audit_operation: CAPABILITIES.READ
 });
 
 const PRINCIPAL_RE = /^[a-z]+:[A-Za-z0-9._@-]{1,120}$/;
@@ -47,3 +86,8 @@ export function authorize(principal, operation) {
 export function ownsWorkspace(principal, workspace) {
   return Boolean(workspace) && workspace.principal === principal.id;
 }
+
+// The worker identity recorded in the ledger. It is derived from the workspace, so another
+// workspace, even of the same principal, can never act on this claim. (Re-exported by
+// coordinator/index.mjs; it lives here so the job runner can use it without the Coordinator.)
+export const workerFor = workspace => `mb.${workspace.host}.${workspace.id}`;

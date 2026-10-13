@@ -1,30 +1,39 @@
 // Coordinator MCP tools. Shared by every Memo Bridge entry point (local stdio today, the
 // authenticated hub later), so all clients see the same contract. The entry point decides
 // the principal; tool arguments never carry identity or permissions.
+//
+// A task is a GitHub Issue. Tools say "task"; the argument stays `issue`, written owner/repo#n.
+// Authorization and the audit journal are applied inside the coordinator API, before any
+// argument is looked at (server/coordinator/index.mjs).
 import { z } from 'zod/v4';
-import { CLIENT_TYPES, HOSTS } from '../coordinator/index.mjs';
+import { CLIENT_TYPES, HOSTS, SUMMARY_MAX, TASKS_LIMIT } from '../coordinator/index.mjs';
 import { LEASE_TTL, OUTCOMES } from '../coordinator/issue-lease.mjs';
 
 export const COORDINATOR_TOOLS = Object.freeze(['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close',
-  'issue_status', 'issue_claim', 'issue_heartbeat', 'issue_release', 'issue_checkpoint', 'coordinator_events']);
+  'workspace_recover', 'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete',
+  'task_checkpoint']);
 
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
 
 const workspaceId = z.string().max(40).describe('Workspace id returned by workspace_open (ws_…).');
-const issue = z.string().max(160).describe('GitHub Issue reference, e.g. memolabs-dev/cuesheet#42.');
-const claimId = z.string().max(32).describe('claim_id returned by issue_claim.');
-const fence = z.string().max(40).describe('Latest fence returned by issue_claim or issue_heartbeat. Writes with an outdated fence are refused.');
+const issue = z.string().max(160).describe('The task: a GitHub Issue reference, owner/repo#n, e.g. memolabs-dev/cuesheet#42.');
+const claimId = z.string().max(32).describe('claim_id returned by task_claim.');
+const fence = z.string().max(40).describe('Latest fence returned by task_claim or task_renew. Writes with an outdated fence are refused.');
 const ttl = z.number().int().min(LEASE_TTL.min).max(LEASE_TTL.max).optional()
-  .describe(`Lease duration in seconds (default ${LEASE_TTL.default}). Renew with issue_heartbeat before it expires.`);
+  .describe(`Lease duration in seconds (default ${LEASE_TTL.default}). Renew with task_renew before it expires.`);
 
-// getCoordinator() opens storage lazily so the read-only tools keep working when the
-// private state directory is unavailable.
-export function registerCoordinatorTools(server, getCoordinator) {
+// getService() returns either the shared runtime (server/runtime.mjs, whose coordinator() is
+// opened lazily) or a coordinator directly. Storage opens lazily so the read-only tools of
+// other modules keep working when the private state directory is unavailable.
+export function registerCoordinatorTools(server, getService) {
   const call = method => async args => {
     let coordinator;
-    try { coordinator = await getCoordinator(); } catch (error) {
+    try {
+      const service = await getService();
+      coordinator = typeof service?.coordinator === 'function' ? service.coordinator() : service;
+    } catch (error) {
       // Only our own short codes reach the model; filesystem paths and engine messages do not.
       const code = String(error?.message ?? '');
       return result({ ok: false, error: 'store_unavailable', ...(/^state_[a-z_]{1,40}$/.test(code) ? { detail: code } : {}) });
@@ -45,7 +54,7 @@ export function registerCoordinatorTools(server, getCoordinator) {
   }, call('workspaceOpen'));
 
   server.registerTool('workspace_status', {
-    description: 'Show a workspace you own, its worker identity and the Issue claims it holds.',
+    description: 'Show a workspace you own, its worker identity and the task claims its local mirror records as held. Use task_status or workspace_recover for the shared ledger view.',
     inputSchema: z.object({ workspace_id: workspaceId }),
     annotations: { ...read, openWorldHint: false }
   }, call('workspaceStatus'));
@@ -57,46 +66,61 @@ export function registerCoordinatorTools(server, getCoordinator) {
   }, call('workspaceList'));
 
   server.registerTool('workspace_close', {
-    description: 'Close a workspace you own and release its Issue claims (outcome cancelled). Safe to repeat: claims the ledger could not release yet are listed as unreleased and retried on the next call.',
+    description: 'Close a workspace you own and release its task claims (outcome cancelled). Safe to repeat: claims the ledger could not release yet are listed as unreleased and retried on the next call.',
     inputSchema: z.object({ workspace_id: workspaceId }),
     annotations: { ...write, idempotentHint: true }
   }, call('workspaceClose'));
 
-  server.registerTool('issue_status', {
-    description: 'Show the shared lease state of a GitHub Issue (claimed or not, by whom, until when) and its recorded checkpoints.',
+  server.registerTool('workspace_recover', {
+    description: 'Resume a workspace after losing context. Read-only snapshot: the workspace, each held claim reconciled with the shared ledger (still_held with the current fence, expired, lost or unknown), active worktrees, the last 10 checkpoints of its tasks, recent jobs, and the next safe actions. Writes nothing.',
+    inputSchema: z.object({ workspace_id: workspaceId }),
+    annotations: read
+  }, call('workspaceRecover'));
+
+  server.registerTool('tasks_list', {
+    description: 'List claimable tasks: open GitHub Issues labelled agent:ready with exactly one priority:p0|p1|p2 and none of status:blocked, needs:human, type:epic, agent:working. Only repositories that are the GitHub origin of a registered project and in the lease ledger allowlist. Ranked p0, p1, p2, then oldest first. Lease state is not included: task_claim and task_status are authoritative.',
+    inputSchema: z.object({
+      project: z.string().max(80).optional().describe('Restrict to one registered project (projects_list).'),
+      limit: z.number().int().min(1).max(TASKS_LIMIT.max).optional().describe(`At most this many tasks (default ${TASKS_LIMIT.default}).`)
+    }),
+    annotations: read
+  }, call('tasksList'));
+
+  server.registerTool('task_status', {
+    description: 'Show the shared lease state of a task (claimed or not, by which worker, until when, current fence) and its recorded checkpoints.',
     inputSchema: z.object({ issue }),
     annotations: read
-  }, call('issueStatus'));
+  }, call('taskStatus'));
 
-  server.registerTool('issue_claim', {
-    description: 'Reserve a GitHub Issue for a workspace through the Memo Labs lease ledger (a Git ref in memolabs-dev/.github, visible to every machine). The Issue must be open and labelled agent:ready with one priority label, and it must belong to the workspace project when the project Git origin is known. Exactly one worker can hold it.',
+  server.registerTool('task_claim', {
+    description: 'Reserve a task for a workspace through the Memo Labs lease ledger (a Git ref in memolabs-dev/.github, visible to every machine). The Issue must be open and labelled agent:ready with one priority label, and it must belong to the workspace project when the project Git origin is known. Exactly one worker can hold it.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl }),
     annotations: write
-  }, call('issueClaim'));
+  }, call('taskClaim'));
 
-  server.registerTool('issue_heartbeat', {
+  server.registerTool('task_renew', {
     description: 'Extend a claim you hold. Returns a new fence; use it for every later call. Fails with stale_lease once the claim expired or was taken over: stop writing then.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence, ttl_seconds: ttl }),
     annotations: write
-  }, call('issueHeartbeat'));
+  }, call('taskRenew'));
 
-  server.registerTool('issue_release', {
-    description: 'Release a claim with an outcome, also from a closed workspace. Never closes the Issue and never deploys.',
+  server.registerTool('task_release', {
+    description: 'Release a claim with an outcome (completed, blocked, failed, cancelled), also from a closed workspace. Never closes the Issue, never merges, never deploys.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence, outcome: z.enum(OUTCOMES) }),
     annotations: write
-  }, call('issueRelease'));
+  }, call('taskRelease'));
 
-  server.registerTool('issue_checkpoint', {
+  server.registerTool('task_complete', {
+    description: 'Release a claim with outcome completed and an optional summary of what was done, kept with the claim. Same rules as task_release: never closes the Issue, never merges, never deploys.',
+    inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence,
+      summary: z.string().max(SUMMARY_MAX).optional().describe('What was done, for the next session and the audit (plain text).') }),
+    annotations: write
+  }, call('taskComplete'));
+
+  server.registerTool('task_checkpoint', {
     description: 'Record a durable checkpoint (branch + full commit SHA) under a claim you hold. The ledger re-verifies the claim first; the commit is checked read-only in the project repository and reported as remote (resumable on another machine), local_only, or unverified. Uncommitted files are never transferred.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence,
       branch: z.string().max(200), commit: z.string().max(64), note: z.string().max(500).optional() }),
     annotations: write
-  }, call('issueCheckpoint'));
-
-  server.registerTool('coordinator_events', {
-    description: 'Read the Coordinator audit journal (newest first), optionally for one Issue or workspace.',
-    inputSchema: z.object({ issue: issue.optional(), workspace_id: workspaceId.optional(),
-      limit: z.number().int().min(1).max(200).optional() }),
-    annotations: { ...read, openWorldHint: false }
-  }, call('events'));
+  }, call('taskCheckpoint'));
 }

@@ -7,7 +7,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, st
 import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -109,8 +109,58 @@ CREATE INDEX IF NOT EXISTS events_issue ON events(issue_ref, seq);
 CREATE INDEX IF NOT EXISTS events_workspace ON events(workspace_id, seq);
 `;
 
+// v2: runner state (Phase 3). Worktrees and jobs belong to a workspace; job events are append-only.
+const SCHEMA_V2 = `
+CREATE TABLE IF NOT EXISTS worktrees (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  project_id TEXT NOT NULL,
+  host TEXT NOT NULL,
+  path TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  base_ref TEXT NOT NULL,
+  base_commit TEXT NOT NULL,
+  issue_ref TEXT,
+  status TEXT NOT NULL CHECK (status IN ('active','removed')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  removed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS worktrees_workspace ON worktrees(workspace_id, status);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  project_id TEXT NOT NULL,
+  host TEXT NOT NULL,
+  recipe TEXT NOT NULL,
+  argv_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed','cancelled','timed_out','interrupted')),
+  exit_code INTEGER,
+  pid INTEGER,
+  timeout_ms INTEGER NOT NULL,
+  log_path TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  summary TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_workspace ON jobs(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(host, status);
+CREATE TABLE IF NOT EXISTS job_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL REFERENCES jobs(id),
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
+`;
+
 const WORKSPACE_COLUMNS = ['status', 'branch', 'updated_at', 'closed_at'];
 const CLAIM_COLUMNS = ['fence_sha', 'expires_at', 'state', 'outcome', 'updated_at'];
+const WORKTREE_COLUMNS = ['status', 'issue_ref', 'updated_at', 'removed_at'];
+const JOB_COLUMNS = ['status', 'exit_code', 'pid', 'started_at', 'ended_at', 'summary'];
 
 function setClause(patch, allowed) {
   const keys = Object.keys(patch);
@@ -162,6 +212,53 @@ function repository(db) {
     listCheckpoints(issueRef, limit) {
       return db.prepare('SELECT * FROM checkpoints WHERE issue_ref = ? ORDER BY id DESC LIMIT ?').all(issueRef, limit).map(plain);
     },
+    insertWorktree(w) {
+      db.prepare(`INSERT INTO worktrees (id, workspace_id, project_id, host, path, branch, base_ref, base_commit, issue_ref,
+        status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`)
+        .run(w.id, w.workspace_id, w.project_id, w.host, w.path, w.branch, w.base_ref, w.base_commit, w.issue_ref ?? null,
+          w.created_at, w.updated_at);
+    },
+    getWorktree(id) { return plain(db.prepare('SELECT * FROM worktrees WHERE id = ?').get(id)); },
+    listWorktrees({ workspace_id, project_id, status, limit = 100 } = {}) {
+      const where = []; const values = [];
+      if (workspace_id) { where.push('workspace_id = ?'); values.push(workspace_id); }
+      if (project_id) { where.push('project_id = ?'); values.push(project_id); }
+      if (status) { where.push('status = ?'); values.push(status); }
+      const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      return db.prepare(`SELECT * FROM worktrees ${clause} ORDER BY created_at DESC, id LIMIT ?`).all(...values, limit).map(plain);
+    },
+    updateWorktree(id, patch) {
+      const { sql, values } = setClause(patch, WORKTREE_COLUMNS);
+      return Number(db.prepare(`UPDATE worktrees SET ${sql} WHERE id = ?`).run(...values, id).changes);
+    },
+    insertJob(j) {
+      db.prepare(`INSERT INTO jobs (id, workspace_id, worktree_id, project_id, host, recipe, argv_json, status, timeout_ms,
+        log_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`)
+        .run(j.id, j.workspace_id, j.worktree_id, j.project_id, j.host, j.recipe, j.argv_json, j.timeout_ms, j.log_path, j.created_at);
+    },
+    getJob(id) { return plain(db.prepare('SELECT * FROM jobs WHERE id = ?').get(id)); },
+    listJobs({ workspace_id, host, status, limit = 50 } = {}) {
+      const where = []; const values = [];
+      if (workspace_id) { where.push('workspace_id = ?'); values.push(workspace_id); }
+      if (host) { where.push('host = ?'); values.push(host); }
+      if (status) { where.push('status = ?'); values.push(status); }
+      const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      return db.prepare(`SELECT * FROM jobs ${clause} ORDER BY created_at DESC, id LIMIT ?`).all(...values, limit).map(plain);
+    },
+    // Compare-and-set on status so two processes never both move a job forward.
+    updateJob(id, patch, expectedStatus) {
+      const { sql, values } = setClause(patch, JOB_COLUMNS);
+      const guard = expectedStatus ? ' AND status = ?' : '';
+      return Number(db.prepare(`UPDATE jobs SET ${sql} WHERE id = ?${guard}`)
+        .run(...values, id, ...(expectedStatus ? [expectedStatus] : [])).changes);
+    },
+    appendJobEvent(e) {
+      db.prepare('INSERT INTO job_events (job_id, at, kind, detail) VALUES (?, ?, ?, ?)').run(e.job_id, e.at, e.kind, e.detail ?? null);
+    },
+    listJobEvents(jobId, afterSeq = 0, limit = 200) {
+      return db.prepare('SELECT * FROM job_events WHERE job_id = ? AND seq > ? ORDER BY seq LIMIT ?').all(jobId, afterSeq, limit).map(plain);
+    },
+    getEvent(seq) { return plain(db.prepare('SELECT * FROM events WHERE seq = ?').get(seq)); },
     appendEvent(e) {
       db.prepare(`INSERT INTO events (at, principal, workspace_id, issue_ref, op, outcome, code)
         VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -185,10 +282,9 @@ function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
   try {
     const current = Number(db.prepare('PRAGMA user_version').get().user_version);
-    if (current < 1) {
-      db.exec(SCHEMA);
-      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    }
+    if (current < 1) db.exec(SCHEMA);
+    if (current < 2) db.exec(SCHEMA_V2);
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

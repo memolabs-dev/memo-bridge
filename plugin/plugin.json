@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "memo-bridge",
-  "version": "0.3.0",
-  "description": "Private MCP for Memo Labs: inspect a Mac and a Netcup VPS read-only, browse registered projects, and coordinate parallel AI work sessions on GitHub Issues (workspaces, shared Issue leases, Git-verified checkpoints) without relying on the Sentinel X commercial hub.",
+  "version": "0.4.0",
+  "description": "Private MCP for Memo Labs: inspect a Mac and a Netcup VPS read-only, browse registered projects, coordinate parallel AI work sessions on GitHub Issues (workspaces, shared Issue leases, Git-verified checkpoints), and run claimed tasks on the Mac (worktrees, file edits, test/build/lint jobs, commit, push, pull request) without relying on the Sentinel X commercial hub.",
   "author": {
     "name": "Memo Labs"
   },
@@ -10,8 +10,8 @@
     "com.openai": {
       "interface": {
         "displayName": "Memo Bridge",
-        "shortDescription": "Mac + VPS status and work coordination",
-        "longDescription": "Inspect the Memo Labs Mac and VPS with fixed read-only probes, list registered projects, and coordinate work between sessions: open a workspace, claim a GitHub Issue through the shared Memo Labs lease ledger, record pushed checkpoints. No shell, no project file writes, no merge. Requires a local Mac runtime, python3, a logged-in gh, and SSH access to the VPS.",
+        "shortDescription": "Mac + VPS status, work coordination and a Mac runner",
+        "longDescription": "Inspect the Memo Labs Mac and VPS with fixed read-only probes, list registered projects, and coordinate work between sessions: open a workspace, claim a GitHub Issue through the shared Memo Labs lease ledger, work on the claimed task in an isolated worktree, run the repository's own test/build/lint recipe inside a macOS sandbox (worktree writes only, loopback network only, no private data or credentials; MEMO_BRIDGE_JOB_SANDBOX=off makes jobs owner-equivalent), commit, push and open a pull request. Its tools use no shell and never write a default branch, force-push, merge or deploy. Requires a local Mac runtime, python3, a logged-in gh, and SSH access to the VPS.",
         "developerName": "Memo Labs",
         "category": "Developer Tools",
         "capabilities": [

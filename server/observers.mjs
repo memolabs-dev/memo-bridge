@@ -18,7 +18,7 @@ const unavailable = (source, detail) => ({ ok: false, error: 'source_unavailable
 // Strip control and bidirectional characters, then bound: this text is read back by models.
 function text(value, max = TEXT_MAX) {
   if (typeof value !== 'string') return null;
-  return value.replace(/[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+  return value.replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
 function freshness(generatedAt, maxAgeMinutes, now) {
