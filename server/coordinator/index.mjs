@@ -161,9 +161,10 @@ function publicWorkspace(w) {
 }
 
 // Last recorded change of a workspace (ms): the workspace row, its last journal event, claim,
-// worktree or job. Indexed reads only; reads by the model are not recorded.
+// worktree or job. Indexed reads only; reads by the model and refused calls are not recorded.
 function lastActivity(repo, w, claims) {
-  const event = repo.listEvents({ workspace_id: w.id, limit: 1 })[0];
+  // Refusals do not count: another conversation knocking must not keep a workspace busy.
+  const event = repo.listEvents({ workspace_id: w.id, limit: 20 }).find(e => e.outcome === 'ok');
   const worktree = repo.listWorktrees({ workspace_id: w.id, limit: 1 })[0];
   const job = repo.listJobs({ workspace_id: w.id, limit: 1 })[0];
   return Math.max(w.created_at ?? 0, w.updated_at ?? 0, event?.at ?? 0, worktree?.updated_at ?? 0,
