@@ -6,6 +6,10 @@
 //   push          the worktree's origin    contents:write                 PAT fallback push-gh
 //   pull_request  the worktree's origin    contents:write, pull_requests:write  (no PAT: as before,
 //                                          the runner's own gh environment)
+//   read          a registered repository  actions, contents, issues, pull_requests: read (no PAT)
+//   issues        a registered repository  issues:write, for batch labels and Issues (no PAT)
+// Without the App, read and issues answer 'ambient' like pull_request: the runner keeps its own
+// gh environment, which on the VPS has no login, so those calls fail as github_auth_required.
 //
 // App mode needs, under $CREDENTIALS_DIRECTORY, the `app-key` credential (the App's PEM private
 // key, systemd LoadCredential=) and, in the environment (no secret there), the App settings:
@@ -48,7 +52,9 @@ const CACHE_MAX = 64;
 export const TOKEN_PURPOSES = Object.freeze({
   ledger: Object.freeze({ permissions: Object.freeze({ contents: 'write' }), pat: LEDGER_CREDENTIAL, repo: LEDGER_REPO }),
   push: Object.freeze({ permissions: Object.freeze({ contents: 'write' }), pat: PUSH_CREDENTIAL }),
-  pull_request: Object.freeze({ permissions: Object.freeze({ contents: 'write', pull_requests: 'write' }), pat: null })
+  pull_request: Object.freeze({ permissions: Object.freeze({ contents: 'write', pull_requests: 'write' }), pat: null }),
+  read: Object.freeze({ permissions: Object.freeze({ actions: 'read', contents: 'read', issues: 'read', pull_requests: 'read' }), pat: null }),
+  issues: Object.freeze({ permissions: Object.freeze({ issues: 'write' }), pat: null })
 });
 
 export const APP_ENV = Object.freeze({
