@@ -340,7 +340,7 @@ removes the plist; keys and logs stay.
 | `operator-mac.pub` | 0444 | its public half, read by lab-infra (`memo_operator_mac_pub_path`) |
 | `hub-ca.crt` | 0444 | the hub TLS CA, copied from `~/.config/memo-bridge/hub-ca.crt` |
 | `operator-hub.pub` | 0444 | the hub's operator signing key (one or more PEM blocks) |
-| `policy.json` | 0444 | the Mac policy: `max_tier: exec`, `approval_mode: dangerous`, roots, denylist, `repositories` read from `~/memolabs/PROJECTS.md` through `~/memolabs/.links` |
+| `policy.json` | 0444 | the Mac policy: `max_tier: exec`, `approval_mode: dangerous`, roots, denylist, `repositories` read from `~/memolabs/PROJECTS.md`, Path relative to `~/memolabs` (`MEMOLABS_ROOT`) |
 | `state/` | 0700 | background runs, uploads, the auto-freeze marker |
 | `~/Library/Logs/memo-operator/audit.jsonl` | 0600 | the Mac's hash-chained journal |
 

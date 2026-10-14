@@ -1,6 +1,6 @@
 // host_capabilities, host_resources, audit_events and audit_operation.
 // Every test uses a private temporary state directory and stubbed probes: no real gh, ssh,
-// python or GitHub, and nothing under the user's real state or ~/projects.
+// python or GitHub, and nothing under the user's real state or the real registry root.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';

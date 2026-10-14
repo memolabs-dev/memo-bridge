@@ -201,7 +201,7 @@ async function until(fn, ms = 5000) {
 async function macStack(t) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'memo-pg-home-')));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  for (const d of ['memolabs/os/app', 'memolabs/.links', 'Documents', '.memo-operator/state', 'Library/Logs/memo-operator']) mkdirSync(join(home, d), { recursive: true });
+  for (const d of ['memolabs/os/app', 'Documents', '.memo-operator/state', 'Library/Logs/memo-operator']) mkdirSync(join(home, d), { recursive: true });
   writeFileSync(join(home, 'memolabs/PROJECTS.md'), '# registry\n');
   const raw = macPolicy(home);
   const policy = parseOperatorPolicy(raw, { home });

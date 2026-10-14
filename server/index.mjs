@@ -102,7 +102,7 @@ server.registerTool('bridge_info', {
       local_state: 'private SQLite store (workspaces, claim mirror, checkpoints, worktrees, jobs, audit), outside repositories and iCloud'
     },
     runner: {
-      worktrees: 'isolated Git worktrees under ~/projects/_worktrees/<project>/ (or MEMO_BRIDGE_WORKTREES_ROOT); Git hooks disabled',
+      worktrees: 'isolated Git worktrees under $MEMOLABS_ROOT/workspace/worktrees/<project>/ (or MEMO_BRIDGE_WORKTREES_ROOT); Git hooks disabled',
       jobs: 'detected recipes only (test, build, lint); at most MEMO_BRIDGE_MAX_JOBS (default 2) per host; logs in the private state directory',
       // Executor, queueing, concurrency limit and job statuses of this process (hosts.mjs, TODO-P4-16).
       ...runnerInfo({ ops: ALL_TOOLS, sandbox: (() => { const m = sandboxMode(); return m.ok ? m.mode : m.error; })() })

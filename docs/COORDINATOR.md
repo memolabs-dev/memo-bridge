@@ -310,7 +310,7 @@ The local store holds workspaces, a mirror of the claims held here, checkpoints 
 
 ## Ledger location and requirements
 
-- **Script.** The ledger script is read from `MEMO_BRIDGE_GOVERNANCE_ROOT`, by default `~/projects/memolabs-org-gh`, the local checkout of `memolabs-dev/.github`.
+- **Script.** The ledger script is read from `MEMO_BRIDGE_GOVERNANCE_ROOT`, by default the project registered as `memolabs-org-gh` in `$MEMOLABS_ROOT/PROJECTS.md`, the local checkout of `memolabs-dev/.github`.
 - **Requirements.** It needs `python3`, plus a `gh` CLI logged in with permission to write refs in `memolabs-dev/.github`.
 - **CI.** CI checks out `main` of `memolabs-dev/.github` on purpose: Memo Bridge must keep working with the ledger as it evolves, and a breaking ledger change should turn this CI red at once. The tests drive the ledger offline through `tests/helpers/fake-gh`, which reproduces exclusive ref creation and fast-forward-only updates.
 

@@ -1,14 +1,17 @@
+import { readFileSync } from 'node:fs';
 import { readFile, realpath, stat, readdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { resolve, relative, isAbsolute, join, basename } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { memolabsRoot } from './memolabs-root.mjs';
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_PROJECTS_ROOT = process.env.MEMO_BRIDGE_PROJECTS_ROOT || join(homedir(), 'projects');
-// Repositories move into the Memo Labs layout (~/memolabs/<area>/<name>) and keep a
-// ~/projects/<name> symlink. Their real path may therefore live under this second root.
-const DEFAULT_LAYOUT_ROOT = process.env.MEMO_BRIDGE_LAYOUT_ROOT || join(homedir(), 'memolabs');
+// The registry root: PROJECTS.md lives there and its Path column is relative to it. On the Mac
+// it is MEMOLABS_ROOT (default ~/memolabs); a host with its own layout sets MEMO_BRIDGE_PROJECTS_ROOT.
+const DEFAULT_PROJECTS_ROOT = process.env.MEMO_BRIDGE_PROJECTS_ROOT || memolabsRoot();
+// A registry whose rows are symlinks may point into this second root (real paths are accepted
+// under either root, never elsewhere).
+const DEFAULT_LAYOUT_ROOT = process.env.MEMO_BRIDGE_LAYOUT_ROOT || memolabsRoot();
 const MAX_REGISTRY_BYTES = 1024 * 1024;
 const MAX_PROJECTS = 500;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
@@ -45,6 +48,20 @@ function parseMainTable(document) {
   }
   if (!inside) throw new Error('projects_section_missing');
   return records;
+}
+
+// Synchronous lookup of one registered project, for defaults computed at startup (the
+// governance checkout of the Coordinator). Returns the absolute path, or null when the registry
+// or the row is missing: callers report the absence, they never guess a folder.
+export function resolveRegisteredPathSync(name, { env = process.env, projectsRoot } = {}) {
+  const root = projectsRoot ?? (env.MEMO_BRIDGE_PROJECTS_ROOT || memolabsRoot(env));
+  let text;
+  try { text = readFileSync(join(root, 'PROJECTS.md'), 'utf8'); } catch { return null; }
+  if (text.length > MAX_REGISTRY_BYTES) return null;
+  let records;
+  try { records = parseMainTable(text); } catch { return null; }
+  const record = records.find(r => r.name === name);
+  return record ? resolve(root, record.pathRelative) : null;
 }
 
 export async function readProjectRegistry(options = {}) {
@@ -144,7 +161,7 @@ export async function auditProjectRegistry(options = {}) {
   }
 
   const inventoryFile = options.inventoryFile ??
-    join(homedir(), 'memolabs', 'workspace', 'inventory', 'repos.json');
+    join(memolabsRoot(), 'workspace', 'inventory', 'repos.json');
   try {
     const info = await stat(inventoryFile);
     if (info.size > MAX_REGISTRY_BYTES) throw new Error('inventory_too_large');
@@ -154,7 +171,7 @@ export async function auditProjectRegistry(options = {}) {
     }
   } catch { /* an optional inventory must never block the canonical registry */ }
 
-  const aliasesRoot = options.aliasesRoot ?? join(homedir(), 'memolabs');
+  const aliasesRoot = options.aliasesRoot ?? memolabsRoot();
   const projectsRoot = await realpath(options.projectsRoot ?? DEFAULT_PROJECTS_ROOT);
   async function walk(directory, depth) {
     if (depth > 5) return;
