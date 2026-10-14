@@ -16,7 +16,7 @@ export const CAPABILITIES = Object.freeze({
   OPERATOR_READ: 'operator:read',     // T0
   OPERATOR_WRITE: 'operator:write',   // T1
   OPERATOR_EXEC: 'operator:exec',     // T2
-  OPERATOR_ROOT: 'operator:root'      // T3, lab only
+  OPERATOR_ROOT: 'operator:root'      // T3, lab and the Mac, through a root helper
 });
 
 // The operator capabilities in tier order: index = tier (T0..T3).
@@ -108,7 +108,7 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   // T2: as the agent user; operator_run with as_root is T3 (operatorCallTier)
   operator_run: CAPABILITIES.OPERATOR_EXEC,
   operator_service: CAPABILITIES.OPERATOR_EXEC,
-  // T3, lab only, through the root helper
+  // T3, through the root helper (lab; the Mac once installed)
   operator_script: CAPABILITIES.OPERATOR_ROOT,
   // Multi-session (D-MS4): locks, answered by the hub; T1 like the writes they announce
   operator_lock: CAPABILITIES.OPERATOR_WRITE,

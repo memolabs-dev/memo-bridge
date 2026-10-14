@@ -19,6 +19,10 @@ import { verifyChain } from '../bridge/operator-audit.mjs';
 import { dangerReason, needsApproval } from '../bridge/operator-dangerous.mjs';
 import { macLayout, writePolicy } from '../deploy/mac/operator-mac.mjs';
 import { operatorKeys, signingPair } from './helpers/operator-fixture.mjs';
+import { createHub } from '../bridge/hub.mjs';
+import { createAgent } from '../bridge/agent.mjs';
+import { generateAgentIdentity } from '../bridge/crypto.mjs';
+import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UID = process.getuid();
@@ -356,4 +360,53 @@ test('R-MR-09: the install script dry run prints root-owned targets only, render
   }
   assert.equal(listing(), before);
   assert.equal(readdirSync(home).join(','), '.memo-operator');
+});
+
+// The hub rules of multi-session (#32) hold for Mac root as for lab root: an explicit host (never
+// defaulted to the connected Mac), the caller's workspace and a global lock, Telegram approval for
+// the dangerous list; the workspace_id never reaches the Mac.
+test('hub: Mac root calls need host "mac", a workspace and a global lock, and approval when dangerous', async t => {
+  const { tlsKey, tlsCert } = (() => {
+    const dir = mkdtempSync(join(tmpdir(), 'memo-mr-tls-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const out = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1', '-subj', '/CN=localhost',
+      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1', '-keyout', join(dir, 'k'), '-out', join(dir, 'c')], { encoding: 'utf8' });
+    assert.equal(out.status, 0, out.stderr);
+    return { tlsKey: readFileSync(join(dir, 'k'), 'utf8'), tlsCert: readFileSync(join(dir, 'c'), 'utf8') };
+  })();
+  const id = generateAgentIdentity();
+  const verifyWorkspace = async (principal, ws) => ({ ok: true, workspace: { workspace_id: ws, status: 'active', session_tag: null, project: 'drop' } });
+  const hub = createHub({ tlsKey, tlsCert, tokenSha256: 'a'.repeat(64), port: 0, audit: () => {},
+    allowedAgentKeys: { mac: generateAgentIdentity().publicKey, vps: generateAgentIdentity().publicKey, 'operator-mac': id.publicKey },
+    operator: { signingKeyPem: operatorKeys().privateKeyPem, anchorIntervalMs: 0, verifyWorkspace } });
+  const { port } = await hub.start();
+  t.after(() => hub.stop());
+  const seen = [];
+  const agent = createAgent({ host: 'operator-mac', url: `wss://127.0.0.1:${port}/agent`, privateKey: id.privateKey, ca: tlsCert, reconnectMs: 100_000,
+    operations: { host_status: async () => ({ host: 'operator-mac', online: true }),
+      operator_run: async (args, ctx) => { seen.push({ args, signed: ctx.operator }); return { ok: true, as_root: true, exit_code: 0 }; } } });
+  t.after(() => agent.stop());
+  const end = Date.now() + 5000;
+  while (hub.agentInfo('operator-mac')?.version !== 2) { if (Date.now() > end) throw new Error('agent not connected'); await sleep(20); }
+  const CHAT = makePrincipal('oidc:owner-sub', Object.values(CAPABILITIES), { client_type: 'chatgpt', via: 'hub' });
+  const S = 'a'.repeat(64);
+  const WS = 'ws_MACROOT000000001';
+  const call = (host, args) => hub.requestOperator(host, 'operator_run', { args, principal: CHAT, clientSession: S });
+  // No host: refused, even with the Mac connected (a root call is never defaulted).
+  assert.equal((await call(undefined, { argv: ['id'], as_root: true })).error, 'host_required');
+  assert.equal((await call(undefined, { argv: ['diskutil', 'list'] })).error, 'host_required', 'the Mac dangerous list reaches the hub');
+  // Named: the workspace, then the global lock.
+  assert.equal((await call('mac', { host: 'mac', argv: ['id'], as_root: true })).error, 'workspace_required');
+  assert.equal((await call('mac', { host: 'mac', workspace_id: WS, argv: ['id'], as_root: true })).error, 'lock_required');
+  const lock = await hub.requestOperator('mac', 'operator_lock', { args: { host: 'mac', workspace_id: WS, kind: 'global', reason: 'mac root' },
+    principal: CHAT, clientSession: S });
+  assert.equal(lock.ok, true, JSON.stringify(lock));
+  const out = await call('mac', { host: 'mac', workspace_id: WS, argv: ['id'], as_root: true });
+  assert.deepEqual([out.ok, out.host], [true, 'mac']);
+  assert.equal(seen.length, 1);
+  assert.equal('workspace_id' in seen[0].args, false, 'the workspace never reaches the Mac or its signature');
+  assert.deepEqual([seen[0].signed.host, seen[0].signed.tier], ['mac', 3]);
+  // Dangerous on the Mac, no Telegram bot here: fail closed before anything is signed.
+  assert.equal((await call('mac', { host: 'mac', workspace_id: WS, argv: ['diskutil', 'eraseDisk', 'x'], as_root: true })).error, 'approval_unavailable');
+  assert.equal(seen.length, 1);
 });
