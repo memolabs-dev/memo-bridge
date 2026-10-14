@@ -160,9 +160,41 @@ test('live: read_media through the hub returns the image; snapshot and help answ
   assert.deepEqual(Buffer.from(out.media[0].base64, 'base64'), png);
   const content = operatorContent(out).content;
   assert.deepEqual(content.map(c => c.type), ['text', 'image']);
+  // An image above the agent's 128 KiB text bound crosses the agent, the wire and the hub intact.
+  const big = makePng(250, 250, { noise: true });
+  assert.ok(big.length > 160 * 1024 && big.length < MEDIA_BUDGET_BYTES);
+  writeFileSync(hosts.mac.p('srv/app/big.png'), big);
+  const whole = await hub.requestOperator('mac', 'operator_read_media', { args: { host: 'mac', path: hosts.mac.p('srv/app/big.png') }, principal: OWNER });
+  assert.equal(whole._truncation, undefined);
+  assert.deepEqual(Buffer.from(whole.media[0].base64, 'base64'), big);
   const snap = await hub.requestOperator('vps', 'operator_snapshot', { args: { host: 'vps', path: hosts.vps.p('srv') }, principal: OWNER });
   assert.equal(snap.ok, true, JSON.stringify(snap));
   const help = await hub.requestOperator(undefined, 'operator_help', { args: {}, principal: OWNER });
   assert.ok(help.ok && help.playbooks.length >= 8);
   assert.equal((await hub.requestOperator(undefined, 'operator_help', { args: {}, principal: HUB_PRINCIPALS[PRINCIPAL_IDS.readonly] })).error, 'forbidden');
+});
+
+test('remote surface: operator_read_media answers a text part then an MCP image part, through the SDK handler', async () => {
+  const { createMcpHandler } = await import('@modelcontextprotocol/server');
+  const { createRemoteServerFactory } = await import('../bridge/remote-surface.mjs');
+  const SUB = '4b9f6c3e-1a2d-4e5f-8a7b-9c0d1e2f3a4b';
+  const CLIENT = 'https://chatgpt.com/connector/oauth/abc/client.json';
+  const png = makePng(4, 4).toString('base64');
+  const dispatch = async (host, op) => (op === 'operator_read_media'
+    ? { ok: true, host: 'mac', kind: 'image', mime: 'image/png', media: [{ mime: 'image/png', base64: png, width: 4, height: 4 }] }
+    : { ok: true });
+  const factory = createRemoteServerFactory({ config: { owner_sub: SUB, allowed_client_ids: [CLIENT], ceiling: ['coordinator:read', 'operator:read'] }, dispatch });
+  const handler = createMcpHandler(factory, { legacy: 'stateless' });
+  const authInfo = { token: 'x', clientId: CLIENT, scopes: ['coordinator:read', 'operator:read'], extra: { sub: SUB } };
+  const response = await handler.fetch(new Request('http://localhost/mcp', { method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'operator_read_media', arguments: { host: 'mac', path: '/x.png' } } }) }),
+  { authInfo });
+  const raw = await response.text();
+  const body = JSON.parse(/^(event|data):/m.test(raw) ? raw.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).join('') : raw);
+  const content = body.result.content;
+  assert.deepEqual(content.map(c => c.type), ['text', 'image']);
+  assert.deepEqual([content[1].mimeType, content[1].data], ['image/png', png]);
+  assert.equal(content[0].text.includes(png), false, 'the bytes are not repeated in the text part');
+  assert.equal(JSON.parse(content[0].text).media[0].image_part, 1);
 });
