@@ -10,8 +10,19 @@ export const CAPABILITIES = Object.freeze({
   // without execution or repository writes.
   EXECUTE: 'runner:execute',
   REPO_WRITE: 'repo:write',
-  GITHUB_WRITE: 'github:write'
+  GITHUB_WRITE: 'github:write',
+  // Phase 6, operator access (spec D1): one capability per tier, each one its own OAuth scope.
+  // The host agent checks the tier again against its local policy (bridge/operator-agent.mjs).
+  OPERATOR_READ: 'operator:read',     // T0
+  OPERATOR_WRITE: 'operator:write',   // T1
+  OPERATOR_EXEC: 'operator:exec',     // T2
+  OPERATOR_ROOT: 'operator:root'      // T3, lab only
 });
+
+// The operator capabilities in tier order: index = tier (T0..T3).
+export const OPERATOR_TIER_CAPABILITIES = Object.freeze([CAPABILITIES.OPERATOR_READ, CAPABILITIES.OPERATOR_WRITE,
+  CAPABILITIES.OPERATOR_EXEC, CAPABILITIES.OPERATOR_ROOT]);
+export const isOperatorCapability = capability => OPERATOR_TIER_CAPABILITIES.includes(capability);
 
 export const OPERATION_CAPABILITY = Object.freeze({
   // Workspaces
@@ -67,10 +78,38 @@ export const OPERATION_CAPABILITY = Object.freeze({
   projects_list: CAPABILITIES.READ
 });
 
+// Phase 6 operator ops (spec §4). Kept apart from OPERATION_CAPABILITY on purpose: those are
+// served by the runtime, these by the operator agent of the host named in the arguments
+// (bridge/ops.mjs builds the two kinds from the two tables). Lot 1 serves T0 only; the T1 to T3
+// tools arrive with Lot 2 and their own tests.
+export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
+  operator_policy: CAPABILITIES.OPERATOR_READ,
+  operator_state: CAPABILITIES.OPERATOR_READ,
+  operator_list: CAPABILITIES.OPERATOR_READ,
+  operator_read: CAPABILITIES.OPERATOR_READ,
+  operator_search: CAPABILITIES.OPERATOR_READ,
+  operator_logs: CAPABILITIES.OPERATOR_READ,
+  operator_service_status: CAPABILITIES.OPERATOR_READ,
+  operator_freeze_status: CAPABILITIES.OPERATOR_READ,
+  operator_audit_verify: CAPABILITIES.OPERATOR_READ
+});
+export const isOperatorOperation = operation => typeof operation === 'string' && Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation);
+// The tier (0..3) of an operator op, or null.
+export const operatorTier = operation => (isOperatorOperation(operation)
+  ? OPERATOR_TIER_CAPABILITIES.indexOf(OPERATOR_OPERATION_CAPABILITY[operation]) : null);
+
+// The capability an operation needs, from either table, or null for an unknown operation.
+export function operationCapability(operation) {
+  if (typeof operation !== 'string') return null;
+  if (Object.hasOwn(OPERATION_CAPABILITY, operation)) return OPERATION_CAPABILITY[operation];
+  if (Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation)) return OPERATOR_OPERATION_CAPABILITY[operation];
+  return null;
+}
+
 // Capabilities that change something. The remote write gate (Phase 5 D7) removes every one of
 // them from a remote principal while remote_writes is not "enabled".
 export const WRITE_CAPABILITIES = Object.freeze([CAPABILITIES.WRITE, CAPABILITIES.EXECUTE, CAPABILITIES.REPO_WRITE,
-  CAPABILITIES.GITHUB_WRITE]);
+  CAPABILITIES.GITHUB_WRITE, CAPABILITIES.OPERATOR_WRITE, CAPABILITIES.OPERATOR_EXEC, CAPABILITIES.OPERATOR_ROOT]);
 
 // Client kinds a workspace records. Defined here so a principal can carry a server-derived one
 // (Phase 5 D6); coordinator/index.mjs re-exports it.
@@ -213,9 +252,12 @@ export function principalFromHub(claim, grants = DEFAULT_HUB_GRANTS) {
 // remote: {ownerSub, clientTypes: Map(client_id -> client_type), ceiling: [capability],
 // remoteWrites: boolean}. Returns {ok:true, principal} or {ok:false, error}.
 export const REMOTE_BASELINE_SCOPE = CAPABILITIES.READ;
-// Default ceiling: every capability, the same default as the verifier (bridge/oidc.mjs), so the
-// two layers agree; the write gate removes the write capabilities on its own.
-export const REMOTE_DEFAULT_CEILING = Object.freeze(Object.values(CAPABILITIES));
+// Default ceiling: every capability except the Phase 6 operator ones, the same default as the
+// verifier (bridge/oidc.mjs), so the two layers agree; the write gate removes the write
+// capabilities on its own. Operator access is opt-in: the owner lists the operator scopes in
+// the remote.json ceiling (spec Deviations, DEV-P6-03), so a deployed listener that predates
+// Phase 6 neither advertises nor grants them.
+export const REMOTE_DEFAULT_CEILING = Object.freeze(Object.values(CAPABILITIES).filter(c => !isOperatorCapability(c)));
 const MAX_SCOPES = 32;
 
 export function remotePrincipal(claims, remote) {
@@ -243,8 +285,8 @@ export function remotePrincipal(claims, remote) {
 }
 
 export function authorize(principal, operation) {
-  if (typeof operation !== 'string' || !Object.hasOwn(OPERATION_CAPABILITY, operation)) return false;
-  const required = OPERATION_CAPABILITY[operation];
+  const required = operationCapability(operation);
+  if (required === null) return false;
   return Boolean(principal?.capabilities?.has(required));
 }
 

@@ -11,7 +11,8 @@
 import { createHash } from 'node:crypto';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { OAuthError, OAuthErrorCode, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/server';
-import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
+import { CAPABILITIES, REMOTE_DEFAULT_CEILING, WRITE_CAPABILITIES as POLICY_WRITE_CAPABILITIES, makePrincipal }
+  from '../server/coordinator/policy.mjs';
 
 // Phase 5 constants (spec D3, REQ-P5-02).
 export const CANONICAL_RESOURCE = 'https://bridge.memolabs.dev/mcp';
@@ -33,22 +34,26 @@ const SUB_RE = /^[A-Za-z0-9._@-]{1,120}$/;                     // fits policy.mj
 export const SCOPE_TO_CAPABILITY = Object.freeze(Object.fromEntries(Object.values(CAPABILITIES).map(c => [c, c])));
 // Capabilities that change state. Removed from every principal while the write gate is closed
 // (spec D7, owner decision R-P4-01: no remote write before lab-infra #161 closes).
-export const WRITE_CAPABILITIES = Object.freeze([CAPABILITIES.WRITE, CAPABILITIES.EXECUTE, CAPABILITIES.REPO_WRITE, CAPABILITIES.GITHUB_WRITE]);
+// The policy's list (Phase 6 adds operator:write, operator:exec and operator:root to it).
+export const WRITE_CAPABILITIES = POLICY_WRITE_CAPABILITIES;
 export const REMOTE_WRITES = Object.freeze(['disabled', 'enabled']);
 
 export const writeGateOpen = config => config?.remoteWrites === 'enabled';
 
 // Scopes advertised in the RFC 9728 metadata: the baseline only while the gate is closed, the
-// write scopes too once it opens (the owner then reconnects to obtain them, spec D7).
-export function scopesSupported({ remoteWrites = 'disabled', ceiling = Object.values(CAPABILITIES) } = {}) {
+// write scopes too once it opens (the owner then reconnects to obtain them, spec D7). Phase 6:
+// operator:read is advertised when the ceiling lists it (opt-in, REMOTE_DEFAULT_CEILING leaves
+// it out); the operator write scopes follow the write gate like the others.
+export function scopesSupported({ remoteWrites = 'disabled', ceiling = REMOTE_DEFAULT_CEILING } = {}) {
   const out = [BASELINE_SCOPE];
+  if (ceiling.includes(CAPABILITIES.OPERATOR_READ)) out.push(CAPABILITIES.OPERATOR_READ);
   if (writeGateOpen({ remoteWrites })) for (const cap of WRITE_CAPABILITIES) if (ceiling.includes(cap)) out.push(cap);
   return out;
 }
 
 // Token scopes -> capabilities: known scopes only, capped by the ceiling, write capabilities
 // dropped while the gate is closed. Sorted, so equal inputs give equal outputs.
-export function capabilitiesFor(scopes, { remoteWrites = 'disabled', ceiling = Object.values(CAPABILITIES) } = {}) {
+export function capabilitiesFor(scopes, { remoteWrites = 'disabled', ceiling = REMOTE_DEFAULT_CEILING } = {}) {
   const gateOpen = writeGateOpen({ remoteWrites });
   const out = new Set();
   for (const scope of scopes) {
@@ -171,11 +176,11 @@ function mapJoseError(error) {
 //   jwks              a jose key-set function instead of jwksUri       (tests)
 //   fetchImpl         fetch used for the JWKS                          (tests; never from settings)
 //   remoteWrites      'disabled' (default) | 'enabled'                 (spec D7)
-//   ceiling           capabilities a remote principal may ever hold    (default all)
+//   ceiling           capabilities a remote principal may ever hold    (default all but operator:*)
 export function createOidcVerifier(config) {
   if (!config || typeof config !== 'object') throw new Error('OIDC configuration required');
   const { issuer, resource = CANONICAL_RESOURCE, ownerSub, allowedClientIds, jwksUri, jwks, fetchImpl,
-    remoteWrites = 'disabled', ceiling = Object.values(CAPABILITIES) } = config;
+    remoteWrites = 'disabled', ceiling = REMOTE_DEFAULT_CEILING } = config;
   const issuerUrl = httpsUrl(issuer, 'issuer');
   const resourceUrl = httpsUrl(resource, 'resource');
   // The canonical form exactly: same string in PRM, audience, Pocket ID API and ChatGPT URL (D3).

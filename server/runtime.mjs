@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { platform } from 'node:os';
 import { createCoordinator } from './coordinator/index.mjs';
 import { createIssueLeaseClient } from './coordinator/issue-lease.mjs';
-import { CAPABILITIES, CLIENT_TYPES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
+import { CAPABILITIES, CLIENT_TYPES, OPERATOR_TIER_CAPABILITIES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
   makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
@@ -41,7 +41,8 @@ export function remoteGrants(baseGrants, policy) {
 export function gateRemotePrincipal(p, policy) {
   if (!p || !isRemotePrincipal(p)) return p;
   if (!policy?.configured) return null;
-  const denied = policy.remote_writes === 'enabled' ? [CAPABILITIES.AUDIT] : [CAPABILITIES.AUDIT, ...WRITE_CAPABILITIES];
+  // Phase 6: the runtime serves no operator op, so a remote principal holds no operator capability here.
+  const denied = [CAPABILITIES.AUDIT, ...OPERATOR_TIER_CAPABILITIES, ...(policy.remote_writes === 'enabled' ? [] : WRITE_CAPABILITIES)];
   const kept = [...p.capabilities].filter(c => !denied.includes(c));
   if (kept.length === p.capabilities.size) return p;
   return makePrincipal(p.id, kept, { ...(p.client_type ? { client_type: p.client_type } : {}), ...(p.via ? { via: p.via } : {}) });
