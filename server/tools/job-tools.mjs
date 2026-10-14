@@ -95,7 +95,8 @@ export function registerJobTools(server, getRuntime, options = {}) {
 
   server.registerTool('job_cancel', {
     description: 'Cancel one of your jobs: a queued or deferred job never starts; a running job is stopped with all its processes (Mac: SIGTERM, then SIGKILL after 5 s; VPS: the dispatcher stops its unit). A finished job returns job_finished.',
-    inputSchema: z.object({ job_id: jobId }),
+    inputSchema: z.object({ job_id: jobId,
+      workspace_id: workspaceId.optional().describe('Your own workspace when you are a delegated child.') }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
   }, call('cancel'));
 }

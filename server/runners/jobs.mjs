@@ -44,6 +44,7 @@ import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync, sta
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
+import { callerChild, childState, renewParentLease } from '../coordinator/delegation.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { CLIENT_REQUEST_ID_RE, requestKey } from '../coordinator/store.mjs';
 import { ACTIVE_JOB_STATUSES, JOB_STATUSES as ALL_JOB_STATUSES, STARTED_JOB_STATUSES, executorKindFromEnv, nudgeSupervisor,
@@ -85,7 +86,7 @@ export const DEFAULT_RUNNER_PATH = fileURLToPath(new URL('./job-runner.mjs', imp
 // Results the model sees as refusals rather than faults; both are journaled.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_removed', 'wrong_host', 'no_live_claim', 'host_busy',
   'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'queue_full', 'session_mismatch', 'workspace_other_session',
-  'session_required']);
+  'session_required', 'outside_delegation_scope', 'delegation_ended']);
 
 const newJobId = () => `job_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -348,12 +349,35 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
         const claim = workspace && worktree ? liveClaim(repo, workspace.id, worktree.issue_ref, at) : null;
         return { workspace, worktree, claim };
       });
-      const { workspace, worktree } = context;
+      let { workspace } = context;
+      const { worktree } = context;
       if (!workspace) return journal(op, fail('unknown_workspace'), ids);
       if (!ownsWorkspace(rt.principal, workspace)) return journal(op, fail('forbidden'), ids);
+      // Delegation (#47, spec D7): a child runs jobs on its delegated worktree under its parent's
+      // claim; the job belongs to the parent's workspace, so the parent's release or close stops it.
+      const child = await read((repo, at) => {
+        const found = callerChild(repo, rt.principal.id, { workspace, session: requestMeta(ctx?.meta).client_session });
+        return found ? childState(repo, found, at) : null;
+      });
+      if (child) {
+        if (child.child.id !== workspace.id) return journal(op, fail('outside_delegation_scope', `use workspace ${child.child.id}`), ids);
+        if (child.reason) return journal(op, { ok: false, error: 'delegation_ended', end_reason: child.reason }, ids);
+      }
       if (workspace.status !== 'active') return journal(op, fail('workspace_closed'), ids);
       const bound = sessionCheck(workspace, ctx);
       if (!bound.ok) return journal(op, bound, ids);
+      if (child) {
+        const d = child.delegation;
+        if (!worktree || d.worktree_id !== worktree.id || worktree.workspace_id !== d.parent_workspace_id) {
+          return journal(op, fail('outside_delegation_scope', 'not the worktree of your delegation'), ids);
+        }
+        if (d.scope_mode === 'read_only') return journal(op, fail('outside_delegation_scope', 'a read_only delegation runs no job'), ids);
+        const parent = await read(repo => repo.getWorkspace(d.parent_workspace_id));
+        await renewParentLease({ store: rt.store(), ledger: rt.ledger, parent, claimId: d.claim_id, now: () => rt.now() });
+        workspace = parent;
+        context.claim = await read((repo, at) => liveClaim(repo, parent.id, worktree.issue_ref, at));
+        if (context.claim && context.claim.claim_id !== d.claim_id) context.claim = null;
+      }
       // Another workspace's worktree is reported as unknown, never described.
       if (!worktree || worktree.workspace_id !== workspace.id) return journal(op, fail('unknown_worktree'), ids);
       const issueIds = { ...ids, issue: worktree.issue_ref ?? undefined };
@@ -549,7 +573,18 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       const found = await ownedJob(op, args.job_id);
       if (found.error) return found.error.error === 'forbidden' ? found.error : journal(op, found.error);
       const ids = { workspace_id: found.job.workspace_id, ...requestIds(ctx) };
-      const bound = sessionCheck(found.workspace, ctx);
+      // Delegation (#47): a child cancels only jobs on its delegated worktree, checked against its own binding.
+      const child = await read((repo, at) => {
+        const named = typeof args.workspace_id === 'string' && WS_RE.test(args.workspace_id) ? repo.getWorkspace(args.workspace_id) : null;
+        const found2 = callerChild(repo, rt.principal.id, { workspace: named && ownsWorkspace(rt.principal, named) ? named : null,
+          session: requestMeta(ctx?.meta).client_session });
+        return found2 ? childState(repo, found2, at) : null;
+      });
+      if (child?.reason) return journal(op, { ok: false, error: 'delegation_ended', end_reason: child.reason }, ids);
+      if (child && (child.delegation.worktree_id !== found.job.worktree_id || child.delegation.parent_workspace_id !== found.job.workspace_id)) {
+        return journal(op, fail('outside_delegation_scope', 'not a job of your delegation'), ids);
+      }
+      const bound = sessionCheck(child ? child.child : found.workspace, ctx);
       if (!bound.ok) return journal(op, bound, ids);
       const outcome = await write((repo, at) => {
         const job = repo.getJob(found.job.id);

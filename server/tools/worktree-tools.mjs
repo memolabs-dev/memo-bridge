@@ -16,7 +16,9 @@ const DENIED = new Set(['forbidden', 'workspace_closed', 'no_live_claim', 'stale
   'lease_denied', 'protected_branch', 'branch_changed', 'branch_exists', 'path_exists', 'path_not_allowed', 'wrong_host',
   'worktree_dirty', 'unpushed_commits', 'worktree_removed', 'push_rejected', 'job_active', 'ignored_files', 'worktree_link_changed',
   // Phase 5 remote invariants (bridge/write-gate.mjs).
-  'path_protected', 'project_not_allowed', 'session_mismatch']);
+  'path_protected', 'project_not_allowed', 'session_mismatch',
+  // Delegation (#47).
+  'outside_delegation_scope', 'delegation_ended']);
 
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -24,6 +26,9 @@ const local = { readOnlyHint: false, destructiveHint: false, idempotentHint: fal
 
 const workspaceId = z.string().max(40).describe('Workspace id returned by workspace_open (ws_...).');
 const worktreeId = z.string().max(40).describe('Worktree id returned by worktree_create (wt_...).');
+// Delegation (#47): the caller's own workspace, required in practice for a delegated child.
+const actingWorkspace = z.string().max(40).optional()
+  .describe('Your own workspace_id when it is not this worktree\'s (a delegated child passes its own).');
 const relPath = z.string().max(LIMITS.pathChars)
   .describe('Path relative to the worktree root, e.g. "src/index.ts". No "..", no absolute path, nothing under .git.');
 
@@ -83,7 +88,7 @@ export function registerWorktreeTools(server, getRuntime) {
 
   server.registerTool('worktree_status', {
     description: 'Branch, HEAD, ahead/behind versus the base and origin/<branch>, uncommitted changes (bounded), the last 5 commits, and edits made outside Memo Bridge (external_edits). Read-only.',
-    inputSchema: z.object({ worktree_id: worktreeId }),
+    inputSchema: z.object({ worktree_id: worktreeId, workspace_id: actingWorkspace }),
     annotations: read
   }, call('worktree_status', 'status'));
 
@@ -91,6 +96,7 @@ export function registerWorktreeTools(server, getRuntime) {
     description: 'List tracked and untracked (not ignored) files of a worktree, optionally under a sub-path. Read-only.',
     inputSchema: z.object({
       worktree_id: worktreeId,
+      workspace_id: actingWorkspace,
       path: relPath.optional(),
       limit: z.number().int().min(1).max(LIMITS.listMax).optional().describe(`Maximum files returned (default ${LIMITS.listDefault}).`)
     }),
@@ -101,6 +107,7 @@ export function registerWorktreeTools(server, getRuntime) {
     description: `Read a UTF-8 text file of a worktree, at most ${LIMITS.readBytes / 1024} KiB per call; use next_offset to continue. Binary files are refused. Control and bidi characters are replaced with U+FFFD and counted. Read-only.`,
     inputSchema: z.object({
       worktree_id: worktreeId,
+      workspace_id: actingWorkspace,
       path: relPath,
       offset: z.number().int().min(0).max(2 ** 31).optional().describe('Byte offset to start from (default 0).'),
       limit: z.number().int().min(1).max(LIMITS.readBytes).optional().describe('Maximum bytes to read.')
@@ -112,6 +119,7 @@ export function registerWorktreeTools(server, getRuntime) {
     description: `Create or replace a text file in a worktree (at most ${LIMITS.writeBytes / 1024} KiB), creating parent directories inside it. Atomic. Requires a live claim on the worktree's Issue and the worktree still on its own branch.`,
     inputSchema: z.object({
       worktree_id: worktreeId,
+      workspace_id: actingWorkspace,
       path: relPath,
       content: z.string().max(LIMITS.writeBytes).describe('Full new content of the file (UTF-8).')
     }),
@@ -120,7 +128,7 @@ export function registerWorktreeTools(server, getRuntime) {
 
   server.registerTool('worktree_diff', {
     description: `Diff of uncommitted changes (or of the staged ones) with a stat, bounded to ${LIMITS.diffBytes / 1024} KiB, plus the untracked files. Read-only.`,
-    inputSchema: z.object({ worktree_id: worktreeId, staged: z.boolean().optional() }),
+    inputSchema: z.object({ worktree_id: worktreeId, workspace_id: actingWorkspace, staged: z.boolean().optional() }),
     annotations: read
   }, call('worktree_diff', 'diff'));
 
@@ -128,6 +136,7 @@ export function registerWorktreeTools(server, getRuntime) {
     description: 'Stage every change of the worktree (git add -A) and commit it with your message under the user\'s own Git identity. The lease ledger re-verifies the claim first. Refuses empty commits, control characters and AI attribution trailers. Returns the commit SHA.',
     inputSchema: z.object({
       worktree_id: worktreeId,
+      workspace_id: actingWorkspace,
       message: z.string().max(LIMITS.messageChars).describe('Commit message; first line is the subject.')
     }),
     annotations: local
@@ -135,7 +144,7 @@ export function registerWorktreeTools(server, getRuntime) {
 
   server.registerTool('worktree_push', {
     description: 'Push the worktree branch to origin (--set-upstream, never --force, never the default branch as the remote reports it) after the lease ledger re-verifies the claim, then record a checkpoint so another machine can resume. The remote branch must not exist yet, or be at a commit this worktree pushed; otherwise push_rejected. Never merges.',
-    inputSchema: z.object({ worktree_id: worktreeId,
+    inputSchema: z.object({ worktree_id: worktreeId, workspace_id: actingWorkspace,
       client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
         .describe('Your own id for this push attempt (8 to 128 of A-Z a-z 0-9 _ -). A retry with the same id returns the first result instead of pushing again.') }),
     annotations: { ...local, openWorldHint: true }
@@ -145,6 +154,7 @@ export function registerWorktreeTools(server, getRuntime) {
     description: 'Remove a worktree directory (git worktree remove, no --force). Refused while a job runs in it (job_active), while it has uncommitted or untracked files, or commits that are not on origin, and while it holds ignored files (.env, node_modules, build output: ignored_files lists them) unless discard_ignored is true. The branch is kept.',
     inputSchema: z.object({
       worktree_id: worktreeId,
+      workspace_id: actingWorkspace,
       discard_ignored: z.boolean().optional().describe('Delete the ignored files listed by a previous ignored_files refusal along with the worktree.')
     }),
     annotations: { ...local, destructiveHint: true, idempotentHint: true }
