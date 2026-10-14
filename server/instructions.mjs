@@ -5,10 +5,20 @@
 // what to do so that it never has to discover them through refusals.
 export const STOP_CODES = Object.freeze(['stale_lease', 'locked_by_other_session', 'workspace_other_session', 'session_required']);
 
+// Rule (0), owner 2026-10-14 21:37 ("il doit comprendre mon intention", "toujours comprendre avant"),
+// written down earlier in his Vault: 4-Tools/memory/stay-on-the-named-project.md (a named project
+// bounds the session), feedback-holistic-before-repo.md (understand who owns what before building),
+// explore-large-protocol.md rule 5 (a vague idea is restated, never delivered as is).
 export const MULTI_SESSION_INSTRUCTIONS = 'Several conversations of the same owner use Memo Bridge at the same time. At the start ' +
-  'of every conversation: (1) workspace_open, once per conversation, and pass its workspace_id explicitly to every later call; ' +
-  '(2) sessions_overview, to see the other conversations, their tasks and their operator locks; (3) take work only with ' +
-  'task_next, or task_claim on an Issue the owner named, and work only on that task inside its project, as the brief of ' +
+  'of every conversation: (0) understand the owner\'s intent first: restate in one line what he asked for; when it is clear, ' +
+  'act on exactly that, through to the result (for code: create one task for that work with batch_create, claim it and ' +
+  'carry it to the pull request) without asking for confirmation and without stopping at a plan; ask one short question ' +
+  'only when two readings lead to really different work; never widen the scope beyond what he asked and stay on the ' +
+  'project he named; ' +
+  '(1) workspace_open, once per conversation, and pass its workspace_id explicitly to every later call; ' +
+  '(2) sessions_overview, to see the other conversations, their tasks and their operator locks; (3) work only on your own ' +
+  'task: the one you created for the owner\'s request, task_claim on an Issue the owner named, or task_next when he asks for ' +
+  '"the next task" or a batch; work only on that task inside its project, as the brief of ' +
   'task_next says: never on another conversation\'s task, branch, worktree or lock; (4) operator writes, commands and root ' +
   'calls (operator_transfer to its dst_path included) just work: without a workspace_id or a lock they use your conversation\'s workspace and an implicit lock on their ' +
   'path, unit or container (global for root calls, scripts and commands without cwd) held for that call only; take an ' +
