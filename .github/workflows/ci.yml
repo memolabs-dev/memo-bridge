@@ -29,14 +29,17 @@ jobs:
           path: governance
           persist-credentials: false
           sparse-checkout: scripts
+      # pnpm first, so setup-node can cache its store. The version comes from packageManager in
+      # package.json (https://github.com/pnpm/action-setup#inputs).
+      - uses: pnpm/action-setup@v6.1.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: 'npm'
-      - run: npm ci
-      - run: npm test
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
       # Phase 4 root helpers of the VPS runner (dispatcher, result recorder): stdlib unittest,
       # temporary folders and a fake systemctl, no root and no systemd needed.
-      - run: npm run test:deploy
-      - run: npm run build
-      - run: npm run smoke
+      - run: pnpm run test:deploy
+      - run: pnpm run build
+      - run: pnpm run smoke

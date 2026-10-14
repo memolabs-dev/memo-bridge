@@ -52,16 +52,18 @@ Jobs are different: they run the repository's own scripts, which a model can edi
 ## Development
 
 ```sh
-npm ci
-npm test
-npm run test:runner       # Phase 4 subset, including the root helpers (python3 -I unittest)
-npm run build
-npm run smoke
-npm run smoke:remote      # Phase 5: an MCP client over HTTPS through the public listener to the runtime, offline
-npm run remote:toolsize   # size of the remote tools/list (read and write stages)
-npm run release:manifest  # VPS release: dist/release/SHA256SUMS + memo-bridge-release.json for lab-infra
-npm run install:local   # stable copy for AI clients: ~/.local/share/memo-bridge/stdio/{index,job-runner}.mjs
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run test:runner       # Phase 4 subset, including the root helpers (python3 -I unittest)
+pnpm run build
+pnpm run smoke
+pnpm run smoke:remote      # Phase 5: an MCP client over HTTPS through the public listener to the runtime, offline
+pnpm run remote:toolsize   # size of the remote tools/list (read and write stages)
+pnpm run release:manifest  # VPS release: dist/release/SHA256SUMS + memo-bridge-release.json for lab-infra
+pnpm run install:local     # stable copy for AI clients: ~/.local/share/memo-bridge/stdio/{index,job-runner}.mjs
 ```
+
+pnpm is pinned by `packageManager` in `package.json`; `pnpm-workspace.yaml` holds the pnpm settings (only `esbuild` may run its install script). This repository's own commands use pnpm. The job recipes are a separate matter: they run each target repository's `npm test` / `npm run build` / `npm run lint` (`server/runners/recipes.mjs`), unchanged.
 
 AI clients are configured from the shared MCP registry (Vault `4-Tools/mcp/mcp.json`, applied by `agents-mcp-sync --apply`). They run the installed copy, never this working tree.
 

@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 // What lab-infra copies (memo_bridge_app_dirs, memo_bridge_app_files, memo_runner_app_dirs,
 // and the two root scripts of runner.yml). Keep in step with lab-infra group_vars/lab.yml.
-export const DEPLOYED = Object.freeze(['bridge', 'server', 'package.json', 'package-lock.json',
+export const DEPLOYED = Object.freeze(['bridge', 'server', 'package.json', 'pnpm-lock.yaml',
   'deploy/memo-runner-dispatch', 'deploy/record-result']);
 
 const git = (repo, args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,

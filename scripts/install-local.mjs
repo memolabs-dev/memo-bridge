@@ -15,7 +15,7 @@ const dist = join(root, 'plugin', 'server', 'dist');
 const FILES = ['job-runner.mjs', 'index.mjs'];
 const missing = FILES.filter(name => !existsSync(join(dist, name)));
 if (missing.length) {
-  console.error(`Missing bundle file(s) ${missing.join(', ')}: run \`npm run build\` first.`);
+  console.error(`Missing bundle file(s) ${missing.join(', ')}: run \`pnpm run build\` first.`);
   process.exit(1);
 }
 const target = join(process.env.MEMO_BRIDGE_INSTALL_DIR || join(homedir(), '.local', 'share', 'memo-bridge', 'stdio'));

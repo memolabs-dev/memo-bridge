@@ -18,7 +18,7 @@ test('the manifest lists exactly the deployed files of HEAD, with one checksum o
   git(repo, 'init', '-q', '-b', 'main');
   for (const dir of ['bridge', 'server/runners', 'deploy', 'tests', 'docs']) mkdirSync(join(repo, dir), { recursive: true });
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'memo-bridge', version: '0.5.0' }));
-  writeFileSync(join(repo, 'package-lock.json'), '{}');
+  writeFileSync(join(repo, 'pnpm-lock.yaml'), 'lockfileVersion: \'9.0\'\n');
   writeFileSync(join(repo, 'bridge', 'hub.mjs'), 'hub');
   writeFileSync(join(repo, 'server', 'runners', 'jobs.mjs'), 'jobs');
   writeFileSync(join(repo, 'deploy', 'memo-runner-dispatch'), '#!/usr/bin/python3 -I\n');
@@ -37,7 +37,7 @@ test('the manifest lists exactly the deployed files of HEAD, with one checksum o
   assert.equal(manifest.dirty, false);
   assert.deepEqual(manifest.deployed_paths, [...DEPLOYED]);
   assert.deepEqual(manifest.files.map(f => f.path), ['bridge/hub.mjs', 'deploy/memo-runner-dispatch', 'deploy/record-result',
-    'package-lock.json', 'package.json', 'server/runners/jobs.mjs']);
+    'package.json', 'pnpm-lock.yaml', 'server/runners/jobs.mjs']);
   assert.deepEqual(manifest.executables, ['deploy/memo-runner-dispatch', 'deploy/record-result']);
   assert.match(sums, /^[0-9a-f]{64} {2}bridge\/hub\.mjs\n/);
   assert.equal(sums.split('\n').filter(Boolean).length, 6);

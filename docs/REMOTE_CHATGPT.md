@@ -67,7 +67,7 @@ Never remote: `observe_*`, `host_resources`, `worktree_remove`, `list_hosts`, `h
 any surface.
 
 Names, descriptions, schemas and annotations are the stdio ones (one registry,
-`server/registry.mjs`; a test compares them). `npm run remote:toolsize` prints what ChatGPT
+`server/registry.mjs`; a test compares them). `pnpm run remote:toolsize` prints what ChatGPT
 receives: on 2026-10-14, 23 tools in 15 627 bytes (about 3 900 tokens) for the read stage and
 39 tools in 34 502 bytes (about 8 600 tokens) for the write stage. No ChatGPT limit is
 documented; the TODO-P5-33 window checks that every tool shows after Refresh.
