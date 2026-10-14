@@ -37,6 +37,10 @@ import { dangerReason, needsApproval } from './operator-dangerous.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
 import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
+import { HUB_OPERATOR_TOOLS } from '../server/tools/operator-repatriated.mjs';
+import { operatorHelp } from './operator-help.mjs';
+import { createTransfers } from './operator-transfer.mjs';
+import { operatorContent } from './operator-content.mjs';
 
 const tags = {readOnlyHint:true, destructiveHint:false,idempotentHint:true,openWorldHint:false};
 const result = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
@@ -92,6 +96,12 @@ export function createHub(options) {
   });
   const locks = createOperatorLocks({ ...(operator?.now ? { now: operator.now } : {}), verifyWorkspace,
     homes: operator?.homes ?? DEFAULT_HOMES });
+  // Repatriated tools (part 2): operator_transfer relayed here, source reads signed for the caller.
+  const transfers = createTransfers({ readSource: (host, op, args, principal) => sendInternal(host, op, args, principal),
+    writeDest: (host, op, args, ctx) => operatorCall(host, op, { args, principal: ctx.principal, clientSession: ctx.clientSession,
+      requestId: ctx.requestId }),
+    frozen: () => hubFrozen(), record: (event, details) => record(event, null, details),
+    ...(operator?.transferLimits ? { limits: operator.transferLimits } : {}) });
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
@@ -182,6 +192,7 @@ export function createHub(options) {
   async function requestOperator(host, op, options = {}) {
     if (!signer) return fail('operator_disabled');
     if (!isOperatorOp(op) || OPS[op].internal) return fail('unsupported_op');
+    if (HUB_OPERATOR_TOOLS.includes(op)) return hubOperator(op, options);
     const given = options.args ?? {};
     if ((host === undefined || host === null) && given.host === undefined) {
       const resolved = resolveOperatorHost(op, given);
@@ -280,16 +291,25 @@ export function createHub(options) {
     return data;
   }
 
+  // operator_help, operator_transfer and operator_transfer_status: answered here, no host argument.
+  async function hubOperator(op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
+    if (!principal?.id || !authorize(principal, op) || !principal.capabilities?.has(OPERATOR_TIER_CAPABILITIES[OPS[op].tier])) return fail('forbidden');
+    locks.seen(clientSession);
+    if (op === 'operator_help') return operatorHelp(args);
+    if (op === 'operator_transfer_status') return transfers.status(args, { principal });
+    return transfers.start(args, { principal, clientSession, requestId });
+  }
+
   function setOperatorFrozen(value, by) {
     operatorFrozen = value === true;
     record(operatorFrozen ? 'operator_frozen' : 'operator_unfrozen', null, {by: typeof by === 'string' ? by.slice(0, 64) : 'owner'});
   }
 
-  // Internal operator ops (never tools): signed by the hub as hub:owner.
-  function sendInternal(host, op, args) {
-    if (!signer || !OPS[op]?.internal) return Promise.resolve(fail('unsupported_op'));
+  // Internal operator ops (never tools): signed by the hub as hub:owner, or for the caller whose
+  // call they serve (the source reads of operator_transfer), so the host journal names that caller.
+  function sendInternal(host, op, args, principal = HUB_PRINCIPALS[PRINCIPAL_IDS.owner]) {
+    if (!signer || !OPS[op]?.internal || !Object.hasOwn(OPERATOR_AGENT_IDS, host)) return Promise.resolve(fail('unsupported_op'));
     const id = newId();
-    const principal = HUB_PRINCIPALS[PRINCIPAL_IDS.owner];
     const signature = signer.sign({ id, op, host, tier: 0, principal: principal.id, args });
     return sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, id, operator: signature });
   }
@@ -462,7 +482,7 @@ export function createHub(options) {
         if (!isOperatorOp(op)) continue;
         const def = operatorDefs.get(op);
         mcp.registerTool(op,{description:def.description,inputSchema:def.inputSchema,annotations:def.annotations},
-          async args=>result(await requestOperator(args?.host, op, {args: args ?? {}, principal})));
+          async args=>operatorContent(await requestOperator(args?.host, op, {args: args ?? {}, principal})));
       }
     }
     if (gate.runtimeEnabled && definitions) {
@@ -556,7 +576,7 @@ export function createHub(options) {
     inventory, requestAgent, requestOperator, availableOps,
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
     setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
-    operatorApprovals: approvals, operatorLocks: locks,
+    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers,
     // The Telegram bot (bridge/operator-telegram.mjs), built by hub-cli with the hub's owner hooks.
     attachOperatorBot(value) { bot = value; },
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }

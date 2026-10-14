@@ -28,6 +28,7 @@ import { CAPABILITIES, CLIENT_TYPES, REMOTE_DEFAULT_CEILING, authorize, isPrinci
 import { collectOperatorDefinitions, collectToolDefinitions, isRemoteOperatorTool, isRemoteWriteTool, operatorRegistryProblems,
   operatorToolsFor, REMOTE_OPERATOR_TOOLS, REMOTE_TOOLS, registryProblems, toolsFor } from '../server/registry.mjs';
 import { RESULT_LIMIT_BYTES } from './operator-output.mjs';
+import { splitMedia } from './operator-content.mjs';
 import { MAX_RESULT_BYTES, PACKAGE_VERSION } from './protocol.mjs';
 import { OPS } from './ops.mjs';
 import { MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS } from '../server/instructions.mjs';
@@ -242,9 +243,12 @@ function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
           data = await dispatch(cfg.runtimeHost, op, { args: prepared.args, principal, ctx: ctx ?? null, clientId });
         } catch { data = { ok: false, error: 'internal_error' }; }
         if (!isPlainObject(data)) data = { ok: false, error: 'invalid_agent_response' };
-        const out = boundedResult(op, data, isRemoteOperatorTool(op) ? Math.max(cfg.budgetBytes, OPERATOR_BUDGET_BYTES) : cfg.budgetBytes);
+        // operator_read_media: image bytes become MCP image parts, outside the text budget (the host
+        // bounds them, bridge/operator-media.mjs); the text part keeps their metadata.
+        const { data: textData, images } = isRemoteOperatorTool(op) ? splitMedia(data) : { data, images: [] };
+        const out = boundedResult(op, textData, isRemoteOperatorTool(op) ? Math.max(cfg.budgetBytes, OPERATOR_BUDGET_BYTES) : cfg.budgetBytes);
         if (out.tooLarge) audit({ at: new Date().toISOString(), event: 'remote_result_too_large', principal: principal.id, op, bytes: out.bytes });
-        return { content: [{ type: 'text', text: out.text }] };
+        return { content: [{ type: 'text', text: out.text }, ...(out.tooLarge ? [] : images)] };
       });
   }
   return server;

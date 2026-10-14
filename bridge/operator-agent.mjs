@@ -28,6 +28,8 @@ import { operatorCallTier, OPERATOR_OPERATION_CAPABILITY } from '../server/coord
 import { needsApproval } from './operator-dangerous.mjs';
 import { finalizeResult } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
+import { TRANSFER_SOURCE_SCHEMAS } from './operator-transfer-source.mjs';
+import { detachBinary } from './operator-binary.mjs';
 
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -35,7 +37,9 @@ const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const host = z.enum(['mac', 'vps']);
 export const INTERNAL_SCHEMAS = Object.freeze({
   operator_audit_head: z.object({ host, since_seq: z.number().int().min(1).optional() }),
-  operator_owner_unfreeze: z.object({ host, by: z.string().min(1).max(64) })
+  operator_owner_unfreeze: z.object({ host, by: z.string().min(1).max(64) }),
+  // The source side of operator_transfer (bridge/operator-transfer-source.mjs).
+  ...TRANSFER_SOURCE_SCHEMAS
 });
 
 // policy      parsed local policy (operator-policy.mjs)
@@ -131,7 +135,9 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       if (data.ok === false && !CODE_RE.test(String(data.error))) data = { ok: false, error: 'internal_error' };
       // A secret path request from the model counts like a policy refusal (prompt injection).
       if (data.ok === false) guard.refused(data.error);
-      const { data: out } = finalizeResult(ref !== null && data.ref === undefined ? { ...data, ref } : data);
+      // Image and chunk bytes skip the text redactor and the 128 KiB bound (each tool bounds its own).
+      const { rest, attach } = detachBinary(data);
+      const out = attach(finalizeResult(ref !== null && rest.ref === undefined ? { ...rest, ref } : rest).data);
       if (!(await journal(data.ok === false ? 'denied' : 'ok', data.ok === false ? data.error : null, out))) {
         return { ok: false, error: 'audit_unavailable' };
       }

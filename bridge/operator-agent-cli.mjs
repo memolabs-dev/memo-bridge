@@ -34,6 +34,9 @@ import { createAuditChain, fileAuditStore, helperAuditChain } from './operator-a
 import { createOperatorTools } from './operator-tools.mjs';
 import { createOperatorWriteTools } from './operator-write.mjs';
 import { createOperatorExecTools } from './operator-exec.mjs';
+import { createSnapshotTool } from './operator-snapshot.mjs';
+import { createMediaTool } from './operator-media.mjs';
+import { createTransferSourceTools } from './operator-transfer-source.mjs';
 import { createJobStore } from './operator-jobs.mjs';
 import { createRootHelperClient } from './operator-root-helper.mjs';
 import { createOperatorOperations } from './operator-agent.mjs';
@@ -76,7 +79,9 @@ const rootHelper = policy.rootHelper ? createRootHelperClient({ socketPath: poli
 const chain = rootHelper && host === 'vps' ? helperAuditChain(rootHelper) : createAuditChain({ store: fileAuditStore(policy.auditFile) });
 const jobs = createJobStore({ dir: join(stateDir, 'jobs') });
 const tools = { ...createOperatorTools(policy, { guard, chain }), ...createOperatorWriteTools(policy, { stateDir }),
-  ...createOperatorExecTools(policy, { jobs }) };
+  ...createOperatorExecTools(policy, { jobs }),
+  // Repatriated from SentinelX (part 2): orientation, media, the source side of operator_transfer.
+  ...createSnapshotTool(policy), ...createMediaTool(policy), ...createTransferSourceTools(policy) };
 const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, rootHelper, log });
 
 const ca = readSmall(join(dir, 'hub-ca.crt'));

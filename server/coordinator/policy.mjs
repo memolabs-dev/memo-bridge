@@ -117,7 +117,14 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   operator_script: CAPABILITIES.OPERATOR_ROOT,
   // Multi-session (D-MS4): locks, answered by the hub; T1 like the writes they announce
   operator_lock: CAPABILITIES.OPERATOR_WRITE,
-  operator_unlock: CAPABILITIES.OPERATOR_WRITE
+  operator_unlock: CAPABILITIES.OPERATOR_WRITE,
+  // Repatriated from SentinelX (part 2): T0 on the agent, help and transfer status in the hub;
+  // operator_transfer is T1 (it writes on the destination host), relayed by the hub.
+  operator_snapshot: CAPABILITIES.OPERATOR_READ,
+  operator_read_media: CAPABILITIES.OPERATOR_READ,
+  operator_help: CAPABILITIES.OPERATOR_READ,
+  operator_transfer_status: CAPABILITIES.OPERATOR_READ,
+  operator_transfer: CAPABILITIES.OPERATOR_WRITE
 });
 export const isOperatorOperation = operation => typeof operation === 'string' && Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation);
 // The tier (0..3) of an operator op, or null.

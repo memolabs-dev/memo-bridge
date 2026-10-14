@@ -166,10 +166,40 @@ export function createOperatorWriteTools(policy, { run = runArgv, projects = cat
     for (const [id, u] of uploads) if (now() - u.created > UPLOAD_TTL_MS) { uploads.delete(id); await unlink(u.file).catch(() => {}); }
   };
 
+  // Staged content for operator_edit: {ok, args, used} or a refusal. A stage belongs to the path it
+  // was started for, must be complete, at most EDIT_MAX_BYTES and valid UTF-8.
+  async function stagedEditArgs(args, path) {
+    const used = [];
+    const out = { ...args };
+    for (const [key, field] of [['old_upload_id', 'old'], ['new_upload_id', 'new_text']]) {
+      if (args[key] === undefined) continue;
+      if (args[field] !== undefined) return fail('invalid_arguments', { detail: `${field} or ${key}, not both` });
+      const u = uploads.get(args[key]);
+      if (!u || !u.stage) return fail('unknown_upload', { detail: key });
+      if (!u.staged) return fail('upload_incomplete', { detail: key });
+      if (u.path !== path) return fail('stage_path_mismatch', { detail: `${key} was staged for another path` });
+      if (u.size > EDIT_MAX_BYTES) return fail('file_too_large');
+      let text;
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(await readFile(u.file)); } catch { return fail('not_text', { detail: key }); }
+      if (field === 'old' && !text) return fail('invalid_arguments', { detail: 'old_upload_id is empty' });
+      out[field] = text;
+      used.push(args[key]);
+    }
+    delete out.old_upload_id; delete out.new_upload_id;
+    return { ok: true, args: out, used };
+  }
+  async function dropStages(ids) {
+    for (const id of ids) { const u = uploads.get(id); uploads.delete(id); if (u) await unlink(u.file).catch(() => {}); }
+  }
+
   return {
-    async operator_edit(args) {
-      const at = await resolve(args.path, args.create !== true);
+    async operator_edit(raw) {
+      const at = await resolve(raw.path, raw.create !== true);
       if (!at.ok) return at;
+      // Staged content (operator_upload_init stage:true) in place of old / new_text.
+      const staged = await stagedEditArgs(raw, at.path);
+      if (!staged.ok) return staged;
+      const args = staged.args;
       let info = null;
       try { info = await lstat(at.path); } catch { info = null; }
       if (info && !info.isFile()) return fail('not_a_file');
@@ -199,29 +229,33 @@ export function createOperatorWriteTools(policy, { run = runArgv, projects = cat
       try { await atomicWrite(at.path, edited.text, info); } catch (error) {
         return fail(error?.code === 'OWNER' ? 'owner_would_change' : 'write_failed', backupPath ? { backup: backupPath } : {});
       }
+      await dropStages(staged.used);
       return { ...base, backup: backupPath, ...(args.validator ? { validator: 'passed' } : {}), ...diff };
     },
 
-    async operator_upload_init({ path, size, overwrite = false }) {
+    async operator_upload_init({ path, size, overwrite = false, stage = false }) {
       await sweepUploads();
       if (uploads.size >= MAX_UPLOADS) return fail('too_many_uploads');
+      if (stage && size > EDIT_MAX_BYTES) return fail('file_too_large', { max_bytes: EDIT_MAX_BYTES });
       const at = await resolve(path, false);
       if (!at.ok) return at;
       const exists = await lstat(at.path).then(s => s, () => null);
       if (exists && !exists.isFile()) return fail('not_a_file');
-      if (exists && !overwrite) return fail('exists', { detail: 'set overwrite to replace it (a backup is kept)' });
+      // A stage writes nothing at the path: the edit that uses it decides (and keeps a backup).
+      if (exists && !overwrite && !stage) return fail('exists', { detail: 'set overwrite to replace it (a backup is kept)' });
       const id = `up_${random(16).toString('base64url')}`;
       await mkdir(uploadDir(), { recursive: true, mode: 0o700 });
       const file = join(uploadDir(), id);
       await writeFile(file, '', { mode: 0o600, flag: 'wx' });
-      uploads.set(id, { path: at.path, size, overwrite, file, received: new Set(), created: now() });
-      return { ok: true, host: policy.host, upload_id: id, path: at.path, size, chunk_bytes: UPLOAD_CHUNK_BYTES,
+      uploads.set(id, { path: at.path, size, overwrite, stage, file, received: new Set(), created: now() });
+      return { ok: true, host: policy.host, upload_id: id, path: at.path, size, ...(stage ? { stage: true } : {}), chunk_bytes: UPLOAD_CHUNK_BYTES,
         chunks: Math.ceil(size / UPLOAD_CHUNK_BYTES), expires_in_s: UPLOAD_TTL_MS / 1000 };
     },
 
     async operator_upload_chunk({ upload_id: id, index, content_base64: content }) {
       const u = uploads.get(id);
       if (!u) return fail('unknown_upload');
+      if (u.staged) return fail('upload_complete');
       const data = Buffer.from(content, 'base64');
       const expected = Math.min(UPLOAD_CHUNK_BYTES, u.size - index * UPLOAD_CHUNK_BYTES);
       if (expected <= 0 || data.length !== expected) return fail('chunk_size_mismatch', { expected_bytes: Math.max(0, expected) });
@@ -239,6 +273,11 @@ export function createOperatorWriteTools(policy, { run = runArgv, projects = cat
       const hash = createHash('sha256');
       await new Promise((ok, ko) => createReadStream(u.file).on('data', c => hash.update(c)).on('end', ok).on('error', ko));
       if (hash.digest('hex') !== sha256) return fail('sha256_mismatch');
+      if (u.stage) {
+        u.staged = true;
+        return { ok: true, host: policy.host, upload_id: id, path: u.path, size: u.size, sha256, staged: true,
+          next: 'operator_edit on this path with new_upload_id (or old_upload_id) set to this upload_id', expires_in_s: Math.max(0, Math.round((UPLOAD_TTL_MS - (now() - u.created)) / 1000)) };
+      }
       // The destination is checked again: the tree may have changed since init.
       const at = await resolve(u.path, false);
       if (!at.ok) return at;

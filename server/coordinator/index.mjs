@@ -44,7 +44,9 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_closed', 'project_mismatch',
   'repo_not_allowed', 'issue_not_ready', 'issue_changed', 'lease_race_lost', 'lease_denied', 'host_not_remote_enabled',
-  'project_not_allowed', 'session_mismatch', 'workspace_other_session', 'session_required']);
+  'project_not_allowed', 'session_mismatch', 'workspace_other_session', 'session_required',
+  // Context memory: content refusals and conflicts (server/coordinator/memory.mjs).
+  'secret_detected', 'instruction_refused', 'not_a_fact', 'evidence_required', 'duplicate_fact', 'memory_full', 'revision_conflict']);
 // Phase 5: the only host a remote (OIDC) principal's workspace may live on. Mac-hosted
 // workspaces driven remotely are deferred to Phase 5b (spec non-goals, REQ-P5-08).
 const REMOTE_HOST = 'vps';
