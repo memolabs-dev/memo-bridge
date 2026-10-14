@@ -37,7 +37,7 @@ Phase 3 adds a Mac runner (`docs/RUNNER.md`). It runs over the local stdio trans
 The local owner principal (`local:<OS user>`) holds all of them. Reads of worktrees, files, jobs, hosts, GitHub and the journal need `coordinator:read`.
 
 What the file and Git tools never do (these guarantees hold for the tools themselves; jobs are covered below):
-- **No shell.** (Development tools. The operator tools differ: `operator_run` takes an argv and never a shell line, and only `operator_script` at T3 on lab runs a shell, see below.) Every process Memo Bridge starts is started with `execFile`/`spawn` and a fixed argument array. The model chooses a recipe name, never a command; the command comes from the repository's manifests (`server/runners/recipes.mjs`).
+- **No shell.** (Development tools. The operator tools differ: `operator_run` takes an argv and never a shell line, and only `operator_script` at T3 runs a shell, through a root helper, see below.) Every process Memo Bridge starts is started with `execFile`/`spawn` and a fixed argument array. The model chooses a recipe name, never a command; the command comes from the repository's manifests (`server/runners/recipes.mjs`).
 - **No merge, no deployment, no service change.** Pull requests are opened, never merged and never set to auto-merge; the landing contract of `memolabs-dev/.github` lands them.
 - **No write to a default branch, no force-push.** `main`, `master`, the local `origin/HEAD` and the remote's own default branch (read with `git ls-remote --symref` before creating and before pushing) are refused, all compared without case: on APFS `refs/heads/Main` is the file `refs/heads/main`. A new branch may not match any local or remote branch without case either. A push uses an explicit refspec without `+`, and only creates the remote branch or moves it from a commit this worktree pushed itself (`push_rejected` otherwise).
 - **No file access outside the worktrees.** Paths are relative, normalized and checked after `realpath`; `..`, absolute paths, `.git` and symlink escapes are refused, and reads never block on a FIFO. Before any Git command, the worktree's `.git` link must still point at the project's repository (`worktree_link_changed`). Filesystem paths are never returned to models.
@@ -114,11 +114,11 @@ write and run commands on the Mac and the VPS from ChatGPT, root included on the
 tools are the exception to "no admin operations" above, and these rules bound them:
 
 - **Separate tiers and scopes.** `operator:read` (T0), `operator:write` (T1), `operator:exec`
-  (T2), `operator:root` (T3, lab only). Opt-in: absent from the default remote ceiling, write
+  (T2), `operator:root` (T3: lab, and the Mac once its root helper is installed). Opt-in: absent from the default remote ceiling, write
   tiers listed only with remote writes enabled.
 - **Signed requests, local policy.** The hub signs every operator call (Ed25519 over op, host,
   tier, arguments hash, expiry, nonce, principal, approval). Each host agent, and the root
-  helper on lab, checks the signature and then its own policy file (root-owned on lab,
+  helper on each host, checks the signature and then its own policy file (root-owned on lab,
   read-only on the Mac); the hub never sends policy.
 - **No shell below T3.** `operator_run` spawns an argv. On lab, root runs only in transient
   `systemd-run` units started by a root helper with time, memory and task limits.
@@ -132,11 +132,17 @@ tools are the exception to "no admin operations" above, and these rules bound th
   removal, auto-freeze on refusal bursts, rate limits per tier.
 - **Journals.** The hub journals every call with redacted arguments and hashes; each host keeps
   a hash-chained journal (on lab written by the root helper, which `memo-operator` cannot
-  rewrite), whose head the hub anchors every 15 minutes.
+  rewrite), whose head the hub anchors every 15 minutes. The Mac root helper keeps its own
+  root-owned chain, `/var/log/memo-operator/audit.jsonl`, for root calls.
+- **Mac root** runs only through the LaunchDaemon `dev.memolabs.memo-operator-root`, from a
+  root-owned copy of the code, node, policy and hub key under
+  `/Library/Application Support/MemoBridge/operator-root`, never from the home folder; its socket
+  is owned by `memo`, 0600; each call runs in its own process group, killed at the timeout, with a
+  system-only `PATH`. No memory limit exists on macOS for it.
 
 Residual risks, accepted by the owner:
 - A root compromise of lab holds the hub signing key, hence everything the Mac policy allows,
-  as the user `memo` (no root on the Mac).
+  as the user `memo`, and as root once the Mac root helper is installed (owner decision 2026-10-14).
 - T2 on the Mac is the owner's user: a command can do what `memo` can do; the read-only policy
   stops the agent's own write tools, not a command.
 - An argv classifier does not see everything a program does; a prompt injection can still run
