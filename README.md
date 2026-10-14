@@ -2,7 +2,7 @@
 
 Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Since v0.5 the same tools can run on the VPS behind the private hub, with jobs queued one at a time in an unprivileged systemd unit, so work continues with the Mac off (`docs/RUNNER_VPS.md`; not deployed yet). Since v0.6 ChatGPT Chat conversations can use a fixed subset of those tools through a public, OAuth-protected endpoint served by the hub (`docs/REMOTE_CHATGPT.md`; not deployed yet). Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
 
-## Tools (v0.6.0, 48 tools)
+## Tools (v0.6.0, 51 tools)
 
 `bridge_info` returns the same list, grouped, with the capability each group needs.
 
@@ -18,6 +18,7 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 
 - Workspaces: `workspace_open`, `workspace_status`, `workspace_list`, `workspace_close`, `workspace_recover`
 - Tasks (a task is a GitHub Issue): `tasks_list`, `task_status`, `task_claim`, `task_renew`, `task_checkpoint`, `task_release`, `task_complete`
+- Batches for a conductor conversation (`docs/REMOTE_CHATGPT.md`): `batch_create`, `task_next`, `batch_status`
 - Audit journal: `audit_events`, `audit_operation`
 
 ### Phase 3: the Mac runner (`docs/RUNNER.md`)

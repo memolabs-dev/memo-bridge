@@ -84,7 +84,8 @@ test('toolsFor: gate layer 1 lists writes only with remote_writes "enabled", and
   assert.deepEqual(toolsFor(READ_ONLY, { remoteWrites: true }), [...REMOTE_TOOLS_READ].sort());
   const claimer = makePrincipal('oidc:claimer', [CAPABILITIES.READ, CAPABILITIES.WRITE]);
   assert.deepEqual(toolsFor(claimer, { remoteWrites: true }),
-    [...REMOTE_TOOLS_READ, 'workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint'].sort());
+    [...REMOTE_TOOLS_READ, 'workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
+      'task_next'].sort());
   assert.deepEqual(toolsFor(makePrincipal('oidc:none', [])), []);
   assert.deepEqual(toolsFor(null), []);
   for (const value of [undefined, null, {}, { remote_writes: 'disabled' }, { remote_writes: 'yes' }, { remote_writes: true }]) {

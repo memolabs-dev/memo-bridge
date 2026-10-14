@@ -20,9 +20,11 @@ import { collectTools as registryTools, collectToolDefinitions as registryDefini
 // timeout only bounds the hub's wait: the runtime finishes the op either way.
 export const TIMEOUTS = Object.freeze({ probe: 6_000, default: 30_000, github: 60_000, ledger: 130_000, ledgerChain: 250_000 });
 
-const LEDGER_OPS = new Set(['tasks_list', 'task_status', 'task_renew', 'task_checkpoint', 'jobs_submit',
+// batch_status reads up to 30 leases in parallel; task_next may chain several claims and
+// batch_create up to 11 GitHub writes.
+const LEDGER_OPS = new Set(['tasks_list', 'task_status', 'batch_status', 'task_renew', 'task_checkpoint', 'jobs_submit',
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push', 'worktree_remove', 'github_create_pr']);
-const LEDGER_CHAIN_OPS = new Set(['task_claim', 'task_release', 'task_complete', 'workspace_close', 'workspace_recover']);
+const LEDGER_CHAIN_OPS = new Set(['task_claim', 'task_next', 'batch_create', 'task_release', 'task_complete', 'workspace_close', 'workspace_recover']);
 const GITHUB_READ_OPS = new Set(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks']);
 
 // Ops answered by the hub itself (no agent, no capability beyond authentication).

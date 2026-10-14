@@ -141,3 +141,21 @@ with the resolved-path check); lab-infra 19 of 19.
 - `remote.json` project entries are `owner/repo`; memo-bridge allows the catalog project named
   after the repository (inference: the pilot repositories are registered under their repository
   name; a mismatch fails closed with `project_not_allowed`).
+
+## Conductor batches (TODO-P5-50 to 52), 2026-10-14
+
+- Tools `batch_create` (github:write), `task_next` (coordinator:write), `batch_status` (read), in
+  `server/coordinator/batches.mjs` and `server/coordinator/index.mjs`, registered in
+  `server/tools/coordinator-tools.mjs`; remote lists, policy, ops timeouts and `RETRY_SAFE_OPS`
+  updated. A batch is a GitHub label; claims go through `operations.taskClaim`.
+- `tests/batches.test.mjs`, 9 tests: creation and labels, input refusals and partial batch,
+  replay on `client_request_id`, 10 parallel `task_next` on 10 tasks (10 distinct claims, 10
+  ledger workers, the 11th call `done:true`), lost race and foreign lease skipped, ledger failure
+  stops, lease expiry (stale in `batch_status`, then taken over), status shape and states,
+  remote classification, gate layer 1, read-only refusal, project allowlist, session binding.
+- `npm test`: 348 pass, 0 fail (339 before, plus the 9 new tests).
+  `npm run smoke`: ok, 51 tools. `npm run smoke:remote`: 7 pass.
+- `npm run remote:toolsize`: read 23 tools, 15 627 bytes; write 39 tools, 34 502 bytes.
+- Not verified: GitHub label creation and Issue creation against the real API (the in-memory
+  GitHub follows the documented REST contract; label auto-creation on Issue creation is not
+  documented, so the batch label is created explicitly with POST /labels first).

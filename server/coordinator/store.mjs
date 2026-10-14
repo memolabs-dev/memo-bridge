@@ -317,6 +317,10 @@ function repository(db) {
       return db.prepare(`SELECT * FROM claims WHERE workspace_id = ?${state ? ' AND state = ?' : ''} ORDER BY updated_at`)
         .all(...(state ? [workspaceId, state] : [workspaceId])).map(plain);
     },
+    // Every recorded claim on one Issue, any workspace, newest first (batch_status, task_next).
+    claimsOfIssue(issueRef, limit = 20) {
+      return db.prepare('SELECT * FROM claims WHERE issue_ref = ? ORDER BY updated_at DESC LIMIT ?').all(issueRef, limit).map(plain);
+    },
     // Compare-and-set on the fence so an outdated local view never overwrites a newer one.
     updateClaim(claimId, patch, expectedFence) {
       const { sql, values } = setClause(patch, CLAIM_COLUMNS);
@@ -338,8 +342,9 @@ function repository(db) {
           w.created_at, w.updated_at);
     },
     getWorktree(id) { return plain(db.prepare('SELECT * FROM worktrees WHERE id = ?').get(id)); },
-    listWorktrees({ workspace_id, project_id, status, limit = 100 } = {}) {
+    listWorktrees({ workspace_id, project_id, status, issue_ref, limit = 100 } = {}) {
       const where = []; const values = [];
+      if (issue_ref) { where.push('issue_ref = ?'); values.push(issue_ref); }
       if (workspace_id) { where.push('workspace_id = ?'); values.push(workspace_id); }
       if (project_id) { where.push('project_id = ?'); values.push(project_id); }
       if (status) { where.push('status = ?'); values.push(status); }

@@ -22,6 +22,9 @@ import { ACTIVE_JOB_STATUSES } from '../runners/executor.mjs';
 import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
+import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
+  isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
+  from './batches.mjs';
 
 // The list lives in policy.mjs, so a principal can carry a server-derived client kind (Phase 5).
 export { CLIENT_TYPES };
@@ -46,15 +49,26 @@ const REMOTE_HOST = 'vps';
 const UNCERTAIN = new Set(['ledger_unavailable', 'ledger_outcome_unknown']);
 const MAX_LIST = 200;
 const WRITES = new Set(['workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete',
-  'task_checkpoint']);
+  'task_checkpoint', 'batch_create', 'task_next']);
 // Phase 5 remote guards (D8, D9, REQ-P5-15), applied around the operations whatever the caller:
 // - the project allowlist binds remote principals when they open or extend work; giving work
 //   back (release, complete, close) stays possible after a project leaves the allowlist;
 // - the session binding is checked on every write that names a workspace;
 // - task_claim takes client_request_id (Phase 4 FU-5): a retry returns the first result.
-const REMOTE_PROJECT_OPS = new Set(['workspace_open', 'task_claim', 'task_renew', 'task_checkpoint']);
-const BOUND_OPS = new Set(['workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint']);
-const IDEMPOTENT_OPS = new Set(['task_claim']);
+// Batches (TODO-P5-50 to 52): batch_create and batch_status name their project, task_next works
+// in the project of its workspace; task_next and batch_create replay their first result.
+const REMOTE_PROJECT_OPS = new Set(['workspace_open', 'task_claim', 'task_renew', 'task_checkpoint', 'batch_create',
+  'batch_status', 'task_next']);
+const BOUND_OPS = new Set(['workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
+  'task_next']);
+const IDEMPOTENT_OPS = new Set(['task_claim', 'task_next', 'batch_create']);
+// Issues a task_next of this process is claiming right now: concurrent task_next calls try
+// them last, so parallel conversations on one batch rarely race for the same Issue. Only an
+// optimisation: the ledger alone decides who holds a task.
+const CLAIMING = new Map();
+const claiming = ref => (CLAIMING.get(ref) ?? 0) > 0;
+const holdClaiming = ref => CLAIMING.set(ref, (CLAIMING.get(ref) ?? 0) + 1);
+const dropClaiming = ref => { const n = (CLAIMING.get(ref) ?? 1) - 1; if (n > 0) CLAIMING.set(ref, n); else CLAIMING.delete(ref); };
 // Calls running now in this process, by hub request id, so workspace_status can say that an
 // operation answered 'accepted' is still running.
 const IN_FLIGHT = new Map();
@@ -260,7 +274,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
   readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = query => ghSearchIssues(query),
-  remotePolicy = remotePolicyFromEnv() }) {
+  remotePolicy = remotePolicyFromEnv(), github = null }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
   // Where the call came from and which client made it, as the server set them on the principal
@@ -438,6 +452,52 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     }
     if (active && !claims.length) actions.push('No task held: pick one with tasks_list, then task_claim.');
     return actions.slice(0, RECOVER.actions).map(a => a.slice(0, 300));
+  }
+
+  // GitHub for batches: injected in tests, else the shared integration (server/integrations/
+  // github.mjs, loaded lazily: it imports this module).
+  let gitHubClient = github;
+  async function gitHub() {
+    if (!gitHubClient) {
+      const { createGitHub } = await import('../integrations/github.mjs');
+      gitHubClient = createGitHub({ catalogOptions });
+    }
+    return gitHubClient;
+  }
+
+  // The batch repository of a project: its GitHub origin, which must be in the ledger
+  // allowlist (else no task of the batch could ever be claimed).
+  async function batchRepo(projectName) {
+    const project = await resolve(projectName);
+    if (!project.ok) return project;
+    const origin = await projectRemote(project.project);
+    if (!origin) return fail('project_origin_unknown');
+    const allowlist = await readAllowlist();
+    if (!allowlist.ok) return allowlist;
+    const repo = allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase());
+    if (!repo) return fail('repo_not_allowed');
+    const [owner, name] = repo.split('/');
+    return { ok: true, project: project.project.name, repo: { full: repo, owner, name } };
+  }
+
+  // The Issues of a batch, newest data from GitHub, with their owner/repo#n reference.
+  async function batchIssues(repo, batch) {
+    const listed = await (await gitHub()).labelledIssues(repo, batchLabel(batch), { limit: BATCH_SCAN });
+    if (!listed.ok) return listed;
+    return { ok: true, issues: listed.issues.map(i => ({ ...i, ref: `${repo.full}#${i.number}` })) };
+  }
+
+  const claimRules = { ready: READY_LABEL, priorities: PRIORITIES, blocking: BLOCKING_LABELS };
+  const liveLocal = (claim, at) => claim?.state === 'claimed' && Date.parse(claim.expires_at) > at;
+
+  // What task_next hands a worker conversation: the task, its claim and the fixed steps.
+  function nextTask(issue, claim, workspaceId) {
+    const parsed = parseTaskBody(issue.body);
+    return { issue: issue.ref, title: issue.title, url: issue.url,
+      priority: (priorityOf(issue, PRIORITIES) ?? '').slice('priority:'.length) || null,
+      scope: parsed.scope, acceptance: parsed.acceptance, ...(parsed.scope || parsed.acceptance ? {} : { body: issue.body }),
+      workspace_id: workspaceId, claim_id: claim.claim_id, fence: claim.fence, expires_at: claim.expires_at,
+      instructions: workerInstructions({ workspaceId, issue: issue.ref, expiresAt: claim.expires_at }) };
   }
 
   const operations = {
@@ -721,6 +781,132 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     }
   };
 
+  // Batches (TODO-P5-50 to 52). A batch is a label on ordinary claimable Issues; claims go
+  // through operations.taskClaim, the same path as task_claim.
+  Object.assign(operations, {
+    // Create up to BATCH_MAX Issues labelled agent:ready, priority:<p> and agent:batch-<id>.
+    // Stops at the first failure and reports what exists: the answer is ok either way (a
+    // retry with the same client_request_id replays it and never creates duplicates).
+    async batchCreate(args) {
+      const checked = validateBatchTasks(args.tasks);
+      if (checked.error) return fail('invalid_input', checked.error);
+      const name = batchLabelText(args.name);
+      if (name === undefined) return fail('invalid_input', 'name');
+      const target = await batchRepo(args.project);
+      if (!target.ok) return target;
+      const gh = await gitHub();
+      const batch = newBatchId();
+      const label = batchLabel(batch);
+      const made = await gh.ensureLabel(target.repo, { name: label, color: BATCH_LABEL_COLOR,
+        description: (name ? `Memo Bridge batch: ${name}` : 'Memo Bridge batch').slice(0, 100) });
+      if (!made.ok) return made;
+      const created = []; let failure = null;
+      for (const task of checked.tasks) {
+        const labels = [READY_LABEL, `priority:${task.priority}`, label];
+        const r = await gh.createIssue(target.repo, { title: task.title, body: issueBody(task, batch, name), labels });
+        if (!r.ok) { failure = { index: created.length, error: r.error, ...(r.uncertain ? { uncertain: true } : {}) }; break; }
+        // Labels set by someone without push access are silently dropped (GitHub REST docs,
+        // "Create an issue"): an Issue without them would never be claimable.
+        const missing = labels.filter(l => !(r.issue.labels ?? []).includes(l));
+        created.push({ issue: `${target.repo.full}#${r.issue.number}`, number: r.issue.number, title: r.issue.title,
+          url: r.issue.url, priority: task.priority, ...(missing.length ? { missing_labels: missing } : {}) });
+        if (missing.length) { failure = { index: created.length - 1, error: 'labels_dropped' }; break; }
+      }
+      return { ok: true, batch, label, project: target.project, repo: target.repo.full, count: created.length, tasks: created,
+        ...(failure ? { partial: true, failed: failure, not_created: checked.tasks.length - created.length +
+          (failure.error === 'labels_dropped' ? 1 : 0) } : {}),
+        paste: pasteSentence(batch, target.project),
+        next: 'Open one ChatGPT conversation per task and paste the sentence in each. Follow progress with batch_status.' };
+    },
+
+    // Claim the next ready, unclaimed task of a batch for this workspace. A claim the ledger
+    // refuses because someone else got there first moves on to the next task.
+    async taskNext(args, meta) {
+      if (!BATCH_ID_RE.test(args.batch ?? '')) return fail('invalid_input', 'batch');
+      const ttl = ttlOf(args.ttl_seconds);
+      if (ttl === undefined) return fail('invalid_input', 'ttl_seconds');
+      const ws = await ownedWorkspace(args.workspace_id);
+      if (ws.error) return ws.error;
+      const target = await batchRepo(ws.workspace.project_id);
+      if (!target.ok) return target;
+      const listed = await batchIssues(target.repo, args.batch);
+      if (!listed.ok) return listed;
+      if (!listed.issues.length) return fail('unknown_batch');
+      const byRef = new Map(listed.issues.map(i => [i.ref, i]));
+      const local = await read((repo, at) => ({ at,
+        mine: repo.claimsOf(ws.workspace.id, 'claimed').filter(c => byRef.has(c.issue_ref) && Date.parse(c.expires_at) > at),
+        others: new Set(listed.issues.filter(i => repo.claimsOfIssue(i.ref, 5).some(c => c.workspace_id !== ws.workspace.id &&
+          liveLocal(c, at))).map(i => i.ref)) }));
+      // One task per conversation: a workspace that already holds one of the batch gets it back.
+      if (local.mine.length) {
+        const c = local.mine[local.mine.length - 1];
+        return { ok: true, done: false, already_held: true, batch: args.batch,
+          task: nextTask(byRef.get(c.issue_ref), { claim_id: c.claim_id, fence: c.fence_sha, expires_at: c.expires_at }, ws.workspace.id) };
+      }
+      const candidates = claimOrder(listed.issues.filter(i => isClaimable(i, claimRules) && !local.others.has(i.ref)), PRIORITIES,
+        new Set(listed.issues.filter(i => claiming(i.ref)).map(i => i.ref))).slice(0, BATCH_MAX);
+      const skipped = [];
+      for (const issue of candidates) {
+        holdClaiming(issue.ref);
+        let claim;
+        try { claim = await operations.taskClaim({ workspace_id: ws.workspace.id, issue: issue.ref, ttl_seconds: ttl }, meta); }
+        finally { dropClaiming(issue.ref); }
+        if (claim.ok) {
+          return { ok: true, done: false, batch: args.batch, task: nextTask(issue, claim, ws.workspace.id),
+            ...(skipped.length ? { skipped } : {}) };
+        }
+        if (!NEXT_ON.has(claim.error)) return { ...claim, ...(skipped.length ? { skipped } : {}) };
+        skipped.push({ issue: issue.ref, error: claim.error });
+      }
+      const open = listed.issues.filter(i => i.state === 'open').length;
+      return { ok: true, done: true, batch: args.batch, open_tasks: open, held_elsewhere: local.others.size + skipped.length,
+        detail: 'no ready, unclaimed task left in this batch' };
+    },
+
+    // Per task: state, holder, pull requests; counts and stale leases. Reads only.
+    async batchStatus(args) {
+      if (!BATCH_ID_RE.test(args.batch ?? '')) return fail('invalid_input', 'batch');
+      const target = await batchRepo(args.project);
+      if (!target.ok) return target;
+      const listed = await batchIssues(target.repo, args.batch);
+      if (!listed.ok) return listed;
+      if (!listed.issues.length) return fail('unknown_batch');
+      const leases = await Promise.all(listed.issues.map(i => ledger.status(parseIssueRef(i.ref)).catch(() => fail('ledger_unavailable'))));
+      const local = await read((repo, at) => ({ at, rows: listed.issues.map(i => {
+        const claims = repo.claimsOfIssue(i.ref, 5);
+        const branches = repo.listWorktrees({ issue_ref: i.ref, limit: 5 }).map(w => w.branch);
+        const workspaces = new Map(claims.map(c => [c.workspace_id, repo.getWorkspace(c.workspace_id)]));
+        return { claims, branches, workspaces };
+      }) }));
+      const pulls = await (await gitHub()).linkedPulls(target.repo, { numbers: listed.issues.map(i => i.number),
+        branches: new Map(listed.issues.map((i, k) => [i.number, local.rows[k].branches])) });
+      const tasks = listed.issues.map((issue, k) => {
+        const lease = leases[k]?.ok ? leases[k].receipt : null;
+        const row = local.rows[k];
+        // The local claim the ledger's current lease is about, else the most recent one.
+        const claim = row.claims.find(c => lease?.claim_id && c.claim_id === lease.claim_id) ?? row.claims[0] ?? null;
+        const decoded = claim ? decodeOutcome(claim.outcome) : { outcome: null };
+        const state = taskState(issue, lease, claim ? { ...claim, outcome: decoded.outcome } : null, { ...claimRules, now: local.at });
+        const ws = claim ? row.workspaces.get(claim.workspace_id) : null;
+        const holder = lease?.state === 'claimed' ? { worker: lease.worker, expires_at: lease.expires_at,
+          ...(ws && claim?.claim_id === lease.claim_id ? { workspace_id: ws.id, client_type: ws.client_type,
+            // Labels are free text of another principal's session: shown only for your own.
+            ...(ownsWorkspace(principal, ws) ? { client_label: ws.client_label, mine: true } : { mine: false }) } : {}) } : null;
+        return { issue: issue.ref, number: issue.number, title: issue.title, url: issue.url, state,
+          priority: (priorityOf(issue, PRIORITIES) ?? '').slice('priority:'.length) || null,
+          ...(holder ? { holder } : {}), ...(leases[k]?.ok ? {} : { lease_error: leases[k]?.error ?? 'ledger_unavailable' }),
+          ...(decoded.outcome && state !== 'claimed' ? { last_outcome: decoded.outcome } : {}),
+          pull_requests: pulls.ok ? (pulls.pulls.get(issue.number) ?? []) : null };
+      });
+      const counts = Object.fromEntries(TASK_STATES.map(s => [s, tasks.filter(t => t.state === s).length]).filter(([, n]) => n));
+      const stale = tasks.filter(t => t.state === 'stale').map(t => ({ issue: t.issue, worker: t.holder?.worker ?? null,
+        expired_at: t.holder?.expires_at ?? null }));
+      return { ok: true, batch: args.batch, project: target.project, repo: target.repo.full, total: tasks.length, counts,
+        stale_leases: stale, tasks, ...(pulls.ok ? {} : { pull_requests_error: pulls.error }),
+        truncated: listed.issues.length >= BATCH_SCAN };
+    }
+  });
+
   // Every call: authorization first (so every refusal is journaled whatever the arguments),
   // then the operation, then the journal entry. Store failures never crash the server.
   // The operation name is the MCP tool name and the policy key (policy.mjs OPERATION_CAPABILITY).
@@ -728,7 +914,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     workspaceOpen: 'workspace_open', workspaceStatus: 'workspace_status', workspaceList: 'workspace_list',
     workspaceClose: 'workspace_close', workspaceRecover: 'workspace_recover',
     tasksList: 'tasks_list', taskStatus: 'task_status', taskClaim: 'task_claim', taskRenew: 'task_renew',
-    taskRelease: 'task_release', taskComplete: 'task_complete', taskCheckpoint: 'task_checkpoint'
+    taskRelease: 'task_release', taskComplete: 'task_complete', taskCheckpoint: 'task_checkpoint',
+    batchCreate: 'batch_create', taskNext: 'task_next', batchStatus: 'batch_status'
   };
   // GitHub origins (owner/repo, lower case) of the allowlisted projects, for remote principals.
   async function remoteOrigins() {
@@ -746,7 +933,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   // project of the owned workspace it names. null when there is nothing to check yet (the
   // operation itself then refuses the unknown or foreign workspace).
   async function projectOf(op, args) {
-    if (op === 'workspace_open') return typeof args.project === 'string' ? args.project : '';
+    if (op === 'workspace_open' || op === 'batch_create' || op === 'batch_status') return typeof args.project === 'string' ? args.project : '';
     if (!WS_RE.test(args.workspace_id ?? '')) return null;
     const workspace = await read(repo => repo.getWorkspace(args.workspace_id));
     return workspace && ownsWorkspace(principal, workspace) ? workspace.project_id : null;
@@ -820,7 +1007,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         if (tracked) IN_FLIGHT.delete(tracked);
       }
       const { result } = outcome;
-      const journalIds = { ...ids, workspace_id: ids.workspace_id ?? result?.workspace?.workspace_id };
+      const journalIds = { ...ids, workspace_id: ids.workspace_id ?? result?.workspace?.workspace_id,
+        // task_next journals the Issue it claimed.
+        issue: ids.issue ?? result?.task?.issue };
       if (outcome.mismatch) {
         // A session mismatch is journaled on its own row as well, whatever the mode.
         await note('session_check', result?.ok === false ? 'denied' : 'ok', 'session_mismatch', journalIds, meta);

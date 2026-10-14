@@ -34,7 +34,7 @@ export const TOOL_MODULES = Object.freeze([
 export const REMOTE_TOOLS_READ = Object.freeze([
   'projects_list',
   'workspace_status', 'workspace_list', 'workspace_recover',
-  'tasks_list', 'task_status',
+  'tasks_list', 'task_status', 'batch_status',
   'worktrees_list', 'worktree_status', 'worktree_list_files', 'worktree_read_file', 'worktree_diff',
   'jobs_list', 'job_status', 'job_events', 'job_results',
   'host_capabilities',
@@ -44,6 +44,7 @@ export const REMOTE_TOOLS_READ = Object.freeze([
 export const REMOTE_TOOLS_WRITE = Object.freeze([
   'workspace_open', 'workspace_close',
   'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
+  'batch_create', 'task_next',
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push',
   'jobs_submit', 'job_cancel',
   'github_create_pr'

@@ -52,14 +52,14 @@ hub.
 
 ## The remote tool set
 
-Read stage (22 tools): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`,
-`tasks_list`, `task_status`, `worktrees_list`, `worktree_status`, `worktree_list_files`,
+Read stage (23 tools): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`,
+`tasks_list`, `task_status`, `batch_status`, `worktrees_list`, `worktree_status`, `worktree_list_files`,
 `worktree_read_file`, `worktree_diff`, `jobs_list`, `job_status`, `job_events`, `job_results`,
 `host_capabilities`, `github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`,
 `audit_events`, `audit_operation`.
 
-Write stage adds 14: `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
-`task_release`, `task_complete`, `task_checkpoint`, `worktree_create`, `worktree_write_file`,
+Write stage adds 16: `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
+`task_release`, `task_complete`, `task_checkpoint`, `batch_create`, `task_next`, `worktree_create`, `worktree_write_file`,
 `worktree_commit`, `worktree_push`, `jobs_submit`, `job_cancel`, `github_create_pr`.
 
 Never remote: `observe_*`, `host_resources`, `worktree_remove`, `list_hosts`, `host_status`,
@@ -68,9 +68,57 @@ any surface.
 
 Names, descriptions, schemas and annotations are the stdio ones (one registry,
 `server/registry.mjs`; a test compares them). `npm run remote:toolsize` prints what ChatGPT
-receives: on 2026-10-14, 22 tools in 14 867 bytes (about 3 700 tokens) for the read stage and
-36 tools in 30 691 bytes (about 7 700 tokens) for the write stage. No ChatGPT limit is
+receives: on 2026-10-14, 23 tools in 15 627 bytes (about 3 900 tokens) for the read stage and
+39 tools in 34 502 bytes (about 8 600 tokens) for the write stage. No ChatGPT limit is
 documented; the TODO-P5-33 window checks that every tool shows after Refresh.
+
+## Conductor workflow: one chat splits, N chats work (TODO-P5-50 to 52)
+
+ChatGPT cannot open conversations by itself (driving ChatGPT programmatically is against the
+OpenAI terms), so the owner opens them. Everything else goes through the Coordinator: there is
+no batch table, only a GitHub label and the lease ledger.
+
+1. **Conductor chat.** The owner describes the project; the conductor calls `batch_create`
+   with `project` and 1 to 10 tasks (`title`, `scope`, `acceptance`, optional `priority`, p1 by
+   default). Each task becomes an ordinary GitHub Issue labelled `agent:ready`,
+   `priority:<p>` and `agent:batch-<id>`; the label is created first if it does not exist. The
+   answer carries the batch id and the sentence to paste, for example
+   `@Memo Bridge prends la prochaine tâche du lot 3f9a0c12de du projet drop`.
+2. **Worker chats.** The owner opens N conversations and pastes that same sentence in each.
+   Each one calls `workspace_open` on the project, then `task_next` with its `workspace_id` and
+   the batch id. `task_next` lists the batch Issues (GitHub Issues endpoint, not search, so a
+   new Issue is visible at once), keeps the claimable ones (open, `agent:ready`, one priority,
+   no blocking label), skips the ones this store already records as held by a live claim, and
+   claims them in order (p0 first, then Issue number) through the same code as `task_claim`.
+   A refusal that means someone else got there first (`lease_held`, `lease_race_lost`,
+   `issue_not_ready`, `issue_changed`) moves to the next task; any other failure stops and is
+   returned. The answer carries the task (Issue, title, scope, acceptance), `claim_id`,
+   `fence`, `expires_at` and fixed steps to follow. Nothing is left: `{ok:true, done:true}`.
+3. **Follow-up.** The conductor calls `batch_status` (`project`, `batch`): per task the state
+   (`ready`, `claimed`, `stale`, `blocked`, `done`, `closed`, `not_ready`, `unknown`), the
+   holder (ledger worker and expiry, plus workspace and client kind when this runtime knows
+   the workspace; the client label only for your own workspaces), linked pull requests
+   (closing keyword or the worktree branch), counts per state and the stale leases.
+
+Rules that hold whatever the model sends:
+- Classification: `batch_status` is a read (`coordinator:read`), `task_next` needs
+  `coordinator:write` like `task_claim`, `batch_create` needs `github:write` because it opens
+  Issues. With `remote_writes` not `enabled`, only `batch_status` is listed and the two writes
+  are refused by the runtime as well (D7).
+- Project allowlist (D9): `batch_create` and `batch_status` check their `project`, `task_next`
+  the project of its workspace. The batch repository must also be in the ledger allowlist.
+- Session binding (D8): `task_next` names a workspace, so a call from another conversation is
+  refused with `block` and warned with `warn`, before anything is claimed.
+- One task per conversation: a workspace that already holds a live claim on a task of the batch
+  gets that task back (`already_held:true`) and nothing new is claimed.
+- Retries: `task_next` and `batch_create` replay their first result for the same
+  `client_request_id`, so they may answer `accepted` past the soft deadline like `task_claim`;
+  a retry never claims a second task or creates a second batch.
+- `batch_create` refuses AI attribution in the task text, stops at the first GitHub failure and
+  reports `partial`, `failed` and `not_created`; an Issue whose labels GitHub dropped (a token
+  without push access) is reported as `labels_dropped`, since it could never be claimed.
+- Within one runtime, parallel `task_next` calls try different Issues first; across machines the
+  ledger alone decides, and the loser moves on.
 
 ## Write gate (D7)
 

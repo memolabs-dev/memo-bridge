@@ -34,7 +34,8 @@ const sha256 = value => createHash('sha256').update(value).digest('hex');
 // (ctx.mcpReq._meta, @modelcontextprotocol/server 2.3.1 BaseContext); never from arguments.
 // Mutating ops whose runtime handler replays the first result for the same client_request_id
 // (runOnce or the jobs request table): the only ones that may answer `accepted`.
-export const RETRY_SAFE_OPS = Object.freeze(new Set(['task_claim', 'worktree_push', 'github_create_pr', 'jobs_submit']));
+export const RETRY_SAFE_OPS = Object.freeze(new Set(['task_claim', 'worktree_push', 'github_create_pr', 'jobs_submit',
+  'batch_create', 'task_next']));
 
 export function clientSessionHash(ctx) {
   const value = ctx?.mcpReq?._meta?.['openai/session'];
@@ -143,7 +144,7 @@ export function createForwarder({ requestAgent, host = 'vps', softDeadlineMs = S
         ok: true, status: 'accepted', request_id: requestId, op, client_request_id: clientRequestId,
         detail: 'still running on the runtime; read the outcome with workspace_status (requests) or task_status. ' +
           'A retry with the same client_request_id returns the first result instead of repeating task_claim, ' +
-          'worktree_push, github_create_pr or jobs_submit'
+          'task_next, batch_create, worktree_push, github_create_pr or jobs_submit'
       });
     }
   };

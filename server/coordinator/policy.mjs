@@ -28,6 +28,11 @@ export const OPERATION_CAPABILITY = Object.freeze({
   task_release: CAPABILITIES.WRITE,
   task_complete: CAPABILITIES.WRITE,
   task_checkpoint: CAPABILITIES.WRITE,
+  // Batches for a conductor conversation (TODO-P5-50 to 52): batch_create opens GitHub Issues,
+  // task_next claims through the ledger like task_claim, batch_status only reads.
+  batch_create: CAPABILITIES.GITHUB_WRITE,
+  task_next: CAPABILITIES.WRITE,
+  batch_status: CAPABILITIES.READ,
   // Worktrees and files inside them
   worktrees_list: CAPABILITIES.READ,
   worktree_status: CAPABILITIES.READ,

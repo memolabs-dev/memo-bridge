@@ -17,6 +17,7 @@ export const LIMITS = Object.freeze({
   list: { min: 1, max: 100, default: 30 },
   title: 256,
   body: 20000,
+  issueBody: 8000,
   labels: 10,
   label: 50,
   mergeableLookups: 10,
@@ -269,6 +270,66 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
       if (out.code !== 0) return fail('git_remote_unavailable');
       const line = out.stdout.split('\n').map(l => l.split('\t')).find(([sha, ref]) => ref === `refs/heads/${branch}` && SHA_RE.test(sha));
       return line ? { ok: true, sha: line[0] } : fail('branch_not_pushed');
+    },
+
+    // Issues carrying one label, any state, oldest first, with their body (batch tasks, TODO-P5-51).
+    // The Issues list endpoint reads the database directly, unlike search, so an Issue created a
+    // second ago is already there.
+    async labelledIssues(repo, labelName, { limit = 30 } = {}) {
+      const res = await getJson(`repos/${repo.full}/issues`, { state: 'all', labels: labelName, sort: 'created',
+        direction: 'asc', per_page: Math.min(Math.max(limit, 1), 100), page: 1 });
+      if (!res.ok) return res;
+      if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
+      const issues = res.data.filter(i => !i.pull_request && Number.isInteger(i.number) && i.number > 0).slice(0, limit)
+        .map(i => ({ ...compactIssue(i), state_reason: cleanText(i.state_reason, 30) || null,
+          body: cleanText(i.body ?? '', LIMITS.issueBody, { multiline: true }) }));
+      return { ok: true, repo: repo.full, issues };
+    },
+
+    // Pull requests (any state, newest first) that close one of `numbers` with a GitHub closing
+    // keyword, or whose head is one of `branches`. Map number -> [{number, state, url, head}].
+    async linkedPulls(repo, { numbers = [], branches = new Map() } = {}) {
+      const res = await getJson(`repos/${repo.full}/pulls`, { state: 'all', sort: 'created', direction: 'desc', per_page: 100, page: 1 });
+      if (!res.ok) return res;
+      if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
+      const linked = new Map();
+      for (const p of res.data) {
+        const body = String(p.body ?? '').slice(0, LIMITS.body);
+        const head = typeof p.head?.ref === 'string' ? p.head.ref : null;
+        for (const n of numbers) {
+          const closes = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s+(?:${repo.full.replace(/[.]/g, '\\.')})?#${n}(?![0-9])`, 'i');
+          if (!closes.test(body) && !(head && branches.get(n)?.includes(head))) continue;
+          const list = linked.get(n) ?? [];
+          if (list.length < 3) list.push({ number: p.number, state: p.merged_at ? 'merged' : cleanText(p.state, 20), url: cleanText(p.html_url, 300) });
+          linked.set(n, list);
+        }
+      }
+      return { ok: true, pulls: linked };
+    },
+
+    // POST a label; one that already exists (422 already_exists) is fine. Batch labels only.
+    async ensureLabel(repo, { name, color, description }) {
+      const out = await gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json', `repos/${repo.full}/labels`, '--input', '-'],
+        { input: JSON.stringify({ name, color, description }), timeoutMs: writeTimeoutMs });
+      if (out.code === 0 && !out.overflow) return { ok: true, created: true };
+      const failure = ghFailure(out);
+      if (failure.error === 'github_validation_failed' && /already_exists|already exists/i.test(`${out.stdout}${out.stderr}`)) {
+        return { ok: true, created: false };
+      }
+      return failure;
+    },
+
+    // POST one Issue: title, body, labels. Never assignees, milestones or anything else.
+    async createIssue(repo, { title, body, labels }) {
+      const out = await gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json', `repos/${repo.full}/issues`, '--input', '-'],
+        { input: JSON.stringify({ title, body, labels }), timeoutMs: writeTimeoutMs });
+      if (out.code === 0 && !out.overflow) {
+        try { return { ok: true, issue: compactIssue(JSON.parse(out.stdout)) }; } catch { /* fall through */ }
+        return fail('github_outcome_unknown');
+      }
+      const failure = ghFailure(out);
+      const answered = /\(HTTP \d{3}\)/.test(String(out.stderr ?? ''));
+      return answered ? failure : { ...failure, uncertain: true };
     },
 
     // POST only: title/head/base/body/draft. Never merge, never auto-merge.
