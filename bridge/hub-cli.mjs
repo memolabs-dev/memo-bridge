@@ -20,6 +20,15 @@
 //                                  /etc/memo-bridge/operator-FROZEN: while it exists the hub refuses
 //                                  every operator op above T0. Created and removed by the owner (root
 //                                  directory); no tool can.
+//   MEMO_BRIDGE_OPERATOR_APPROVAL  JSON {"vps": "dangerous", "mac": "dangerous"} (Phase 6, spec D5;
+//                                  off | dangerous | all_root; default dangerous on both). Must be
+//                                  at least as strict as each host's policy, or the host refuses
+//                                  with approval_required.
+//   MEMO_BRIDGE_TELEGRAM_CHAT_ID   the owner's Telegram user id (private chat with the bot). With
+//                                  the `telegram-bot` credential ($CREDENTIALS_DIRECTORY, systemd
+//                                  LoadCredential=) it starts the operator bot: approvals,
+//                                  /freeze, /unfreeze, /status. Without them, dangerous calls answer
+//                                  approval_unavailable (fail closed).
 // A bad remote.json, or remote_writes "enabled" while a GitHub Actions runner runs as root
 // (write gate layer 2, lab-infra #161), stops the unit before anything listens.
 import { existsSync, readFileSync } from 'node:fs';
@@ -28,6 +37,7 @@ import { isAbsolute } from 'node:path';
 import { createHub } from './hub.mjs';
 import { REMOTE_CONFIG_ENV } from './remote-config.mjs';
 import { createRemoteService } from './remote-boot.mjs';
+import { createOperatorBot, createTelegramClient, parseChatId, readTelegramToken } from './operator-telegram.mjs';
 
 const env = process.env;
 const dir = env.MEMO_BRIDGE_SECRETS;
@@ -50,7 +60,8 @@ const allowedAgentKeys = { mac: get('mac.pub'), vps: get('vps.pub') };
 for (const id of ['operator-mac', 'operator-vps']) if (existsSync(`${dir}/${id}.pub`)) allowedAgentKeys[id] = get(`${id}.pub`);
 const freezeFile = env.MEMO_BRIDGE_OPERATOR_FREEZE_FILE || '/etc/memo-bridge/operator-FROZEN';
 if (!isAbsolute(freezeFile)) throw new Error('MEMO_BRIDGE_OPERATOR_FREEZE_FILE must be an absolute path');
-const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile } : null;
+const approvalModes = env.MEMO_BRIDGE_OPERATOR_APPROVAL ? JSON.parse(env.MEMO_BRIDGE_OPERATOR_APPROVAL) : undefined;
+const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile, approvalModes } : null;
 const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit, operator });
 
 // Built before the hub starts: the public listener gets the TLS pair, remote.json and the hub's
@@ -63,9 +74,27 @@ if (remotePath) {
     requestAgent: hub.requestAgent, requestOperator: hub.requestOperator, audit });
 }
 
+// The operator bot: only with the operator key, the owner chat id and the token credential.
+let bot = null;
+if (operator && env.MEMO_BRIDGE_TELEGRAM_CHAT_ID) {
+  const ownerChatId = parseChatId(env.MEMO_BRIDGE_TELEGRAM_CHAT_ID);
+  if (ownerChatId === null) throw new Error('MEMO_BRIDGE_TELEGRAM_CHAT_ID must be a numeric chat id');
+  const token = await readTelegramToken(env);
+  if (token.error) throw new Error(`telegram-bot credential ${token.error}`);
+  bot = createOperatorBot({ client: createTelegramClient({ token: token.token }), ownerChatId, approvals: hub.operatorApprovals,
+    log: (event, details) => audit({ at: new Date().toISOString(), event, ...details }),
+    hub: {
+      freeze: by => hub.setOperatorFrozen(true, by),
+      unfreeze: async by => JSON.stringify(await hub.ownerUnfreeze(by)),
+      status: () => `frozen above T0: ${hub.operatorFrozen()}; pending approvals: ${hub.operatorApprovals.pending}`
+    } });
+  hub.attachOperatorBot(bot);
+}
+
 await hub.start();
+bot?.run();
 audit({ event: 'hub_started', bind: '127.0.0.1:9443', runtime_host: runtimeHost, mutating_ops: mutatingOps || 'disabled',
-  readonly_principal: Boolean(readOnlyTokenSha256), operator_key: hub.operatorKeyId,
+  readonly_principal: Boolean(readOnlyTokenSha256), operator_key: hub.operatorKeyId, operator_bot: Boolean(bot),
   operator_agents: ['operator-mac', 'operator-vps'].filter(id => Object.hasOwn(allowedAgentKeys, id)) });
 if (publicListener) {
   const address = await publicListener.start();
