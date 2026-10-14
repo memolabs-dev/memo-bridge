@@ -68,3 +68,11 @@ export const LEARNING_INSTRUCTIONS = 'Handoff: before you stop, lose context or 
   'Learning review: when a result carries learning_review, review the conversation once, then go on: save durable facts with ' +
   'memory_save (pass workspace_id), write a skill fix as Issue or PR text for the owner, or say "nothing to save". Nothing is ' +
   'saved for you.';
+
+// Delegation (#47): sub-agents with ChatGPT Plus alone are chats the owner opens by hand. Memo
+// Bridge launches nothing; the parent gives the owner one sentence, the child joins with it.
+export const DELEGATION_INSTRUCTIONS = 'Delegation: when the owner asks to split work inside the task you hold, call ' +
+  'workspace_delegate (scope read_only, paths or your worktree) and give him its paste sentence ("Avec Memo Bridge, rejoins ' +
+  'la délégation d_..."), to paste in a new conversation; read the children\'s results with delegation_status. A conversation ' +
+  'given that sentence calls delegation_join, then works only as its result says (its own workspace_id, inside its scope, ' +
+  'never claiming) and ends with delegation_report final: true.';

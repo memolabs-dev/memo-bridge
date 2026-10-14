@@ -31,7 +31,7 @@ import { RESULT_LIMIT_BYTES } from './operator-output.mjs';
 import { splitMedia } from './operator-content.mjs';
 import { MAX_RESULT_BYTES, PACKAGE_VERSION } from './protocol.mjs';
 import { OPS } from './ops.mjs';
-import { LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_FLOW_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, OPERATOR_TOOLS_INSTRUCTIONS } from '../server/instructions.mjs';
+import { DELEGATION_INSTRUCTIONS, LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_FLOW_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, OPERATOR_TOOLS_INSTRUCTIONS } from '../server/instructions.mjs';
 
 // Remote-only bounds (spec REQ-P5-14). Stdio keeps its own, larger ones.
 export const REMOTE_LIMITS = Object.freeze({
@@ -211,7 +211,7 @@ const INSTRUCTIONS = 'Memo Bridge, remote surface for the owner\'s ChatGPT conve
   'tools (operator_*) act on the machines: a refusal (frozen, path_secret, use_dev_flow, denied) is final, ' +
   'report it and never try to reach the same result another way; pending_approval waits for the owner. ' + OPERATOR_HOST_INSTRUCTIONS + ' ' +
   OPERATOR_FLOW_INSTRUCTIONS + ' ' + OPERATOR_TOOLS_INSTRUCTIONS + ' ' + MULTI_SESSION_INSTRUCTIONS + ' ' + MEMORY_INSTRUCTIONS + ' ' +
-  LEARNING_INSTRUCTIONS;
+  LEARNING_INSTRUCTIONS + ' ' + DELEGATION_INSTRUCTIONS;
 
 // Definitions checked once per process: the remote surface refuses to serve a registry whose
 // remote tools are not all collected, forwardable, in the right list and fully annotated.

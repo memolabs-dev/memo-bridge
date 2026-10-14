@@ -36,6 +36,14 @@ A task is a GitHub Issue, written `owner/repo#n`. Its reservation (claim) is sha
 8. **Pull request.** `github_create_pr({workspace_id, worktree_id, title, body})`. It links the Issue (`Closes #n`) and never merges: the landing contract merges when CI is green. Follow CI with `github_checks({repo, ref: branch})`.
 9. **Finish.** `task_complete({workspace_id, issue, claim_id, fence, summary})`, or `task_release({..., outcome})` with `blocked`, `failed` or `cancelled`. Then `worktree_remove({worktree_id})` once the branch is pushed (`ignored_files` lists ignored files it would delete: pass `discard_ignored: true` only if they are disposable; `job_active` means a job still runs there), and `workspace_close({workspace_id})`.
 
+## Splitting a task: delegation to another chat
+
+With ChatGPT alone, a sub-agent is a chat the owner opens by hand; Memo Bridge launches nothing.
+
+- **Parent.** When the owner asks to split work inside the task you hold: `workspace_delegate({workspace_id, scope, paths?, worktree_id?, brief})`. `scope` is `read_only`, `paths` (worktree-relative prefixes, or absolute host paths for operator writes) or `worktree` (your whole worktree). Give the owner the `paste` sentence ("Avec Memo Bridge, rejoins la délégation d_..."), to paste in a new conversation. Read results with `delegation_status({workspace_id})`; end one with `delegation_end`. You keep committing, pushing and opening the pull request. A child write renews your lease when it runs low; your last fence keeps working, and `delegation_status` shows the current one.
+- **Child.** Given that sentence: `delegation_join({delegation_id})`. Pass the returned `workspace_id` to every call, including `worktree_read_file`, `worktree_write_file` and `jobs_submit` on the delegated worktree. Write only inside your scope; never `task_claim`, `task_next`, `workspace_open`, commit or push. When done: `delegation_report({workspace_id, report: {goal, done, files, next_steps, ...}, final: true})`, then tell the owner to go back to the parent.
+- **Stop and tell the owner** on `delegation_ended`, `outside_delegation_scope`, `child_cannot_claim` or `delegation_taken`.
+
 ## Memory across conversations
 
 `workspace_open` returns `memory_snapshot`: the facts saved about the owner and about this project, frozen for this conversation (a save shows at the next `workspace_open`). Task briefs list `related_memories`. Read them, and `memory_search` / `memory_get`, before asking the owner to repeat himself.

@@ -33,6 +33,11 @@ The Mac runner that does the work of a claimed task (worktrees, files, jobs, pus
 | `task_checkpoint({workspace_id, issue, claim_id, fence, branch?, commit?, note?, handoff?})` | `coordinator:write` | Records a Git-verified checkpoint and/or a structured handoff under a live claim (branch and commit required unless a handoff is given). |
 | `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `completed`, `blocked`, `failed` or `cancelled`, also from a closed workspace. |
 | `task_complete({workspace_id, issue, claim_id, fence, summary?})` | `coordinator:write` | `task_release` with outcome `completed` and an optional plain-text summary (at most 2000 characters) kept with the claim. |
+| `workspace_delegate({workspace_id, scope, paths?, worktree_id?, issue?, brief?, ttl_seconds?, client_request_id?})` | `coordinator:write` | Splits work inside the task this workspace holds; returns `delegation_id` and the `paste` sentence for a new chat. See "Delegation". |
+| `delegation_join({delegation_id, client_label?})` | `coordinator:write` | The new chat joins: its child workspace, bound to this conversation (single use). |
+| `delegation_status({workspace_id, delegation_id?})` | `coordinator:read` | Parent: its delegations, their state and the children's latest reports, and its own current lease. Child: its own delegation. |
+| `delegation_report({workspace_id, report, final?})` | `coordinator:write` | Child only: where its part stands, in the handoff fields. |
+| `delegation_end({workspace_id, delegation_id})` | `coordinator:write` | Parent only: ends one delegation now. |
 | `memory_save({id?, base_revision?, scope?, title?, body? \| body_patch?, evidence?, tags?, project?, host?, issue?, archived?})` | `coordinator:write` | Saves one fact for later conversations; see "Memory across conversations". |
 | `memory_search({query?, scope?, project?, tag?, host?, issue?, archived?, limit?})` | `coordinator:read` | Your entries matching every word (title, body, tags) and the filters, with snippets (default 10, at most 50). |
 | `memory_get({id, revision?})` | `coordinator:read` | One entry in full, latest or one of the last 20 revisions. |
@@ -63,6 +68,53 @@ A session that lost its context (compaction, crash, new conversation) calls `wor
   worktree moves to the task's project (`workspace_retarget` in the journal). Every answer carries
   `brief` (task, project, other conversations on the project, rules).
 - `session_binding: "enforce"`: see `docs/REMOTE_CHATGPT.md`.
+
+## Delegation (child chats under a parent's task)
+
+Issue #47, spec `.agent/project/delegation/spec.md`. With ChatGPT Plus alone a sub-agent is a chat
+the owner opens by hand. Memo Bridge launches no chat and calls no model.
+
+1. The parent holds a task (a live claim) and, for repository work, a worktree of that task. When
+   the owner asks to split the work, it calls `workspace_delegate` with a scope:
+   - `read_only`: reads of `worktree_id` only, no write, no job, no operator write;
+   - `paths`: worktree-relative prefixes (`src/a`, needs `worktree_id`) and/or absolute host paths
+     (`/Users/memo/notes`, `~/notes`) for operator writes;
+   - `worktree`: every file of `worktree_id` (protected paths stay refused).
+   Live scopes of one parent never overlap (`scope_overlap`), at most 5 live delegations
+   (`delegation_limit`), TTL 300 to 14400 s (default 3600). The `brief` is checked like a handoff
+   (no secret, no injection shape). The answer carries `paste`: "Avec Memo Bridge, rejoins la
+   délégation d_xxxxxxxxxxxx."
+2. The owner pastes it in a new chat, which calls `delegation_join`. Its child workspace is bound
+   to that conversation; the same conversation joining again gets it back (`rejoined`), any other
+   gets `delegation_taken`, the parent's own conversation `delegation_self`, a remote call without
+   a conversation hint `session_required` (every binding mode). A child is never rebound by
+   `workspace_recover`.
+3. The child works with its own `workspace_id`: `worktree_read_file`, `worktree_write_file`
+   (pass `workspace_id`), `jobs_submit` on the delegated worktree, operator writes inside its
+   absolute paths. Each write runs under the parent's claim, which the child never sees: worktree
+   writes check the parent's live claim, jobs ask the ledger with the parent's worker, claim and
+   fence and belong to the parent's workspace. When the parent's lease has less than 10 minutes
+   left, a child write renews it (as the parent, TTL 1800 s); the parent's next `task_renew`,
+   `task_release`, `task_complete` or `task_checkpoint` with the fence it last saw is accepted
+   because the server recorded the move (`fence_moves`). `delegation_status` shows the parent its
+   current fence.
+4. Refused to a child: every `task_*` write (`child_cannot_claim`); `workspace_open`,
+   `batch_create`, `workspace_delegate`, another `delegation_join`, and any call naming another
+   workspace (`outside_delegation_scope`); writes outside its scope, `worktree_create`,
+   `worktree_commit`, `worktree_push`, `worktree_remove` (`outside_delegation_scope`). The child is
+   the workspace named by the call, or the conversation's most recent workspace when that one is
+   a child, so leaving out or swapping `workspace_id` changes nothing.
+5. The child records its result with `delegation_report` (the handoff fields and bounds of
+   `task_checkpoint`, plus `final`); the parent reads it with `delegation_status`, as data. Commit,
+   push and pull request stay with the parent.
+6. A delegation ends with `delegation_end`, the parent's `task_release` or `task_complete` of that
+   claim, the parent's `workspace_close`, the child's own `workspace_close`, or its TTL. The child
+   workspace is closed and every later call naming it answers `delegation_ended` with
+   `end_reason`. Liveness is also checked at each use (parent active, claim still held, TTL), so a
+   release the coordinator did not see stops the child too.
+7. `sessions_overview` shows children under their parent (`children`), each with its `delegation`.
+   Through the hub, a child's operator locks are listed on the child and belong to the parent's
+   family: they block other conversations as the parent's would, never the parent or a sibling.
 
 ## tasks_list
 
@@ -131,6 +183,11 @@ Every result is `{ ok: true, ... }` or `{ ok: false, error, detail? }`.
 | `ledger_outcome_unknown` | A claim, renewal or release may or may not have landed, and the status could not be read; check `task_status` |
 | `lease_denied` | Another ledger refusal; `detail` carries its fixed message |
 | `commit_not_found` | The commit does not exist in the project repository |
+| `child_cannot_claim` | A delegated child tried a `task_*` write: the parent holds the task |
+| `outside_delegation_scope` | A delegated child wrote, ran, locked or named something outside its scope, or tried to open or widen work |
+| `delegation_ended` | The delegation is over (`end_reason`: `task_released`, `task_completed`, `parent_closed`, `ended_by_parent`, `child_closed`, `expired`) |
+| `delegation_taken`, `delegation_self`, `unknown_delegation` | The delegation is bound to another conversation, the caller is its parent, or it does not exist |
+| `scope_overlap`, `delegation_limit` | The new scope overlaps a live delegation of this workspace, or 5 are already live |
 | `store_unavailable` | The local private store cannot be opened or written. If this happens after a successful claim, the claim is given back first (`detail`) |
 
 ## Checkpoint durability

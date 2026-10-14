@@ -52,13 +52,13 @@ hub.
 
 ## The remote tool set
 
-Read stage (24 tools): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`, `sessions_overview`,
+Read stage (24 tools before #47, plus `delegation_status`): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`, `sessions_overview`,
 `tasks_list`, `task_status`, `batch_status`, `worktrees_list`, `worktree_status`, `worktree_list_files`,
 `worktree_read_file`, `worktree_diff`, `jobs_list`, `job_status`, `job_events`, `job_results`,
 `host_capabilities`, `github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`,
 `audit_events`, `audit_operation`.
 
-Write stage adds 16: `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
+Write stage adds 16 (plus `workspace_delegate`, `delegation_join`, `delegation_report`, `delegation_end` since #47): `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
 `task_release`, `task_complete`, `task_checkpoint`, `batch_create`, `task_next`, `worktree_create`, `worktree_write_file`,
 `worktree_commit`, `worktree_push`, `jobs_submit`, `job_cancel`, `github_create_pr`.
 
@@ -186,6 +186,38 @@ unchanged in every mode.
 Before switching lab-infra to `enforce`: with `warn`, open two conversations and check that
 `sessions_overview` shows a non-null `session_tag` for each, different from each other (U-P5-05).
 If ChatGPT sends no hint, `enforce` would refuse every remote workspace.
+
+## Sub-agents with Chat alone: delegation (#47, spec `.agent/project/delegation/spec.md`)
+
+With ChatGPT Plus only, a sub-agent is another chat the owner opens by hand. Memo Bridge never
+launches a chat (OpenAI terms) and calls no model. The parent conversation holds a task; when the
+owner asks it to split the work, it calls `workspace_delegate` (scope `read_only`, `paths` or
+`worktree`) and gives the owner the sentence of its `paste` field, for example:
+
+```
+Avec Memo Bridge, rejoins la délégation d_3f9a1c2b7e4d.
+```
+
+The owner opens a new conversation and pastes it. That conversation calls `delegation_join`: it
+gets its own workspace, bound to it (single use: any other conversation gets `delegation_taken`),
+the task, the scope, the brief and the rules. It then works only through its own `workspace_id`,
+inside its scope, under the parent's task and lease (it never sees the claim id or the fence, and
+`task_claim` answers `child_cannot_claim`), and ends with `delegation_report` `final: true`. The
+owner goes back to the parent, which reads the results with `delegation_status`, then commits,
+pushes and opens the pull request itself. Releasing or completing the task, closing the parent's
+workspace, `delegation_end` or the TTL end every child: its next call answers `delegation_ended`.
+
+- Remote join needs the `openai/session` hint in every binding mode (`session_required`): the
+  delegation is bound to the conversation that joins it. Check `session_tag` in
+  `sessions_overview` first, as for `enforce`.
+- Two children of one parent work at once on scopes that never overlap (`scope_overlap`).
+- Operator writes of a child: path targets under its absolute scope paths only
+  (`outside_delegation_scope`), with or without an explicit lock; its locks block other
+  conversations as the parent's would.
+- `sessions_overview` lists children under their parent (`children`).
+- Tools: `delegation_status` (read stage), `workspace_delegate`, `delegation_join`,
+  `delegation_report`, `delegation_end` (write stage). No new OAuth scope: `coordinator:read`
+  and `coordinator:write`.
 
 ## Write gate (D7)
 
