@@ -39,7 +39,10 @@ export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 
   'workspace_required', 'lock_required', 'locked_by_other_session', 'lock_limit',
   // Repatriated tools: memory content refusals and conflicts, transfer and media refusals.
   'secret_detected', 'instruction_refused', 'not_a_fact', 'evidence_required', 'duplicate_fact', 'memory_full', 'revision_conflict',
-  'source_changed', 'stage_path_mismatch', 'unsupported_media']));
+  'source_changed', 'stage_path_mismatch', 'unsupported_media',
+  // Delegation (#47).
+  'delegation_ended', 'outside_delegation_scope', 'child_cannot_claim', 'delegation_taken', 'delegation_self', 'scope_overlap',
+  'delegation_limit']));
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
@@ -48,7 +51,7 @@ const sha256 = value => createHash('sha256').update(value).digest('hex');
 // Mutating ops whose runtime handler replays the first result for the same client_request_id
 // (runOnce or the jobs request table): the only ones that may answer `accepted`.
 export const RETRY_SAFE_OPS = Object.freeze(new Set(['task_claim', 'worktree_push', 'github_create_pr', 'jobs_submit',
-  'batch_create', 'task_next']));
+  'batch_create', 'task_next', 'workspace_delegate']));
 
 export function clientSessionHash(ctx) {
   const value = ctx?.mcpReq?._meta?.['openai/session'];

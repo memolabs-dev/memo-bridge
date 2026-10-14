@@ -33,6 +33,12 @@ export const OPERATION_CAPABILITY = Object.freeze({
   workspace_recover: CAPABILITIES.READ,
   // Every conversation's workspace, task and operator locks (multi-session D-MS1)
   sessions_overview: CAPABILITIES.READ,
+  // Delegation (#47): a parent splits its task, a child chat joins and reports
+  workspace_delegate: CAPABILITIES.WRITE,
+  delegation_join: CAPABILITIES.WRITE,
+  delegation_status: CAPABILITIES.READ,
+  delegation_report: CAPABILITIES.WRITE,
+  delegation_end: CAPABILITIES.WRITE,
   // Tasks (GitHub Issues + lease ledger)
   tasks_list: CAPABILITIES.READ,
   task_status: CAPABILITIES.READ,

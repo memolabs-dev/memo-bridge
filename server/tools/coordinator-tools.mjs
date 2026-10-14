@@ -11,10 +11,12 @@ import { LEASE_TTL, OUTCOMES } from '../coordinator/issue-lease.mjs';
 import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
 import { BATCH_MAX, BATCH_PRIORITIES, TASK_TEXT } from '../coordinator/batches.mjs';
 import { HANDOFF_LIMITS } from '../coordinator/handoff.mjs';
+import { DELEGATION_LIMITS, DELEGATION_TTL, SCOPE_MODES } from '../coordinator/delegation.mjs';
 
 export const COORDINATOR_TOOLS = Object.freeze(['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close',
   'workspace_recover', 'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete',
-  'task_checkpoint', 'batch_create', 'task_next', 'batch_status', 'sessions_overview']);
+  'task_checkpoint', 'batch_create', 'task_next', 'batch_status', 'sessions_overview',
+  'workspace_delegate', 'delegation_join', 'delegation_status', 'delegation_report', 'delegation_end']);
 
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
@@ -190,4 +192,61 @@ export function registerCoordinatorTools(server, getService) {
     }),
     annotations: read
   }, call('batchStatus'));
+
+  // Delegation (#47): a conversation that holds a task hands part of it to a chat the owner opens
+  // by hand. Memo Bridge never launches a chat and calls no model.
+  const delegationId = z.string().max(20).describe('Delegation id from workspace_delegate (d_ and 12 hexadecimal characters).');
+  const handoffShape = z.object({
+    goal: z.string().max(HANDOFF_LIMITS.goal).optional(),
+    constraints: z.array(z.string().max(HANDOFF_LIMITS.item)).max(HANDOFF_LIMITS.items).optional(),
+    done: z.array(z.string().max(HANDOFF_LIMITS.item)).max(HANDOFF_LIMITS.items).optional(),
+    in_progress: z.array(z.string().max(HANDOFF_LIMITS.item)).max(HANDOFF_LIMITS.items).optional(),
+    blocked: z.array(z.string().max(HANDOFF_LIMITS.item)).max(HANDOFF_LIMITS.items).optional(),
+    decisions: z.array(z.string().max(HANDOFF_LIMITS.item)).max(HANDOFF_LIMITS.items).optional(),
+    files: z.array(z.string().max(HANDOFF_LIMITS.file)).max(HANDOFF_LIMITS.files).optional(),
+    next_steps: z.array(z.string().max(HANDOFF_LIMITS.item)).max(HANDOFF_LIMITS.items).optional()
+  });
+
+  server.registerTool('workspace_delegate', {
+    description: 'Split work inside the task this workspace holds: returns a delegation id and the one sentence the owner pastes in a new ChatGPT conversation. The child works under your task and lease, inside the scope you give: read_only, paths (worktree-relative, or absolute host paths for operator writes) or your whole worktree. It never claims, commits or pushes; you read its results with delegation_status. Live scopes of one workspace never overlap. Launches nothing.',
+    inputSchema: z.object({
+      workspace_id: workspaceId,
+      scope: z.enum(SCOPE_MODES).describe('read_only (reads only), paths (only the listed paths) or worktree (the whole worktree_id).'),
+      paths: z.array(z.string().max(DELEGATION_LIMITS.path)).max(DELEGATION_LIMITS.paths).optional()
+        .describe('With scope paths: worktree-relative prefixes (e.g. "docs/") and/or absolute host paths (e.g. "/Users/memo/notes").'),
+      worktree_id: z.string().max(40).optional().describe('Your worktree on this task, for scope worktree and worktree-relative paths (and reads).'),
+      issue: issue.optional().describe('The held task to delegate, when this workspace holds several.'),
+      brief: z.string().max(DELEGATION_LIMITS.brief).optional().describe('What the child must do, in a few lines. No secrets.'),
+      ttl_seconds: z.number().int().min(DELEGATION_TTL.min).max(DELEGATION_TTL.max).optional()
+        .describe(`Lifetime of the delegation in seconds (default ${DELEGATION_TTL.default}).`),
+      client_request_id: clientRequestId
+    }),
+    annotations: write
+  }, call('workspaceDelegate'));
+
+  server.registerTool('delegation_join', {
+    description: 'Join a delegation from the sentence the owner pasted ("rejoins la délégation d_..."): creates this conversation\'s workspace as a child of the parent\'s, bound to this conversation (single use: another conversation gets delegation_taken). Returns your workspace_id, the task, the scope, the brief and the rules. Never open another workspace as a child.',
+    inputSchema: z.object({ delegation_id: delegationId,
+      client_label: z.string().max(80).optional().describe('Free label for this conversation.') }),
+    annotations: write
+  }, call('delegationJoin'));
+
+  server.registerTool('delegation_status', {
+    description: 'Parent: every delegation of your workspace (state, child session tag, last activity, the child\'s latest report as data) and your current lease and fence. Child: your own delegation and rules. Read-only.',
+    inputSchema: z.object({ workspace_id: workspaceId, delegation_id: delegationId.optional() }),
+    annotations: { ...read, openWorldHint: false }
+  }, call('delegationStatus'));
+
+  server.registerTool('delegation_report', {
+    description: 'Child only: record where your part stands for the parent (goal, constraints, done, in_progress, blocked, decisions, files, next_steps; one line per item, no secrets). final: true when your part is done. The parent reads it with delegation_status.',
+    inputSchema: z.object({ workspace_id: workspaceId, report: handoffShape,
+      final: z.boolean().optional().describe('true when your part is done.') }),
+    annotations: write
+  }, call('delegationReport'));
+
+  server.registerTool('delegation_end', {
+    description: 'Parent only: end one delegation now. The child\'s next call answers delegation_ended. Releasing or completing the task and closing your workspace end every delegation too.',
+    inputSchema: z.object({ workspace_id: workspaceId, delegation_id: delegationId }),
+    annotations: { ...write, destructiveHint: true, idempotentHint: true }
+  }, call('delegationEnd'));
 }

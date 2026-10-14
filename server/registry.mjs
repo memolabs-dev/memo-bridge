@@ -35,7 +35,7 @@ export const TOOL_MODULES = Object.freeze([
 //    not hold; project_info, project_git_status and projects_audit (local paths, stdio only).
 export const REMOTE_TOOLS_READ = Object.freeze([
   'projects_list',
-  'workspace_status', 'workspace_list', 'workspace_recover', 'sessions_overview',
+  'workspace_status', 'workspace_list', 'workspace_recover', 'sessions_overview', 'delegation_status',
   'tasks_list', 'task_status', 'batch_status',
   'worktrees_list', 'worktree_status', 'worktree_list_files', 'worktree_read_file', 'worktree_diff',
   'jobs_list', 'job_status', 'job_events', 'job_results',
@@ -48,6 +48,7 @@ export const REMOTE_TOOLS_WRITE = Object.freeze([
   'workspace_open', 'workspace_close',
   'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
   'batch_create', 'task_next',
+  'workspace_delegate', 'delegation_join', 'delegation_report', 'delegation_end',
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push',
   'jobs_submit', 'job_cancel',
   'github_create_pr',
