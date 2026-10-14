@@ -51,6 +51,59 @@ pass a token redactor and come back wrapped as untrusted data.
   another workspace's lock. A hub restart drops the locks. Details: `docs/REMOTE_CHATGPT.md`,
   "Ten conversations at once".
 
+## Tools repatriated from SentinelX (part 2, 2026-10-14)
+
+Spec: `.agent/project/repatriate-tools/spec.md`. Parity study:
+`workspace/research/2026-10-14-sentinelx-parity.md`.
+
+| Tool | Tier | Runs on | What it does |
+|---|---|---|---|
+| `operator_snapshot` | T0 | host agent | orientation of any directory in the read roots: git branch, upstream, ahead/behind, changed and untracked counts, 10 recent commits, tree summary (depth 4, 20 000 entries, 5 s), project markers, README head (4 KiB, untrusted) |
+| `operator_read_media` | T0 | host agent | png, jpeg, gif, webp (by content) and PDF pages, as MCP image content plus a text part (metadata, PDF page text) |
+| `operator_help` | T0 | hub | topics, then details; reviewed playbooks: `read_logs`, `restart_stack`, `free_disk`, `deploy_check`, `git_sync`, `backup_status`, `rotate_key`, `freeze` |
+| `operator_transfer` | T1 | hub, both agents | copy one file, up to 512 MiB, Mac to lab, lab to Mac or within one host |
+| `operator_transfer_status` | T0 | hub | progress or outcome of a transfer that answered `running` |
+| `operator_upload_init` `stage:true` + `operator_edit` `old_upload_id` / `new_upload_id` | T1 | host agent | edit content larger than one call (8 MiB at most, 64 KiB chunks) |
+
+**Transfer.** The hub reads the source in 64 KiB chunks through two internal ops signed for the
+caller (`operator_transfer_source`: read roots, denylist, `O_NOFOLLOW`, size and SHA-256 computed
+on the source host; `operator_read_chunk`: refused with `source_changed` when the file moved),
+and writes them through the destination's own `operator_upload_*`. So the destination keeps every
+upload rule: write roots, denylist, `use_dev_flow`, the caller's workspace and **a lock on
+`dst_path`**, the hub freeze, the approval mode, a backup on overwrite, an atomic rename, and the
+SHA-256 checked at the destination. Why: a 64 KiB chunk is 87 KiB of base64, under the 128 KiB
+request cap and the 128 KiB agent result bound; the 16 KiB frame limit is met by the protocol's
+`part` frames. No new frame type or protocol version. Four lanes per transfer, two transfers per
+hub; the call waits 20 s, then answers `{status: "running", transfer_id}`. A hub restart loses a
+running transfer and places nothing (the staged upload expires after one hour). Both hosts and the
+hub journal every chunk. Base64 payloads (chunks, images) skip the text redactor, which could
+corrupt them; their size is bounded by the tool.
+
+**Media.** The file is read once through an `O_NOFOLLOW` descriptor and only that private copy is
+converted (a path swapped after the check is never rendered). Bounds: image file 20 MiB, PDF
+50 MiB, 5 pages and dpi 36 to 150 per call, 560 KiB of image bytes per result (`next_page`
+continues), 8 KiB of text per page. Images above the budget are downscaled with `sips` on the Mac;
+on lab they answer `too_large` (transfer them to the Mac). PDF pages: PDFKit through
+`osascript -l JavaScript` (a fixed script in `bridge/operator-media.mjs`) on the Mac;
+`pdfinfo`, `pdftotext` and `pdftoppm` (package `poppler-utils`) on lab, else
+`pdf_tools_unavailable`. ChatGPT: OpenAI support said on the developer forum (2026-04-22) that an
+MCP image block is valid but "ChatGPT connector output isn't guaranteed to become model-visible
+image input"; the text part comes first and always carries the metadata and the PDF text.
+
+**Snapshot and git.** git runs with fixed argv, `GIT_OPTIONAL_LOCKS=0`, no system or global
+config, `core.fsmonitor` and `log.showSignature` off, submodules ignored. git's own
+`safe.directory` check is kept: in a repository owned by another user (most of lab for
+`memo-operator`) git refuses to read its config, and the snapshot reports the branch from
+`.git/HEAD` only (`partial: owned_by_another_user`).
+
+**Help and playbooks.** Static text in `bridge/operator-help.mjs`, reviewed with the code. A test
+checks that every step names a real tool with real argument names and that no playbook edits a
+policy, a root list or an allowlist, or works around a refusal.
+
+**Memory across conversations** (`memory_save`, `memory_search`, `memory_get`, `memory_list`) is a
+runtime feature, not an operator one: `docs/COORDINATOR.md` and the server instructions describe
+it; the store is the coordinator SQLite (schema v5) on the host that runs the runtime.
+
 ## Approval flow (`approval_mode: dangerous`, both hosts)
 
 1. A call on the dangerous list answers `pending_approval` with an `approval_id`: any script;
@@ -247,3 +300,8 @@ the root tree, the state and the socket; keeps `/var/log/memo-operator`), then
   that version is removed, the job fails to start: rerun the script with the new node.
 - **Approvals and the hub flag live in hub memory**: a hub restart drops pending approvals and
   the `/freeze` flag. The FROZEN files are durable.
+- **Transfers move data between the hosts.** A file readable on one host can be written on the
+  other, inside its write roots. The source denylist and roots, the destination lock and both
+  journals are the barriers; there is no content filter on what a transfer carries.
+- **PDF rendering parses untrusted files** (PDFKit on the Mac, poppler on lab), out of the agent
+  process, on a private copy, with a 30 s timeout per step.
