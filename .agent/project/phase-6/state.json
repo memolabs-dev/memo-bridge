@@ -41,15 +41,14 @@
     "p2_open": 0,
     "open_ids": [
       "TODO-P6-12",
-      "TODO-P6-13",
-      "TODO-P6-14",
+      "TODO-P6-13 (runtime)",
+      "TODO-P6-14 (lab-infra part)",
       "TODO-P6-15"
     ]
   },
   "owner_decisions_open": [
     "O-P6-2 Telegram bot",
-    "O-P6-3 Pocket ID scopes",
-    "O-P6-5 Mac rw roots"
+    "O-P6-3 Pocket ID scopes"
   ],
   "risks": {
     "critical_open": 2,
@@ -65,7 +64,8 @@
   "ready_for_manual_acceptance": false,
   "owner_decisions_closed": {
     "O-P6-1": "approval_mode dangerous on lab (2026-10-14)",
-    "dev_flow_writes": "open now on memo-bridge (2026-10-14)"
+    "dev_flow_writes": "open now on memo-bridge (2026-10-14)",
+    "O-P6-5": "Mac rw roots as briefed for Lot 3: ~/memolabs, ~/Desktop, ~/Downloads, ~/Documents, /tmp (DEV-P6-29); owner to confirm at manual acceptance"
   },
   "lot_1": {
     "status": "automated verification passed; one bounded self-review done",
@@ -193,21 +193,36 @@
       "status": "TODO"
     },
     "TODO-P6-13": {
-      "status": "TODO"
+      "status": "IMPLEMENTED_RUNTIME_PENDING",
+      "note": "script, bundle, plist, policy, tests done; install on the real Mac by the main session (docs/OPERATOR.md), lab-infra must copy operator-mac.pub",
+      "evidence": [
+        "EV-P6-45",
+        "EV-P6-46",
+        "EV-P6-47",
+        "EV-P6-48",
+        "EV-P6-50",
+        "EV-P6-51",
+        "EV-P6-52",
+        "EV-P6-53"
+      ]
     },
     "TODO-P6-14": {
-      "status": "TODO"
+      "status": "IN_PROGRESS",
+      "note": "memo-bridge part done (docs/OPERATOR.md, SECURITY.md, HUB_SECURITY.md, plugin skill, remote instructions); lab-infra runbook part is TODO-P6-12's docs/memo-operator.md",
+      "evidence": [
+        "EV-P6-43",
+        "EV-P6-49"
+      ]
     },
     "TODO-P6-15": {
       "status": "TODO"
     }
   },
   "unknowns_resolved": {
-    "U-P6-01": "transport exists: launchd SSH tunnel 127.0.0.1:9444 to lab 9443 (F-P6-01); reuse in Lot 3",
+    "U-P6-01": "transport exists and is reused: operator-mac connects to wss://127.0.0.1:9444/agent through dev.memolabs.memo-bridge-tunnel (F-P6-01, DEV-P6-27)",
     "U-P6-02": "new bot, owner chat id configured (DEV-P6-20)"
   },
   "later": [
-    "stdio registration of operator tools (Lot 3, DEV-P6-10)",
     "docs/HUB_SECURITY.md and SECURITY.md: operator identities, operator key, freeze file (TODO-P6-14)",
     "lab-infra: operator-signing.key, operator-*.pub, remote.json oidc.ceiling with operator:read (TODO-P6-12)",
     "regex search runs on the agent event loop; a pathological pattern that passes the nested-quantifier check can still stall one agent (consider a worker with a timeout)",
@@ -217,7 +232,11 @@
     "pending approvals and the in-memory hub freeze flag are lost on a hub restart (the freeze file is durable)",
     "catalog and governance defaults still point at ~/projects, which no longer exists (F-P6-02)",
     "search and regex edit run on the agent event loop; consider a worker with a timeout",
-    "lab-infra: KillMode=process, RuntimeDirectory for the socket, polkit rule, telegram-bot credential, MEMO_BRIDGE_TELEGRAM_CHAT_ID, MEMO_BRIDGE_OPERATOR_APPROVAL (TODO-P6-12)"
+    "lab-infra: KillMode=process, RuntimeDirectory for the socket, polkit rule, telegram-bot credential, MEMO_BRIDGE_TELEGRAM_CHAT_ID, MEMO_BRIDGE_OPERATOR_APPROVAL (TODO-P6-12)",
+    "Mac: the host journal is written by the owner's user (no root helper); the hub anchoring is the only check (DEV-P6-31)",
+    "Mac: argv classifier gaps beyond DEV-P6-25 (cp, mv, chmod on other paths; sqlite3 .shell and similar)",
+    "Mac plist pins the nvm node path; a removed node version stops the agent until the script is rerun",
+    "pnpm test takes about 12 min on this Mac (725 s measured in Lot 3)"
   ],
   "lot_2": {
     "status": "automated verification passed; one bounded self-review done; runtime checks pending",
@@ -237,5 +256,26 @@
     "deviations": "spec.md section 13, Lot 2 (DEV-P6-15 to 24, F-P6-02)",
     "evidence": "evidence.md EV-P6-23 to EV-P6-42",
     "environment_note": "run tests with MEMO_BRIDGE_GOVERNANCE_ROOT=~/memolabs/os/integrations/github (F-P6-02)"
+  },
+  "lot_3": {
+    "status": "automated verification passed; one bounded self-review done; Mac install and runtime checks pending (main session)",
+    "branch": "feat/phase-6-lot3",
+    "commits": [
+      "35517ed",
+      "46bc464",
+      "4d8d894",
+      "7027eac",
+      "5a4be0c"
+    ],
+    "tests": {
+      "after": 445,
+      "new_tests": 4,
+      "new_dangerous_cases": 12,
+      "mutations_killed": "9/9"
+    },
+    "deviations": "spec.md section 13, Lot 3 (DEV-P6-25 to 31)",
+    "evidence": "evidence.md EV-P6-43 to EV-P6-53",
+    "stdio_decision": "operator tools not registered on stdio (DEV-P6-26)",
+    "mac_public_key_for_lab_infra": "~/.memo-operator/operator-mac.pub"
   }
 }

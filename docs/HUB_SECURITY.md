@@ -1,6 +1,29 @@
 # Memo Bridge private hub: security
 
-Sections below are dated. The first one is the current state (v0.6.0, Phase 5); the Phase 4 section still describes the 9443 listener; the later ones keep the v0.2 record.
+Sections below are dated. The first one is the current state (Phase 6, operator access); the Phase 5 and Phase 4 sections still describe the two listeners and the protocol; the later ones keep the v0.2 record, whose "exactly two identities" and "no arbitrary command execution" no longer hold.
+
+## Phase 6: operator identities, signing key, freeze
+
+Operator tools and their rules: `docs/OPERATOR.md`.
+
+- **Identities.** Besides `mac` and `vps`, the hub accepts two optional agent keys,
+  `operator-mac.pub` and `operator-vps.pub`, in its secrets directory (`bridge/hub-cli.mjs`). An
+  operator identity serves only operator ops and `host_status`, and no other identity may serve
+  an operator op. The probe and runtime agents are unchanged.
+- **Signing key.** `operator-signing.key` (lab, `/var/lib/memo-bridge/secrets`, root:memo-bridge
+  0640) signs every operator request. Its public half sits on each host
+  (`/etc/memo-operator/operator-hub.pub` on lab, `~/.memo-operator/operator-hub.pub` on the Mac).
+  Without the key the hub serves no operator op (`operator_disabled`).
+- **9443.** The owner bearer (`hub:owner`) reaches the T0 operator tools; T1 to T3 only with
+  `MEMO_BRIDGE_HUB_MUTATING_OPS=owner`. The read-only bearer reaches none.
+- **Freeze.** The hub refuses every operator call above T0 while `/etc/memo-bridge/operator-FROZEN`
+  exists (`MEMO_BRIDGE_OPERATOR_FREEZE_FILE`) or the owner sent `/freeze` to the Telegram bot.
+- **Approvals.** `MEMO_BRIDGE_OPERATOR_APPROVAL` (default `dangerous` for both hosts) parks a
+  dangerous call until the owner answers in Telegram (`MEMO_BRIDGE_TELEGRAM_CHAT_ID`, credential
+  `telegram-bot`). Pending approvals live in memory.
+- **Mac transport.** `operator-mac` is a third launchd job, `dev.memolabs.memo-operator-agent`,
+  through the existing tunnel (`wss://127.0.0.1:9444/agent`, same pinned CA as the probe agent).
+  No new port, no new route. Installed by `deploy/mac/install-operator-agent.sh`.
 
 ## Phase 5 (v0.6.0): two listeners, OAuth on the public one only
 
@@ -139,7 +162,7 @@ Verified from the live VPS server with TLS trust and private owner credential:
 - service user memo-bridge, ProtectSystem=strict, ProtectHome=yes, NoNewPrivileges=yes
 - GitHub PR #5 CI PASSED
 
-Rollback of this isolated deployment: stop and disable the two VPS memo-bridge systemd units, then stop the two Mac dev.memolabs.memo-bridge launchd jobs. Nothing depends on them yet; do not touch Sentinel X, Traefik, SSH or any other service.
+Rollback of this isolated deployment: stop and disable the two VPS memo-bridge systemd units, then stop the two Mac dev.memolabs.memo-bridge launchd jobs. Since Phase 6 the Mac also runs dev.memolabs.memo-operator-agent: `deploy/mac/install-operator-agent.sh --uninstall` stops it, and lab-infra `memo_operator_enabled: false` removes the lab side. Nothing depends on them yet; do not touch Sentinel X, Traefik, SSH or any other service.
 Retired Coolify SSH key was removed earlier from VPS root and deploy, with backups and a reconnection test. Backup contains retired public entries only; treat as infrastructure state.
 
 ### Production owner authentication gap

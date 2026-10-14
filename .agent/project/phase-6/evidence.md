@@ -56,6 +56,26 @@ Commands run with `MEMO_BRIDGE_GOVERNANCE_ROOT=/Users/memo/memolabs/os/integrati
 | EV-P6-41 | CLIs | runtime | `operator-agent-cli.mjs` with a read-only Mac policy at max_tier exec; `operator-root-cli.mjs` as the user | agent ready with 24 ops (22 tools, 2 internal); the root helper refuses to start unless uid 0 |
 | EV-P6-42 | docs read | inspection | systemd-run(1), systemd.service(5), systemd.resource-control(5), systemd.exec(5) on man7.org (262~devel), Telegram Bot API | quotes in `bridge/operator-root-helper.mjs` and `bridge/operator-telegram.mjs` headers; lab runs systemd 257 (U-P6-03 still open for the runtime check) |
 
+## Lot 3 (TODO-P6-13, TODO-P6-14 memo-bridge part), branch `feat/phase-6-lot3`, 2026-10-14
+
+Commands run with `MEMO_BRIDGE_GOVERNANCE_ROOT=/Users/memo/memolabs/os/integrations/github`
+(F-P6-02). Nothing was installed in `~/Library/LaunchAgents`, no launchd job was loaded, no
+real key was generated: every run used a temporary HOME.
+
+| ID | AC / TODO | Method | Command | Result |
+|---|---|---|---|---|
+| EV-P6-43 | regression, all Lot 3 | automated | `pnpm test` | 445 tests, 445 pass (4 new in `tests/operator-mac-install.test.mjs`, 12 new cases (10 asking, 2 not) in the dangerous-list test) |
+| EV-P6-44 | build, smoke, deploy | automated | `pnpm run build`, `pnpm run smoke`, `pnpm run test:deploy`, `pnpm run build:operator` | build ok; smoke `{"ok":true,"tools":51,"roundTrip":true,...}` (stdio unchanged, DEV-P6-26); deploy 113 tests OK; operator bundle built |
+| EV-P6-45 | TODO-P6-13 (script, dry run) | automated | `tests/operator-mac-install.test.mjs` "dry run" | `~/.memo-operator` 0700; `agent.key` 0600 Ed25519, no `PRIVATE KEY` line and no part of its body on stdout or stderr; `operator-mac.pub`, `hub-ca.crt`, `operator-hub.pub`, `policy.json` 0444; the policy loads through `loadOperatorPolicy` (host mac, trusted uids root and owner): exec, dangerous, no root helper, the briefed roots; D11 live through the catalog reader (`use_dev_flow` on the registered checkout on main, a write in `~/Documents` allowed); 15 secret paths of the brief denied; plist staged, no `~`, every path absolute, ProgramArguments = absolute node and the bundle, env as the agent expects, KeepAlive, ThrottleInterval 30; bundle files 0444; `~/Library/LaunchAgents` never created |
+| EV-P6-46 | TODO-P6-13 (idempotence) | automated | same file, "rerun is idempotent" | second run: key kept, every step `unchanged`, no `.bak` or temporary file; a key loosened to 0644 is set back to 0600 and never regenerated; a hand-edited policy is replaced and kept as `policy.json.<ts>.bak` |
+| EV-P6-47 | TODO-P6-13 (fail closed) | automated | same file, "--install refuses" | `--install` without `operator-hub.pub` exits non-zero before any launchctl call (on Linux: macOS only); a registry with no available checkout refuses the policy (`registry_has_no_available_project`) |
+| EV-P6-48 | R-P6-01, R-P6-14 (Mac agent end to end) | automated | same file, "live" | the installed bundle, started with the plist's environment and a real hub on loopback TLS (test port instead of 9444), connects as `operator-mac` with the key the script made; signed `operator_policy` shows exec, dangerous, repository guard on, no root helper; `operator_read ~/Documents/note.txt` returns the file as untrusted content; `~/.memo-operator/agent.key` is `path_secret`; the Mac journal has 3 chained lines, mode without group or other bits |
+| EV-P6-49 | DEV-P6-25 | automated | `tests/operator-approval.test.mjs` "dangerous list" | osascript, launchctl, open, security as the program, `mv` or `chmod` onto `.memo-operator` (any case), `cp` into `~/Library/LaunchAgents`, `tee /etc/memo-operator/...`, edit of a LaunchAgents plist, copy onto `FROZEN`: each asks; `ls ~/memolabs` and an edit of a file merely named `memo-operator.md` do not |
+| EV-P6-50 | mutation checks Lot 3 | automated | `<scratchpad>/mutate3.sh` and two manual ones | 9 of 9 killed: policy mode 0444, bundle mode 0444, max_tier exec, agent URL 127.0.0.1, key mode repair, registry check, `*.p8` denylist entry (install test); Mac wrappers and control paths (approval test). A first URL mutation hit a comment and survived; retargeted at the constant, killed |
+| EV-P6-51 | real Mac, read only | inspection | `macPolicy('/Users/memo')` with the catalog reader; `openssl x509 -text` of `~/.config/memo-bridge/hub-ca.crt`; the two live plists read, not changed | 68 registered checkouts, memo-bridge at `~/memolabs/os/core/bridge` answers `use_dev_flow` on main; no write root missing; hub certificate names `DNS:localhost` and `IP:127.0.0.1`, valid to 2027-02-10; probe agent runs `~/.local/share/memo-bridge/runtime` (v0.2.0) with `wss://127.0.0.1:9444/agent` |
+| EV-P6-52 | DEV-P6-27, bundle | runtime | the bundle from the script, temporary HOME, hub URL on a closed port | `operator_ready` (max_tier exec, 24 ops, root_helper false), then `reconnect_scheduled`; `plutil -lint` OK on the staged plist |
+| EV-P6-53 | docs read | inspection | `man launchd.plist` on this Mac; lab-infra `feat/memo-operator-role` (`defaults/main.yml`, `tasks/enabled.yml`, `docs/memo-operator.md`, `Makefile`) read, not edited | Umask takes a decimal integer, ThrottleInterval seconds; the role reads `~/.memo-operator/operator-mac.pub` (`memo_operator_mac_pub_path`), copies it to `/var/lib/memo-bridge/secrets/operator-mac.pub` and restarts the hub; `make memo-operator-freeze` touches the hub freeze file too |
+
 ## Runtime checks pending (need lab or the owner)
 
 - AC-P6-09: a real `systemd-run` on lab: `id -u` prints 0, the unit is gone after the call,
@@ -63,6 +83,10 @@ Commands run with `MEMO_BRIDGE_GOVERNANCE_ROOT=/Users/memo/memolabs/os/integrati
 - AC-P6-07: `/var/log/memo-operator/audit.jsonl` owned by root 0600, `memo-operator` cannot
   write it (`sudo -u memo-operator sh -c 'echo x >> ...'` fails).
 - AC-P6-04 and AC-P6-05 with the real bot (O-P6-2), polkit for `operator_service` (TODO-P6-12).
+- Mac (TODO-P6-13 runtime): the install commands of `docs/OPERATOR.md` on the real Mac, then
+  `launchctl print gui/<uid>/dev.memolabs.memo-operator-agent` running, `operator_ready` in
+  `~/Library/Logs/memo-operator/stderr.log`, the hub journal showing `operator-mac` connected,
+  `touch ~/.memo-operator/FROZEN` refusing a T1 call, and AC-P6-10 step 2 from ChatGPT.
 
 ## Not verified in Lot 1 (owned by later lots)
 

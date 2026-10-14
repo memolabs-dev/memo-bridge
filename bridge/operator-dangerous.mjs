@@ -19,6 +19,11 @@
 //    /etc/shadow (and /etc/group, /etc/gshadow);
 //  - operator_delete of a directory (recursive). "More than 20 files" cannot be known from
 //    the arguments alone, so every recursive delete asks.
+// Lot 3, the Mac (DEV-P6-25): osascript, launchctl, open and security are wrappers too (AppleScript
+// runs shell lines, launchctl and open start programs outside the call, security reads the
+// keychain); and any argument or write path naming the agent's own control files
+// (.memo-operator, /etc/memo-operator) or ~/Library/LaunchAgents asks, since T2 on the Mac runs
+// as the owner and could otherwise rewrite its policy or plant a launchd job without a word.
 // approval_mode: off (never), dangerous (this list), all_root (this list plus every T3 call).
 import { basename } from 'node:path';
 
@@ -31,12 +36,15 @@ const DESTRUCTIVE = new Set(['rm', 'dd', 'wipefs', 'parted', 'fdisk', 'sfdisk', 
 const WRAPPERS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'fish', 'busybox', 'python', 'python3', 'perl', 'ruby', 'node', 'php',
   'env', 'xargs', 'find', 'sudo', 'doas', 'su', 'nice', 'ionice', 'timeout', 'nohup', 'setsid', 'chroot', 'nsenter', 'unshare',
   'systemd-run', 'runuser', 'flock', 'watch', 'stdbuf', 'ssh', 'awk', 'gawk', 'mawk', 'sed', 'crontab', 'at', 'docker', 'make',
-  'git', 'npm', 'npx', 'pnpm', 'pip', 'pip3', 'apt', 'apt-get', 'dpkg']);
+  'git', 'npm', 'npx', 'pnpm', 'pip', 'pip3', 'apt', 'apt-get', 'dpkg', 'osascript', 'launchctl', 'open', 'security']);
 const CRITICAL_UNIT_RE = /^(ssh|sshd|traefik|memo-bridge-[A-Za-z0-9@._-]*|memo-operator[A-Za-z0-9@._-]*)(\.service|\.socket)?$/;
 const SENSITIVE_PATH_RE = /^\/etc\/(ssh(\/|$)|sudoers|pam\.d(\/|$)|passwd-?$|shadow-?$|group-?$|gshadow-?$)/;
+// Anywhere in the value, any letter case (APFS): the operator's own control files and launchd jobs.
+const AGENT_CONTROL_RE = /(^|\/)\.memo-operator(\/|$)|^\/etc\/memo-operator(\/|$)|\/Library\/LaunchAgents(\/|$)/i;
 
 const isDestructiveName = name => DESTRUCTIVE.has(name) || /^mkfs(\.|$)/.test(name);
-const sensitivePath = value => typeof value === 'string' && SENSITIVE_PATH_RE.test(value.replace(/\/{2,}/g, '/'));
+const sensitivePath = value => typeof value === 'string'
+  && [SENSITIVE_PATH_RE, AGENT_CONTROL_RE].some(re => re.test(value.replace(/\/{2,}/g, '/')));
 
 // Why this call is dangerous, or null. op and args as the tool receives them.
 export function dangerReason(op, args = {}) {
