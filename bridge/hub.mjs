@@ -33,7 +33,8 @@ import { OPERATOR_TIER_CAPABILITIES, authorize, operatorCallTier } from '../serv
 import { collectOperatorDefinitions } from '../server/registry.mjs';
 import { argsSha256, createOperatorSigner } from './operator-signing.mjs';
 import { createApprovalStore } from './operator-approvals.mjs';
-import { dangerReason, needsApproval } from './operator-dangerous.mjs';
+import { classifyCall, dangerReason, needsApproval } from './operator-dangerous.mjs';
+import { createGrantStore } from './operator-grants.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
 import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
@@ -102,6 +103,8 @@ export function createHub(options) {
       requestId: ctx.requestId }),
     frozen: () => hubFrozen(), record: (event, details) => record(event, null, details),
     ...(operator?.transferLimits ? { limits: operator.transferLimits } : {}) });
+  // Repatriation D-R4: standing approvals, in memory like approvals and locks.
+  const grants = createGrantStore({ ...(operator?.now ? { now: operator.now } : {}), homes: operator?.homes ?? DEFAULT_HOMES });
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
@@ -140,8 +143,11 @@ export function createHub(options) {
     locks.seen(options.clientSession);
     // sessions_overview: the runtime knows the workspaces, the hub the operator locks.
     if (op === 'sessions_overview') {
-      return sendAgent(host, op, options).then(out => mergeOverview(out, locks.overview(options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly],
-        options.clientSession)));
+      const who = options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly];
+      return sendAgent(host, op, options).then(out => {
+        const merged = mergeOverview(out, locks.overview(who, options.clientSession));
+        return merged?.ok === true ? { ...merged, standing_approvals: grants.list(who.id) } : merged;
+      });
     }
     return sendAgent(host, op, options);
   }
@@ -183,7 +189,7 @@ export function createHub(options) {
   function resolveOperatorHost(op, args) {
     if (args?.host !== undefined) return { host: args.host };
     if (op === 'operator_script' || (op === 'operator_run' && args?.as_root === true) || operatorCallTier(op, args) === 3 ||
-      dangerReason(op, args ?? {}) !== null) {
+      dangerReason(op, args ?? {}) !== null || (op === 'operator_grant' && args?.action === 'request')) {
       return { error: { ok: false, error: 'host_required', detail: 'Mac ou VPS ? This call needs host "mac" or "vps", named explicitly.' } };
     }
     const mac = agents.get(OPERATOR_AGENT_IDS.mac);
@@ -217,6 +223,7 @@ export function createHub(options) {
     // approval_status is answered here: approvals live in the hub (TODO-P6-11).
     if (op === 'approval_status') return approvals.status(args.approval_id, host);
     locks.seen(clientSession);
+    if (op === 'operator_grant') return grantCall(host, args, principal);
     // Operator locks are answered here too (multi-session D-MS4), frozen or not: they change
     // nothing on a host.
     if (LOCK_OPS.includes(op)) {
@@ -247,7 +254,8 @@ export function createHub(options) {
     const mode = approvalModes[host];
     if (needsApproval(mode, op, args, tier)) {
       const call = { host, op, argsSha256: hash, principal: principal.id };
-      approval = approvals.consume(call);
+      // A single-use approval for this exact call first, then a standing approval (D-R4).
+      approval = approvals.consume(call) ?? grants.covers({ host, op, args, principal: principal.id });
       if (!approval) {
         if (!bot) {
           record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'approval_unavailable'});
@@ -268,8 +276,11 @@ export function createHub(options) {
           record('operator_approval_requested', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, tier, reason, args_sha256: hash,
             approval_id: asked.approval.id});
         }
+        const danger = classifyCall(op, args);
+        const grantable = tier < 3 && danger !== null && danger.hard === false;
         return { ok: false, error: 'pending_approval', approval_id: asked.approval.id, expires_at: new Date(asked.approval.expires).toISOString(),
-          detail: 'the owner was asked in Telegram; poll approval_status, then repeat this exact call once it is approved' };
+          detail: 'the owner was asked in Telegram; poll approval_status, then repeat this exact call once it is approved',
+          ...(grantable ? { standing_approval_hint: `avoid one approval per call: operator_grant action request with programs ${JSON.stringify(danger.programs)} and a cwd_prefixes entry covering this cwd, once per work session` } : {}) };
       }
     }
     const id = newId();
@@ -280,8 +291,10 @@ export function createHub(options) {
     const timeoutMs = foreground ? Math.max(OPS[op].timeoutMs, ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 30) * 1000) : undefined;
     const out = await sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, requestId, clientSession, id, operator: signature, timeoutMs });
     if (op === 'operator_upload_init') locks.recordUpload(lockedArgs, out);
-    const data = op === 'operator_freeze_status' && out && out.ok !== false
+    let data = op === 'operator_freeze_status' && out && out.ok !== false
       ? { ...out, hub_frozen: frozen, frozen_above_t0: Boolean(out.frozen_above_t0) || frozen } : out;
+    // The standing approvals live here: operator_policy shows the ones of this host (D-R4).
+    if (op === 'operator_policy' && data && data.ok !== false) data = { ...data, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
     // Hub journal (spec D7): tier, args hash and redacted args, approval, outcome, duration, output
     // hash. The wire id matches the host journal's request id when no request id travelled.
     record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
@@ -298,6 +311,34 @@ export function createHub(options) {
     if (op === 'operator_help') return operatorHelp(args);
     if (op === 'operator_transfer_status') return transfers.status(args, { principal });
     return transfers.start(args, { principal, clientSession, requestId });
+  }
+
+  // operator_grant (D-R4): list, request (the owner decides in Telegram), revoke. Answered here,
+  // never signed: it changes nothing on a host. A request needs the exec capability it would serve.
+  async function grantCall(host, args, principal) {
+    if (args.action === 'list') return { ok: true, host, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
+    if (args.action === 'revoke') {
+      const out = grants.revoke(args.grant_id, { principal: principal.id });
+      record('operator_grant_revoked', OPERATOR_AGENT_IDS[host], { principal: principal.id, grant_id: typeof args.grant_id === 'string' ? args.grant_id : null,
+        outcome: out.ok ? 'ok' : 'refused' });
+      return { ...out, host };
+    }
+    if (!principal.capabilities?.has(OPERATOR_TIER_CAPABILITIES[2])) return fail('forbidden');
+    if (hubFrozen()) return fail('frozen');
+    if (!bot?.notifyGrant) return fail('approval_unavailable');
+    const out = grants.request({ host, programs: args.programs, cwd_prefixes: args.cwd_prefixes, ttl_hours: args.ttl_hours, reason: args.reason ?? null },
+      principal.id);
+    if (!out.ok) return { ...out, host };
+    const view = grants.get(out.grant.id);
+    try { await bot.notifyGrant(view, { principal: principal.id }); } catch {
+      grants.revoke(out.grant.id);
+      record('operator_approval_unsent', OPERATOR_AGENT_IDS[host], { principal: principal.id, op: 'operator_grant' });
+      return fail('approval_unavailable');
+    }
+    record('operator_grant_requested', OPERATOR_AGENT_IDS[host], { principal: principal.id, grant_id: view.grant_id, programs: view.programs,
+      cwd_prefixes: view.cwd_prefixes, ttl_hours: view.ttl_hours });
+    return { ok: true, host, status: 'pending', grant_id: view.grant_id, programs: view.programs, cwd_prefixes: view.cwd_prefixes, ttl_hours: view.ttl_hours,
+      detail: 'the owner was asked in Telegram; poll operator_grant action list until it is active, then run with cwd under a prefix' };
   }
 
   function setOperatorFrozen(value, by) {
@@ -482,7 +523,8 @@ export function createHub(options) {
         if (!isOperatorOp(op)) continue;
         const def = operatorDefs.get(op);
         mcp.registerTool(op,{description:def.description,inputSchema:def.inputSchema,annotations:def.annotations},
-          async args=>operatorContent(await requestOperator(args?.host, op, {args: args ?? {}, principal})));
+          async args=>(operatorCallTier(op, args ?? {}) > 0 && gate.mutatingOps !== 'owner'
+            ? result(fail('forbidden')) : operatorContent(await requestOperator(args?.host, op, {args: args ?? {}, principal}))));
       }
     }
     if (gate.runtimeEnabled && definitions) {
@@ -576,7 +618,7 @@ export function createHub(options) {
     inventory, requestAgent, requestOperator, availableOps,
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
     setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
-    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers,
+    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers, operatorGrants: grants,
     // The Telegram bot (bridge/operator-telegram.mjs), built by hub-cli with the hub's owner hooks.
     attachOperatorBot(value) { bot = value; },
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }

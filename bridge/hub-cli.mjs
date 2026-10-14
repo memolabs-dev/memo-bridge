@@ -81,7 +81,7 @@ if (operator && env.MEMO_BRIDGE_TELEGRAM_CHAT_ID) {
   if (ownerChatId === null) throw new Error('MEMO_BRIDGE_TELEGRAM_CHAT_ID must be a numeric chat id');
   const token = await readTelegramToken(env);
   if (token.error) throw new Error(`telegram-bot credential ${token.error}`);
-  bot = createOperatorBot({ client: createTelegramClient({ token: token.token }), ownerChatId, approvals: hub.operatorApprovals,
+  bot = createOperatorBot({ client: createTelegramClient({ token: token.token }), ownerChatId, approvals: hub.operatorApprovals, grants: hub.operatorGrants,
     log: (event, details) => audit({ at: new Date().toISOString(), event, ...details }),
     hub: {
       freeze: by => hub.setOperatorFrozen(true, by),

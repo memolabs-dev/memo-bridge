@@ -440,7 +440,8 @@ test('hub: a lock refuses another workspace before anything is signed; workspace
 test('host default: the Mac when operator-mac is connected, with the host in the result', async t => {
   const { hub } = await hubWith(t, { mac: true });
   const out = await hub.requestOperator(undefined, 'operator_policy', { args: {}, principal: CHAT });
-  assert.deepEqual(out, { ok: true, served_by: 'fake-mac', host: 'mac' });
+  // Repatriation D-R4: the hub adds the host's standing approvals to operator_policy.
+  assert.deepEqual(out, { ok: true, served_by: 'fake-mac', host: 'mac', standing_approvals: [] });
 });
 
 test('host default: vps when the Mac is not connected; root, script and dangerous calls need the host', async t => {
