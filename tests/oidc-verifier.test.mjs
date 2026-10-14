@@ -7,7 +7,7 @@ import { OAuthError, verifyBearerToken } from '@modelcontextprotocol/server';
 import {
   BASELINE_SCOPE, CANONICAL_RESOURCE, WRITE_CAPABILITIES, capabilitiesFor, clientTypesOf, createOidcVerifier, scopesSupported, tokenScopes
 } from '../bridge/oidc.mjs';
-import { CAPABILITIES, isPrincipal } from '../server/coordinator/policy.mjs';
+import { CAPABILITIES, REMOTE_DEFAULT_CEILING, isPrincipal } from '../server/coordinator/policy.mjs';
 
 const issuer = 'https://auth.memolabs.dev';
 const ownerSub = '6b3c1c9e-4f7a-4d2b-9e55-0c1f2a3b4c5d';
@@ -140,7 +140,9 @@ test('scopes map to capabilities, capped by the ceiling and the write gate', asy
   assert.deepEqual(info.extra.capabilities, [CAPABILITIES.AUDIT, CAPABILITIES.READ].sort(), 'gate closed: no write capability');
   const open = verifier({ remoteWrites: 'enabled' });
   const openInfo = await open.verifyAccessToken(await mint({ scope: all }));
-  assert.deepEqual(openInfo.extra.capabilities, Object.values(CAPABILITIES).sort());
+  // Phase 6: the default ceiling leaves the operator capabilities out (opt-in, DEV-P6-03).
+  assert.deepEqual(openInfo.extra.capabilities, [...REMOTE_DEFAULT_CEILING].sort());
+  assert.ok(!openInfo.extra.capabilities.some(c => c.startsWith('operator:')));
   const narrowed = verifier({ remoteWrites: 'enabled', ceiling: [CAPABILITIES.READ, CAPABILITIES.WRITE] });
   assert.deepEqual((await narrowed.verifyAccessToken(await mint({ scope: all }))).extra.capabilities, [CAPABILITIES.READ, CAPABILITIES.WRITE].sort());
   // scp array when scope is absent (Pocket ID emits both).
@@ -151,12 +153,17 @@ test('scopes map to capabilities, capped by the ceiling and the write gate', asy
   assert.deepEqual(capabilitiesFor(['constructor', '__proto__', 'toString'], { remoteWrites: 'enabled' }), []);
   assert.deepEqual(tokenScopes({ scope: 'a  b a' }), ['a', 'b']);
   assert.deepEqual(scopesSupported({}), [BASELINE_SCOPE]);
-  assert.deepEqual(scopesSupported({ remoteWrites: 'enabled' }), [BASELINE_SCOPE, ...WRITE_CAPABILITIES]);
+  const DEFAULT_WRITES = WRITE_CAPABILITIES.filter(c => REMOTE_DEFAULT_CEILING.includes(c));
+  assert.deepEqual(scopesSupported({ remoteWrites: 'enabled' }), [BASELINE_SCOPE, ...DEFAULT_WRITES]);
+  // Phase 6: operator scopes are advertised only when the ceiling lists them (DEV-P6-03).
+  const ALL_CAPS = Object.values(CAPABILITIES);
+  assert.deepEqual(scopesSupported({ ceiling: ALL_CAPS }), [BASELINE_SCOPE, CAPABILITIES.OPERATOR_READ]);
+  assert.deepEqual(scopesSupported({ remoteWrites: 'enabled', ceiling: ALL_CAPS }), [BASELINE_SCOPE, CAPABILITIES.OPERATOR_READ, ...WRITE_CAPABILITIES]);
   assert.deepEqual([...clientTypesOf([chatgpt])], [[chatgpt, 'chatgpt']]);
   assert.deepEqual([...clientTypesOf({ '5f0c-predefined': 'chatgpt', 'cli-client': 'cli' })], [['5f0c-predefined', 'chatgpt'], ['cli-client', 'cli']]);
   // Resource metadata advertises write scopes only once the gate is open (spec D7).
   assert.deepEqual(closed.resourceMetadata.scopes_supported, [BASELINE_SCOPE]);
-  assert.deepEqual(open.resourceMetadata.scopes_supported, [BASELINE_SCOPE, ...WRITE_CAPABILITIES]);
+  assert.deepEqual(open.resourceMetadata.scopes_supported, [BASELINE_SCOPE, ...DEFAULT_WRITES]);
   assert.deepEqual(closed.resourceMetadata.authorization_servers, [issuer]);
   assert.equal(closed.resourceMetadata.resource, CANONICAL_RESOURCE);
 });

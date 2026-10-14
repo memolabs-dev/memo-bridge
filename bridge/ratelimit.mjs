@@ -9,7 +9,7 @@
 //   proxy header only when the TCP peer is the trusted proxy (Traefik on the host network
 //   connects from 127.0.0.1); any other peer is keyed on its own address, so a forged header
 //   from elsewhere never moves another client's bucket.
-import { CAPABILITIES, OPERATION_CAPABILITY } from '../server/coordinator/policy.mjs';
+import { CAPABILITIES, operationCapability } from '../server/coordinator/policy.mjs';
 
 export const RATE_DEFAULTS = Object.freeze({
   perMinute: Object.freeze({ read: 60, write: 20, execute: 6 }),
@@ -24,9 +24,10 @@ const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
 // The class an op is counted in. Unknown ops are counted as writes (the hub refuses them
 // anyway; a flood of unknown names must not be free).
 export function opClass(op) {
-  const capability = Object.hasOwn(OPERATION_CAPABILITY, op) ? OPERATION_CAPABILITY[op] : null;
-  if (capability === CAPABILITIES.READ || capability === CAPABILITIES.AUDIT) return 'read';
-  if (capability === CAPABILITIES.EXECUTE) return 'execute';
+  const capability = operationCapability(op);
+  if ([CAPABILITIES.READ, CAPABILITIES.AUDIT, CAPABILITIES.OPERATOR_READ].includes(capability)) return 'read';
+  // Phase 6: operator commands and root count as execution (the host agent has its own per-tier limits).
+  if ([CAPABILITIES.EXECUTE, CAPABILITIES.OPERATOR_EXEC, CAPABILITIES.OPERATOR_ROOT].includes(capability)) return 'execute';
   if (capability === null && ['list_hosts', 'host_status', 'bridge_info'].includes(op)) return 'read';
   return 'write';
 }

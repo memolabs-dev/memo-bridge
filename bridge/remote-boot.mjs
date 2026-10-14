@@ -16,17 +16,21 @@ import { createAuthFailureLimiter, createRateLimiter } from './ratelimit.mjs';
 import { REMOTE_RUNTIME_HOST, createRemoteServerFactory, unlistedToolCalls } from './remote-surface.mjs';
 import { createPublicListener } from './public-listener.mjs';
 import { parseRemoteJson } from './remote-config.mjs';
+import { isOperatorOp } from './ops.mjs';
 
 // Options:
 //   raw          remote.json, JSON-parsed
 //   tlsKey/Cert  the hub certificate (Traefik pins it)
 //   requestAgent the hub's requestAgent(host, op, {args, principal, requestId, clientSession})
+//   requestOperator the hub's requestOperator(host, op, {...}) (Phase 6): operator tools go there,
+//                to the host named in their own `host` argument, signed. Absent: operator_disabled.
 //   audit        journal sink (one object per line); never receives tokens, arguments or results
 //   systemctl    the systemctl runner for the write gate probe (tests inject a fixture)
 //   verifier     a prebuilt OIDC verifier (tests: local JWKS); else built from remote.json
 // Resolves with the listener (not started). Throws Error('invalid_remote_config ...') or
 // Error('remote writes refused: <code>').
-export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, audit = () => {}, systemctl, verifier, port } = {}) {
+export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, requestOperator = null, audit = () => {}, systemctl,
+  verifier, port } = {}) {
   if (typeof requestAgent !== 'function') throw new Error('requestAgent required');
   const parsed = parseRemoteJson(raw);
   if (!parsed.ok) throw new Error(`${parsed.error}${parsed.field ? ` (${parsed.field})` : ''}`);
@@ -45,8 +49,12 @@ export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, 
 
   const journal = event => { try { audit(event); } catch { /* the journal never fails a call */ } };
   const forwarder = createForwarder({
-    requestAgent: (host, op, o) => requestAgent(host, op, { args: o.args, principal: o.principal, requestId: o.requestId,
-      clientSession: o.clientSession }),
+    requestAgent: (host, op, o) => {
+      const envelope = { args: o.args, principal: o.principal, requestId: o.requestId, clientSession: o.clientSession };
+      if (!isOperatorOp(op)) return requestAgent(host, op, envelope);
+      if (typeof requestOperator !== 'function') return { ok: false, error: 'operator_disabled' };
+      return requestOperator(o.args?.host, op, envelope);
+    },
     host: REMOTE_RUNTIME_HOST, softDeadlineMs, limiter: createRateLimiter(rateLimits), audit: journal
   });
   const factory = createRemoteServerFactory({

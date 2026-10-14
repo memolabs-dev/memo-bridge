@@ -25,7 +25,9 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { CAPABILITIES, CLIENT_TYPES, REMOTE_DEFAULT_CEILING, authorize, isPrincipal, makePrincipal, remotePrincipal }
   from '../server/coordinator/policy.mjs';
-import { collectToolDefinitions, isRemoteWriteTool, REMOTE_TOOLS, registryProblems, toolsFor } from '../server/registry.mjs';
+import { collectOperatorDefinitions, collectToolDefinitions, isRemoteOperatorTool, isRemoteWriteTool, operatorRegistryProblems,
+  operatorToolsFor, REMOTE_OPERATOR_TOOLS, REMOTE_TOOLS, registryProblems, toolsFor } from '../server/registry.mjs';
+import { RESULT_LIMIT_BYTES } from './operator-output.mjs';
 import { MAX_RESULT_BYTES, PACKAGE_VERSION } from './protocol.mjs';
 import { OPS } from './ops.mjs';
 
@@ -171,6 +173,10 @@ const TOO_LARGE_HINTS = Object.freeze({
 });
 const LIST_HINT = 'lower limit or add a filter';
 
+// Phase 6 operator results are bounded on the host at 128 KiB with _truncation pointers (spec
+// D10), so their budget here is that bound plus the envelope, not the 24 KiB of the dev tools.
+export const OPERATOR_BUDGET_BYTES = RESULT_LIMIT_BYTES + 1024;
+
 // Compact JSON within the budget, or result_too_large. A mutating op that ran keeps that fact.
 export function boundedResult(op, data, budgetBytes) {
   const text = JSON.stringify(data);
@@ -196,8 +202,13 @@ function checkedDefinitions() {
   checked ??= collectToolDefinitions().then(defs => {
     const problems = registryProblems(defs);
     for (const name of REMOTE_TOOLS) if (OPS[name]?.kind !== 'runtime') problems.push(`${name}: not a runtime op`);
-    if (problems.length) throw new Error(`remote_registry_invalid: ${problems.join('; ')}`);
-    return defs;
+    return collectOperatorDefinitions().then(operatorDefs => {
+      problems.push(...operatorRegistryProblems(operatorDefs));
+      for (const name of REMOTE_OPERATOR_TOOLS) if (OPS[name]?.kind !== 'operator') problems.push(`${name}: not an operator op`);
+      if (problems.length) throw new Error(`remote_registry_invalid: ${problems.join('; ')}`);
+      for (const [name, def] of operatorDefs) defs.set(name, def);
+      return defs;
+    });
   });
   checked.catch(() => { checked = undefined; });
   return checked;
@@ -206,7 +217,8 @@ function checkedDefinitions() {
 // One McpServer for one request of one principal.
 function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
   const server = new McpServer({ name: 'memo-bridge', version: PACKAGE_VERSION }, { instructions: INSTRUCTIONS });
-  const allowed = new Set(toolsFor(principal, { remoteWrites: cfg.remoteWrites }));
+  const allowed = new Set([...toolsFor(principal, { remoteWrites: cfg.remoteWrites }),
+    ...operatorToolsFor(principal, { remoteWrites: cfg.remoteWrites })]);
   const refuse = (op, error) => {
     audit({ at: new Date().toISOString(), event: 'remote_denied', principal: principal.id, op, reason: error });
     return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error }) }] };
@@ -226,7 +238,7 @@ function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
           data = await dispatch(cfg.runtimeHost, op, { args: prepared.args, principal, ctx: ctx ?? null, clientId });
         } catch { data = { ok: false, error: 'internal_error' }; }
         if (!isPlainObject(data)) data = { ok: false, error: 'invalid_agent_response' };
-        const out = boundedResult(op, data, cfg.budgetBytes);
+        const out = boundedResult(op, data, isRemoteOperatorTool(op) ? Math.max(cfg.budgetBytes, OPERATOR_BUDGET_BYTES) : cfg.budgetBytes);
         if (out.tooLarge) audit({ at: new Date().toISOString(), event: 'remote_result_too_large', principal: principal.id, op, bytes: out.bytes });
         return { content: [{ type: 'text', text: out.text }] };
       });
@@ -261,7 +273,8 @@ export function createRemoteServerFactory({ authInfo, config, dispatch, audit = 
 
 // For the listener and the size script: the names a principal would list.
 export function remoteToolNames(principal, config) {
-  return toolsFor(principal, { remoteWrites: normalized(config).remoteWrites });
+  const remoteWrites = normalized(config).remoteWrites;
+  return [...toolsFor(principal, { remoteWrites }), ...operatorToolsFor(principal, { remoteWrites })].sort();
 }
 
 // The tools/call requests of one JSON-RPC message (or batch) that name a tool this principal is
@@ -274,7 +287,8 @@ export function unlistedToolCalls(authInfo, config, message) {
   const decided = remotePrincipalFor(authInfo, config);
   if (!decided.ok) return [];
   const cfg = normalized(config);
-  const listed = new Set(toolsFor(decided.principal, { remoteWrites: cfg.remoteWrites }));
+  const listed = new Set([...toolsFor(decided.principal, { remoteWrites: cfg.remoteWrites }),
+    ...operatorToolsFor(decided.principal, { remoteWrites: cfg.remoteWrites })]);
   const out = [];
   for (const msg of Array.isArray(message) ? message : [message]) {
     if (msg?.method !== 'tools/call') continue;

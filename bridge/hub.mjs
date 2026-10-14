@@ -9,29 +9,48 @@
 // shares nothing with this one except requestAgent(). The Phase 1 OIDC mode of this listener
 // was removed in Phase 5: it switched the whole 9443 surface to OAuth and accepted any JWT
 // with the right audience, ID tokens included.
+//
+// Phase 6 (operator access, spec D2, D4, D6): with the `operator` option the hub also routes
+// the operator tools to the operator agents (identities operator-mac, operator-vps), each
+// request signed with the dedicated operator key (bridge/operator-signing.mjs) through
+// requestOperator(), the only way an operator op leaves the hub. The hub's own freeze flag
+// refuses every operator op above T0; only the owner sets it (setOperatorFrozen, or the freeze
+// file on lab), never a tool.
 import { createServer } from 'node:https';
 import WebSocket, { WebSocketServer } from 'ws';
 import { McpServer, WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
+import { lstatSync } from 'node:fs';
 import { bearerValid, nonce, verifyChallenge, keyFingerprint } from './crypto.mjs';
 import {
   MAX_FRAME_BYTES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, PING_INTERVAL_MS, PROTOCOL_VERSION, SUBPROTOCOL,
   CODE_RE, OP_RE, PACKAGE_VERSION, createReassembler, encodeFrames, idempotencyKey, makeRequest, newId, parseFrame,
   validateHello
 } from './protocol.mjs';
-import { HOSTS, HUB_LOCAL_OPS, HUB_PRINCIPALS, OPS, PRINCIPAL_IDS, RUNTIME_OPS, collectToolDefinitions, denialReason, isForwardable } from './ops.mjs';
+import { AGENT_IDS, HOSTS, HUB_LOCAL_OPS, HUB_PRINCIPALS, OPERATOR_AGENT_IDS, OPERATOR_OPS, OPS, PRINCIPAL_IDS, RUNTIME_OPS, collectToolDefinitions,
+  denialReason, isForwardable, isOperatorOp, servableBy } from './ops.mjs';
+import { authorize } from '../server/coordinator/policy.mjs';
+import { collectOperatorDefinitions } from '../server/registry.mjs';
+import { createOperatorSigner } from './operator-signing.mjs';
+import { journalArgs } from './operator-audit.mjs';
+import { sha256Hex } from './operator-output.mjs';
 
 const tags = {readOnlyHint:true, destructiveHint:false,idempotentHint:true,openWorldHint:false};
 const result = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
 const fail = error => ({ok:false,error});
 const MAX_HTTP_BYTES = 64 * 1024;
 
+// Spec D6 (a): while the hub is frozen, every operator op above T0 is refused at the hub,
+// before signing. Lot 1 serves T0 only; Lot 2's T1 to T3 ops go through this same check.
+export const hubFreezeDenial = (tier, frozen) => (frozen && tier > 0 ? 'frozen' : null);
+
 export function createHub(options) {
   // The OIDC options of Phase 1 are refused rather than ignored: a deployment still setting
   // them must fail visibly, not silently fall back to the bearer.
   for (const key of ['oidc', 'oidcPrincipal']) if (Object.hasOwn(options ?? {}, key)) throw new Error(`hub does not take ${key}: OAuth is served by the public listener only`);
   const { tlsKey, tlsCert, allowedAgentKeys, tokenSha256, readOnlyTokenSha256 = null, runtimeHost = null, mutatingOps = false,
-    toolDefinitions = null, port = 9443, bind = '127.0.0.1', audit = () => {}, pingIntervalMs = PING_INTERVAL_MS, timeouts = {} } = options;
+    toolDefinitions = null, port = 9443, bind = '127.0.0.1', audit = () => {}, pingIntervalMs = PING_INTERVAL_MS, timeouts = {},
+    operator = null } = options;
   if (!tlsKey || !tlsCert) throw new Error('TLS is mandatory');
   if (!/^[0-9a-f]{64}$/.test(tokenSha256)) throw new Error('Invalid bearer token digest');
   if (readOnlyTokenSha256 !== null && (!/^[0-9a-f]{64}$/.test(readOnlyTokenSha256) || readOnlyTokenSha256 === tokenSha256)) {
@@ -41,7 +60,17 @@ export function createHub(options) {
   // TODO-P4-40: mutating ops are enabled for the owner principal only, by explicit config.
   if (mutatingOps !== false && mutatingOps !== 'owner') throw new Error('mutatingOps must be false or "owner"');
   if (mutatingOps === 'owner' && runtimeHost === null) throw new Error('mutatingOps requires a runtime host');
-  const permitted = new Map(Object.entries(allowedAgentKeys || {}).filter(([host])=>HOSTS.includes(host)));
+  const permitted = new Map(Object.entries(allowedAgentKeys || {}).filter(([host])=>AGENT_IDS.includes(host) && typeof allowedAgentKeys[host]==='string'));
+  // Phase 6. operator: {signingKeyPem, freezeFile?, now?}. Without it no operator op leaves the hub.
+  const signer = operator ? createOperatorSigner({ privateKeyPem: operator.signingKeyPem, ...(operator.now ? { now: operator.now } : {}) }) : null;
+  const freezeFile = operator?.freezeFile ?? null;
+  let operatorFrozen = false;
+  const fileFrozen = () => {
+    if (!freezeFile) return false;
+    try { lstatSync(freezeFile); return true; } catch (error) { return error?.code !== 'ENOENT'; }
+  };
+  const hubFrozen = () => operatorFrozen || fileFrozen();
+  let operatorDefs = null;
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
@@ -63,28 +92,37 @@ export function createHub(options) {
     if (gate.runtimeEnabled && definitions) for (const op of RUNTIME_OPS) {
       if (definitions.has(op) && !denialReason(principal, op, gate)) ops.push(op);
     }
+    // Lot 1: T0 operator tools for a principal holding operator:read (hub:owner).
+    if (signer && operatorDefs) for (const op of OPERATOR_OPS) {
+      if (operatorDefs.has(op) && OPS[op].tier === 0 && authorize(principal, op)) ops.push(op);
+    }
     return ops.sort();
   }
 
   // Forward one op to `host`. Resolves with the agent's checked data, or {ok:false, error}.
   // requestId and clientSession (Phase 5, bridge/forward.mjs) travel in the envelope's meta,
   // never in args; the wire id stays the hub's own.
-  function requestAgent(host, op, { args = {}, principal = HUB_PRINCIPALS[PRINCIPAL_IDS.readonly], timeoutMs, requestId = null,
-    clientSession = null } = {}) {
-    if (!HOSTS.includes(host) || !isForwardable(op)) return Promise.resolve(fail('unsupported_op'));
+  // Operator ops are refused here: they leave the hub through requestOperator() only, signed.
+  function requestAgent(host, op, options = {}) {
+    if (isOperatorOp(op)) return Promise.resolve(fail('unsupported_op'));
+    return sendAgent(host, op, options);
+  }
+  function sendAgent(host, op, { args = {}, principal = HUB_PRINCIPALS[PRINCIPAL_IDS.readonly], timeoutMs, requestId = null,
+    clientSession = null, id: wireId = null, operator: signature = null } = {}) {
+    if (!AGENT_IDS.includes(host) || !isForwardable(op) || !servableBy(host, op)) return Promise.resolve(fail('unsupported_op'));
     const spec = OPS[op];
     const conn = agents.get(host);
     if (!conn || conn.ws.readyState!==WebSocket.OPEN) return Promise.resolve(fail('host_offline'));
     if (!conn.ops.has(op)) return Promise.resolve(fail('unsupported_op'));
     if (conn.pending.size >= conn.maxInFlight) return Promise.resolve(fail('agent_busy'));
-    const id = newId();
+    const id = wireId ?? newId();
     let frames;
     if (conn.version === 1) {
       frames = [JSON.stringify({type:'request',id,op})];
     } else {
       const requestKey = spec.mutating ? idempotencyKey(principal.id, op, args.client_request_id) : null;
       frames = encodeFrames(makeRequest({id, op, args, principal, timeoutMs: timeoutMs ?? timeouts[op] ?? spec.timeoutMs, requestKey,
-        meta: {request_id: requestId, client_session: clientSession}}),
+        meta: {request_id: requestId, client_session: clientSession}, operator: signature}),
         {maxMessageBytes:MAX_REQUEST_BYTES});
       if (!frames) return Promise.resolve(fail('request_too_large'));
     }
@@ -97,6 +135,41 @@ export function createHub(options) {
       for (const frame of frames) conn.ws.send(frame);
     });
   }
+  // Phase 6: one operator op to the operator agent of `host` ('mac' | 'vps', taken from the
+  // tool's own host argument by the caller), signed for exactly these arguments. The principal
+  // must already be authorized for the op (remote surface or 9443 listing); the agent checks the
+  // tier against its local policy again.
+  function requestOperator(host, op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
+    if (!signer) return Promise.resolve(fail('operator_disabled'));
+    if (!isOperatorOp(op)) return Promise.resolve(fail('unsupported_op'));
+    if (!Object.hasOwn(OPERATOR_AGENT_IDS, host) || args?.host !== host) return Promise.resolve(fail('invalid_arguments'));
+    if (!principal?.id || !authorize(principal, op)) return Promise.resolve(fail('forbidden'));
+    const tier = OPS[op].tier;
+    const frozen = hubFrozen();
+    if (hubFreezeDenial(tier, frozen)) {
+      record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'frozen'});
+      return Promise.resolve(fail('frozen'));
+    }
+    const id = newId();
+    const started = Date.now();
+    const signature = signer.sign({ id, op, host, tier, principal: principal.id, args });
+    return sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, requestId, clientSession, id, operator: signature }).then(out => {
+      const data = op === 'operator_freeze_status' && out && out.ok !== false
+        ? { ...out, hub_frozen: frozen, frozen_above_t0: Boolean(out.frozen_above_t0) || frozen } : out;
+      // Hub journal (spec D7): tier, args hash and redacted args, outcome, duration, output hash.
+      // The wire id matches the host journal's request id when no request id travelled.
+      record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
+        args_sha256: signature.args_sha256, args: journalArgs(args), outcome: data?.ok === false ? 'refused' : 'ok',
+        code: data?.ok === false && CODE_RE.test(String(data.error)) ? data.error : null, ms: Date.now() - started,
+        output_sha256: sha256Hex(data ?? null) });
+      return data;
+    });
+  }
+  function setOperatorFrozen(value, by) {
+    operatorFrozen = value === true;
+    record(operatorFrozen ? 'operator_frozen' : 'operator_unfrozen', null, {by: typeof by === 'string' ? by.slice(0, 64) : 'owner'});
+  }
+
   function settle(id, value) {
     const job = pending.get(id);
     if (!job) return;
@@ -117,8 +190,9 @@ export function createHub(options) {
         conn.ws.close(1008, hello.code); return;
       }
       // Effective ops: what the registry allows AND the agent serves. Anything else advertised
-      // is ignored, so an agent can never widen what the hub forwards.
-      const effective = hello.ops.filter(isForwardable);
+      // is ignored, so an agent can never widen what the hub forwards. Operator ops are taken
+      // from operator identities only, and an operator identity serves nothing else.
+      const effective = hello.ops.filter(op => isForwardable(op) && servableBy(conn.host, op));
       conn.version = 2; conn.ops = new Set(effective); conn.maxInFlight = hello.maxInFlight; conn.agentVersion = hello.version;
       record('agent_hello', conn.host, {version: hello.version, ops: effective.length, ignored: hello.ops.length - effective.length});
       conn.ws.send(JSON.stringify({v:PROTOCOL_VERSION,type:'welcome',ops:effective}));
@@ -219,9 +293,17 @@ export function createHub(options) {
       agents: [...agents.values()].map(c=>({host:c.host, protocol:c.version, version:c.agentVersion, ops:c.ops.size})),
       tools: availableOps(principal)
     }));
+    if (signer && operatorDefs) {
+      for (const op of availableOps(principal)) {
+        if (!isOperatorOp(op)) continue;
+        const def = operatorDefs.get(op);
+        mcp.registerTool(op,{description:def.description,inputSchema:def.inputSchema,annotations:def.annotations},
+          async args=>result(await requestOperator(args?.host, op, {args: args ?? {}, principal})));
+      }
+    }
     if (gate.runtimeEnabled && definitions) {
       for (const op of availableOps(principal)) {
-        if (HUB_LOCAL_OPS.includes(op) || op==='host_status') continue;
+        if (HUB_LOCAL_OPS.includes(op) || op==='host_status' || isOperatorOp(op)) continue;
         const def = definitions.get(op);
         mcp.registerTool(op,{description:def.description,inputSchema:def.inputSchema,annotations:def.annotations},
           async args=>result(await forward(principal, op, args ?? {})));
@@ -295,6 +377,7 @@ export function createHub(options) {
   return {
     async start(){
       if (gate.runtimeEnabled && !definitions) definitions = await collectToolDefinitions();
+      if (signer && !operatorDefs) operatorDefs = await collectOperatorDefinitions();
       await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,bind,resolve);});
       pinger = setInterval(heartbeat, pingIntervalMs); pinger.unref();
       return server.address();
@@ -305,7 +388,9 @@ export function createHub(options) {
       for (const ws of wss.clients) ws.terminate();
       await new Promise(resolve=>server.close(resolve));
     },
-    inventory, requestAgent, availableOps,
+    inventory, requestAgent, requestOperator, availableOps,
+    // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
+    setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null,
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }
   };
 }

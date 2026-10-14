@@ -9,8 +9,8 @@
 // Input schemas are not copied here: collectTools() registers the same server/tools modules
 // the local stdio entry point uses against a collector, so the hub lists, and the agent
 // validates, exactly the schemas of the runtime that executes them.
-import { CAPABILITIES, DEFAULT_HUB_GRANTS, HUB_PRINCIPALS as HUB_IDS, OPERATION_CAPABILITY, authorize, principalFromHub }
-  from '../server/coordinator/policy.mjs';
+import { CAPABILITIES, DEFAULT_HUB_GRANTS, HUB_PRINCIPALS as HUB_IDS, OPERATION_CAPABILITY, OPERATOR_OPERATION_CAPABILITY, authorize,
+  operatorTier, principalFromHub } from '../server/coordinator/policy.mjs';
 import { CODE_RE, MAX_RESULT_BYTES } from './protocol.mjs';
 import { collectTools as registryTools, collectToolDefinitions as registryDefinitions } from '../server/registry.mjs';
 
@@ -30,6 +30,13 @@ const GITHUB_READ_OPS = new Set(['github_issues', 'github_pull_requests', 'githu
 // Ops answered by the hub itself (no agent, no capability beyond authentication).
 export const HUB_LOCAL_OPS = Object.freeze(['list_hosts', 'bridge_info']);
 export const HOSTS = Object.freeze(['mac', 'vps']);
+// Phase 6 (spec D2): each host also runs an operator agent, a separate process with its own
+// identity key (operator-mac.pub, operator-vps.pub in the hub's secrets), so it never replaces
+// the probe agent or the runtime on the hub's one-connection-per-identity table. Tools name the
+// host ("mac" | "vps"); the hub maps it to the operator identity.
+export const OPERATOR_AGENT_IDS = Object.freeze({ mac: 'operator-mac', vps: 'operator-vps' });
+export const AGENT_IDS = Object.freeze([...HOSTS, ...Object.values(OPERATOR_AGENT_IDS)]);
+export const isOperatorAgent = id => Object.values(OPERATOR_AGENT_IDS).includes(id);
 
 const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -57,8 +64,19 @@ export const OPS = Object.freeze(Object.fromEntries([
     checkResult: hostStatusResult })],
   ...Object.entries(OPERATION_CAPABILITY).map(([name, capability]) => [name, entry(name, {
     kind: 'runtime', capability, mutating: capability !== CAPABILITIES.READ, timeoutMs: timeoutFor(name),
+    checkResult: genericResult })]),
+  // Phase 6 operator ops: served by an operator agent only, always signed by the hub
+  // (bridge/hub.mjs requestOperator). tier 0..3; mutating from T1 up. 30 s covers the 20 s
+  // search budget (spec D10).
+  ...Object.entries(OPERATOR_OPERATION_CAPABILITY).map(([name, capability]) => [name, entry(name, {
+    kind: 'operator', capability, tier: operatorTier(name), mutating: operatorTier(name) > 0, timeoutMs: TIMEOUTS.default,
     checkResult: genericResult })])
 ]));
+export const OPERATOR_OPS = Object.freeze(Object.values(OPS).filter(o => o.kind === 'operator').map(o => o.name));
+export const isOperatorOp = op => Object.hasOwn(OPS, op) && OPS[op].kind === 'operator';
+// The ops an agent identity may serve: an operator agent its ops plus host_status, any other
+// agent everything but the operator ops. The hub intersects a hello with this.
+export const servableBy = (agentId, op) => op === 'host_status' || (isOperatorAgent(agentId) ? isOperatorOp(op) : !isOperatorOp(op));
 export const RUNTIME_OPS = Object.freeze(Object.values(OPS).filter(o => o.kind === 'runtime').map(o => o.name));
 export const MUTATING_OPS = Object.freeze(Object.values(OPS).filter(o => o.mutating).map(o => o.name));
 export const isForwardable = op => Object.hasOwn(OPS, op);
@@ -87,6 +105,8 @@ export function principalFromWire(wire, grants = DEFAULT_HUB_GRANTS) {
 export function denialReason(principal, op, { runtimeEnabled = false, mutatingOps = false } = {}) {
   if (HUB_LOCAL_OPS.includes(op) || op === 'host_status') return null;
   if (!isForwardable(op)) return 'unsupported_op';
+  // Operator ops never go to the runtime; the hub serves them through requestOperator.
+  if (isOperatorOp(op)) return 'unsupported_op';
   if (!runtimeEnabled) return 'runtime_disabled';
   if (!principal || !Object.hasOwn(HUB_PRINCIPALS, principal.id)) return 'forbidden';
   if (!authorize(principal, op)) return 'forbidden';

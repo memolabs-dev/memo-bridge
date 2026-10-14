@@ -13,6 +13,11 @@
 //   meta                   per-request metadata set by the hub (bridge/forward.mjs): the request id
 //                          shared by the hub journal and the runtime event, and the hash of the
 //                          ChatGPT conversation hint (D8). Never tool arguments.
+//
+// Phase 6 adds one more optional, additive field (an older agent ignores it):
+//   operator               the hub's Ed25519 signature over {id, op, host, tier, principal,
+//                          args_sha256, exp, nonce} (bridge/operator-signing.mjs). Only operator
+//                          agents read it, and they refuse any request without a valid one.
 //   agent -> hub  {v:2, type:'result', id, data}  |  {v:2, type:'error', id, code}
 //   either way    {v:2, type:'part', id, seq, last, data}            one slice of a message above 16 KiB
 //
@@ -164,12 +169,13 @@ export function wireMeta(meta) {
   return Object.keys(out).length ? out : null;
 }
 
-export function makeRequest({ id = newId(), op, args = {}, principal, timeoutMs, requestKey, meta = null }) {
+export function makeRequest({ id = newId(), op, args = {}, principal, timeoutMs, requestKey, meta = null, operator = null }) {
   const claim = { id: principal.id };
   if (typeof principal.client_type === 'string' && CLIENT_TYPE_RE.test(principal.client_type)) claim.client_type = principal.client_type;
   const checkedMeta = wireMeta(meta);
   return { v: PROTOCOL_VERSION, type: 'request', id, op, args, principal: claim,
-    timeout_ms: timeoutMs, ...(requestKey ? { request_key: requestKey } : {}), ...(checkedMeta ? { meta: checkedMeta } : {}) };
+    timeout_ms: timeoutMs, ...(requestKey ? { request_key: requestKey } : {}), ...(checkedMeta ? { meta: checkedMeta } : {}),
+    ...(isPlainObject(operator) ? { operator } : {}) };
 }
 
 // Agent side: validate a v2 request envelope. Capabilities never travel on the wire: the
@@ -190,7 +196,9 @@ export function validateRequest(msg) {
     return { ok: false, code: 'unknown_principal', id };
   }
   const principal = { id: msg.principal.id, ...(msg.principal.client_type !== undefined ? { client_type: msg.principal.client_type } : {}) };
-  return { ok: true, value: { id, op: msg.op, args: msg.args ?? {}, principal, timeoutMs, requestKey, meta: wireMeta(msg.meta) } };
+  // The operator signature is passed on as received, shape-checked by its verifier only.
+  const operator = isPlainObject(msg.operator) ? msg.operator : null;
+  return { ok: true, value: { id, op: msg.op, args: msg.args ?? {}, principal, timeoutMs, requestKey, meta: wireMeta(msg.meta), operator } };
 }
 
 export const resultFrame = (id, data) => ({ v: PROTOCOL_VERSION, type: 'result', id, data });

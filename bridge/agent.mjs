@@ -9,7 +9,7 @@ import {
   MAX_FRAME_BYTES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, OP_RE, PING_INTERVAL_MS, PROTOCOL_VERSION, SUBPROTOCOL,
   OperationError, backoffDelay, createReassembler, encodeFrames, errorFrame, makeHello, parseFrame, resultFrame, validateRequest
 } from './protocol.mjs';
-import { RUNTIME_OPS, collectTools, principalFromWire as hubPrincipalFromWire } from './ops.mjs';
+import { AGENT_IDS, RUNTIME_OPS, collectTools, principalFromWire as hubPrincipalFromWire } from './ops.mjs';
 import { authorize as policyAuthorize } from '../server/coordinator/policy.mjs';
 
 const PROBE=String.raw`import json,platform,os,shutil
@@ -34,13 +34,16 @@ export async function localStatus(host){
 
 export const probeOperations = host => ({ host_status: async () => localStatus(host) });
 
-// operations: {op: async (args, ctx) => data}. ctx = {op, principal:{id, client_type?}, requestKey, timeoutMs, meta}.
+// operations: {op: async (args, ctx) => data}. ctx = {op, id, principal:{id, client_type?}, requestKey, timeoutMs, meta, operator}.
 // meta is the hub's per-request metadata ({request_id?, client_session?}, protocol.mjs wireMeta) or null.
+// id is the wire request id; operator the hub's signature field (Phase 6) or null. Both are
+// used by the operator agent (bridge/operator-agent.mjs) only.
+// host is the agent identity: 'mac' or 'vps', or an operator identity (bridge/ops.mjs AGENT_IDS).
 // A handler throws OperationError(code) to answer {type:'error', code}.
 export function createAgent({ host, url, privateKey, ca, operations = probeOperations(host), reconnectMs, backoff = {},
   maxInFlight = MAX_IN_FLIGHT, pingIntervalMs = PING_INTERVAL_MS, livenessMs = pingIntervalMs * 3, random = Math.random,
   log = () => {} }) {
-  if (!['mac','vps'].includes(host))throw new Error('Invalid host');
+  if (!AGENT_IDS.includes(host))throw new Error('Invalid host');
   const endpoint=new URL(url);
   if(endpoint.protocol!=='wss:' || !['localhost','127.0.0.1'].includes(endpoint.hostname) || endpoint.pathname!=='/agent' || endpoint.search || !endpoint.port) throw new Error('Only private TLS tunnel endpoints accepted');
   const handlers = new Map(Object.entries(operations).filter(([op,fn])=>OP_RE.test(op) && typeof fn==='function'));
@@ -70,7 +73,8 @@ export function createAgent({ host, url, privateKey, ca, operations = probeOpera
     if (inFlight >= maxInFlight) { send(socket, errorFrame(req.id,'agent_busy')); return; }
     inFlight++;
     try {
-      const data = await handler(req.args, {op:req.op, principal:req.principal, requestKey:req.requestKey, timeoutMs:req.timeoutMs, meta:req.meta ?? null});
+      const data = await handler(req.args, {op:req.op, id:req.id, principal:req.principal, requestKey:req.requestKey, timeoutMs:req.timeoutMs,
+        meta:req.meta ?? null, operator:req.operator ?? null});
       if (!send(socket, resultFrame(req.id, data))) send(socket, errorFrame(req.id,'result_too_large'));
     } catch (error) {
       const code = error instanceof OperationError ? error.code : 'internal_error';

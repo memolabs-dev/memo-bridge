@@ -12,6 +12,7 @@
     "build": "esbuild server/index.mjs server/runners/job-runner.mjs --bundle --platform=node --format=esm --target=node22 --outdir=plugin/server/dist --entry-names=[name] --out-extension:.js=.mjs",
     "test": "node --test --test-timeout=180000 tests/*.test.mjs",
     "test:hub": "node --test tests/hub-auth.test.mjs tests/hub-oidc-http.test.mjs tests/agent-protocol.test.mjs tests/hub-dispatch.test.mjs tests/oidc-resource.test.mjs tests/oidc-verifier.test.mjs tests/public-listener.test.mjs tests/remote-surface.test.mjs tests/remote-boot.test.mjs tests/remote-e2e.test.mjs tests/remote-wire.test.mjs",
+    "test:operator": "node --test tests/operator-policy.test.mjs tests/operator-paths.test.mjs tests/operator-signing.test.mjs tests/operator-tools.test.mjs tests/operator-agent.test.mjs tests/operator-remote.test.mjs",
     "test:runner": "node --test tests/agent-protocol.test.mjs tests/hub-dispatch.test.mjs tests/runtime-principal.test.mjs tests/credentials.test.mjs tests/github-app.test.mjs tests/worktrees.test.mjs tests/executor-systemd.test.mjs tests/job-queue.test.mjs tests/lease-supervisor.test.mjs tests/job-unit.test.mjs tests/runner-integration.test.mjs tests/release-manifest.test.mjs tests/coordinator-store-contract.test.mjs && pnpm run test:deploy",
     "test:deploy": "python3 -I -B -m unittest discover -s deploy/tests",
     "smoke": "node tests/mcp-smoke.mjs",
@@ -21,6 +22,7 @@
     "package:plugin": "pnpm run build && node scripts/package-plugin.mjs",
     "start:hub": "node bridge/hub-cli.mjs",
     "start:agent": "node bridge/agent-cli.mjs",
+    "start:operator": "node bridge/operator-agent-cli.mjs",
     "install:local": "pnpm run build && node scripts/install-local.mjs"
   },
   "dependencies": {

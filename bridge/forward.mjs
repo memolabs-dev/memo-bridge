@@ -26,7 +26,11 @@ const MAX_SESSION_CHARS = 512;
 export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 'write_gate_closed', 'mutating_disabled',
   'project_not_allowed', 'path_protected', 'session_mismatch', 'protected_branch', 'push_rejected', 'lease_held',
   'stale_lease', 'host_not_remote_enabled', 'head_not_pushed_by_workspace', 'default_branch_refused', 'workspace_closed',
-  'no_live_claim', 'claim_required', 'unsupported_op']));
+  'no_live_claim', 'claim_required', 'unsupported_op',
+  // Phase 6 operator refusals (host agent or hub).
+  'frozen', 'operator_disabled', 'tier_not_allowed', 'tier_mismatch', 'path_secret', 'path_not_allowed', 'git_internal',
+  'use_dev_flow', 'unit_not_declared', 'container_not_declared', 'signature_missing', 'signature_invalid', 'unknown_key',
+  'host_mismatch', 'request_mismatch', 'args_mismatch', 'expired', 'exp_too_far', 'replayed']));
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 

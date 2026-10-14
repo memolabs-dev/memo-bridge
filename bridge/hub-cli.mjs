@@ -1,6 +1,10 @@
 // Hub entry point (memo-bridge-hub.service). Secrets come from MEMO_BRIDGE_SECRETS:
 //   tls.key, tls.crt, owner.token, mac.pub, vps.pub   (as before)
 //   readonly.token                                     optional, read-only test bearer (spec D9, O-9)
+//   operator-signing.key                               optional (Phase 6, spec D4): Ed25519 private key
+//                                                      that signs every operator request. Absent: no
+//                                                      operator tool is served, on either listener
+//   operator-mac.pub, operator-vps.pub                 optional: identity keys of the operator agents
 // Configuration (environment, set by the lab-infra unit and its drop-ins):
 //   MEMO_BRIDGE_HUB_RUNTIME_HOST   'vps' to forward the runtime tools of the 9443 surface to that
 //                                  agent (read ops; lab-infra drop-in 60-runtime-host.conf)
@@ -12,6 +16,10 @@
 //                                  public OIDC-only listener (default 127.0.0.1:9445, the Traefik
 //                                  target of bridge.memolabs.dev). Unset: no public listener.
 //                                  The runner reads the same file (bridge/write-gate.mjs).
+//   MEMO_BRIDGE_OPERATOR_FREEZE_FILE  absolute path (Phase 6, spec D6), default
+//                                  /etc/memo-bridge/operator-FROZEN: while it exists the hub refuses
+//                                  every operator op above T0. Created and removed by the owner (root
+//                                  directory); no tool can.
 // A bad remote.json, or remote_writes "enabled" while a GitHub Actions runner runs as root
 // (write gate layer 2, lab-infra #161), stops the unit before anything listens.
 import { existsSync, readFileSync } from 'node:fs';
@@ -39,7 +47,11 @@ const mutatingOps = mutatingRaw === 'owner' ? 'owner' : false;
 const audit = ev => console.error(JSON.stringify(ev));
 
 const allowedAgentKeys = { mac: get('mac.pub'), vps: get('vps.pub') };
-const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit });
+for (const id of ['operator-mac', 'operator-vps']) if (existsSync(`${dir}/${id}.pub`)) allowedAgentKeys[id] = get(`${id}.pub`);
+const freezeFile = env.MEMO_BRIDGE_OPERATOR_FREEZE_FILE || '/etc/memo-bridge/operator-FROZEN';
+if (!isAbsolute(freezeFile)) throw new Error('MEMO_BRIDGE_OPERATOR_FREEZE_FILE must be an absolute path');
+const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile } : null;
+const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit, operator });
 
 // Built before the hub starts: the public listener gets the TLS pair, remote.json and the hub's
 // requestAgent only, never the bearer digests or the agent keys.
@@ -48,12 +60,13 @@ let publicListener = null;
 if (remotePath) {
   if (!isAbsolute(remotePath)) throw new Error(REMOTE_CONFIG_ENV + ' must be an absolute path');
   publicListener = await createRemoteService({ raw: JSON.parse(readFileSync(remotePath, 'utf8')), tlsKey, tlsCert,
-    requestAgent: hub.requestAgent, audit });
+    requestAgent: hub.requestAgent, requestOperator: hub.requestOperator, audit });
 }
 
 await hub.start();
 audit({ event: 'hub_started', bind: '127.0.0.1:9443', runtime_host: runtimeHost, mutating_ops: mutatingOps || 'disabled',
-  readonly_principal: Boolean(readOnlyTokenSha256) });
+  readonly_principal: Boolean(readOnlyTokenSha256), operator_key: hub.operatorKeyId,
+  operator_agents: ['operator-mac', 'operator-vps'].filter(id => Object.hasOwn(allowedAgentKeys, id)) });
 if (publicListener) {
   const address = await publicListener.start();
   audit({ event: 'public_listener_started', bind: address.address + ':' + address.port, resource: publicListener.verifier.resource,

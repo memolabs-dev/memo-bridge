@@ -13,6 +13,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
 import { createPublicListener, parsePublicListenerSettings, PRM_PATHS, MAX_PUBLIC_BODY_BYTES } from '../bridge/public-listener.mjs';
 import { createOidcVerifier, BASELINE_SCOPE, CANONICAL_RESOURCE, WRITE_CAPABILITIES } from '../bridge/oidc.mjs';
+import { REMOTE_DEFAULT_CEILING } from '../server/coordinator/policy.mjs';
 
 const issuer = 'https://auth.memolabs.dev';
 const ownerSub = 'owner-uuid-1';
@@ -216,7 +217,8 @@ test('write gate: enabled needs a passing self-check, then the metadata advertis
   assert.throws(() => createPublicListener({ tlsKey, tlsCert, oidc, remoteWrites: 'enabled', writeGateCheck: () => ({ ok: false, error: 'root_runner_active' }) }), /root_runner_active/);
   await withListener({ remoteWrites: 'enabled', writeGateCheck: () => ({ ok: true }) }, async port => {
     const doc = JSON.parse((await call(port, PRM_PATHS[1])).data);
-    assert.deepEqual(doc.scopes_supported, [BASELINE_SCOPE, ...WRITE_CAPABILITIES]);
+    // Phase 6: the operator write scopes stay out under the default ceiling (opt-in, DEV-P6-03).
+    assert.deepEqual(doc.scopes_supported, [BASELINE_SCOPE, ...WRITE_CAPABILITIES.filter(c => REMOTE_DEFAULT_CEILING.includes(c))]);
   });
 });
 

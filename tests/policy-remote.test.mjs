@@ -79,7 +79,8 @@ test('remotePrincipal: identity, client and scope refusals', () => {
 test('remotePrincipal: capabilities = scopes, within the ceiling, minus writes while the gate is closed', () => {
   const everything = claims({ scopes: [...ALL, 'offline_access', 'made:up'] });
   // Gate closed: no write capability, whatever the token and the ceiling hold (gate layer 2).
-  assert.deepEqual(caps(remotePrincipal(everything, remote()).principal), [CAPABILITIES.AUDIT, CAPABILITIES.READ].sort());
+  // Phase 6: operator:read is a read capability; it passes a closed gate when the ceiling lists it.
+  assert.deepEqual(caps(remotePrincipal(everything, remote()).principal), [CAPABILITIES.AUDIT, CAPABILITIES.READ, CAPABILITIES.OPERATOR_READ].sort());
   for (const c of WRITE_CAPABILITIES) assert.equal(remotePrincipal(everything, remote()).principal.capabilities.has(c), false, c);
   // Gate open: the token's write scopes within the ceiling.
   assert.deepEqual(caps(remotePrincipal(everything, remote({ remoteWrites: true })).principal), [...ALL].sort());
@@ -197,7 +198,7 @@ test('runtime: remote.json grants the owner read, or owner once remote_writes is
     'an env owner grant still loses every write capability (and audit) while the gate is closed');
   const open = runtimeFor(t, await tempStateDir(t), { MEMO_BRIDGE_REMOTE_CONFIG: await policyPath(t,
     { projects: ['drop'], oidc: { owner_sub: SUB }, remote_writes: 'enabled' }) });
-  assert.deepEqual(caps(open.principalFromHub({ id: `oidc:${SUB}` })), ALL.filter(c => c !== CAPABILITIES.AUDIT).sort(),
+  assert.deepEqual(caps(open.principalFromHub({ id: `oidc:${SUB}` })), ALL.filter(c => c !== CAPABILITIES.AUDIT && !c.startsWith('operator:')).sort(),
     'fix F3: every capability but coordinator:audit');
   // Phase 4 hub principals are not touched by the remote policy.
   assert.deepEqual(caps(closed.principalFromHub({ id: 'hub:owner' })), [CAPABILITIES.READ]);
