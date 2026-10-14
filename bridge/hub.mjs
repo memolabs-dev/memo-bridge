@@ -36,6 +36,7 @@ import { createApprovalStore } from './operator-approvals.mjs';
 import { dangerReason, needsApproval } from './operator-dangerous.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
+import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
 
 const tags = {readOnlyHint:true, destructiveHint:false,idempotentHint:true,openWorldHint:false};
 const result = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
@@ -82,6 +83,15 @@ export function createHub(options) {
   const anchorIntervalMs = operator?.anchorIntervalMs ?? 15 * 60_000;
   let anchorTimer = null;
   let operatorDefs = null;
+  // Multi-session (spec D-MS4 to D-MS6): operator locks, in memory. A lock's workspace is checked
+  // with the runtime (workspace_status for the caller's conversation) unless the caller injects
+  // operator.verifyWorkspace (tests).
+  const verifyWorkspace = operator?.verifyWorkspace ?? (async (principal, workspaceId, clientSession) => {
+    const out = await sendAgent(runtimeHost ?? 'vps', 'workspace_status', { args: { workspace_id: workspaceId }, principal, clientSession });
+    return out?.ok === true && out.workspace ? { ok: true, workspace: { ...out.workspace } } : { ok: false, error: out?.error ?? 'workspace_unverified' };
+  });
+  const locks = createOperatorLocks({ ...(operator?.now ? { now: operator.now } : {}), verifyWorkspace,
+    homes: operator?.homes ?? DEFAULT_HOMES });
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
@@ -117,6 +127,12 @@ export function createHub(options) {
   // Operator ops are refused here: they leave the hub through requestOperator() only, signed.
   function requestAgent(host, op, options = {}) {
     if (isOperatorOp(op)) return Promise.resolve(fail('unsupported_op'));
+    locks.seen(options.clientSession);
+    // sessions_overview: the runtime knows the workspaces, the hub the operator locks.
+    if (op === 'sessions_overview') {
+      return sendAgent(host, op, options).then(out => mergeOverview(out, locks.overview(options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly],
+        options.clientSession)));
+    }
     return sendAgent(host, op, options);
   }
   function sendAgent(host, op, { args = {}, principal = HUB_PRINCIPALS[PRINCIPAL_IDS.readonly], timeoutMs, requestId = null,
@@ -160,11 +176,32 @@ export function createHub(options) {
     if (!principal?.id || !authorize(principal, op) || !principal.capabilities?.has(OPERATOR_TIER_CAPABILITIES[tier])) return fail('forbidden');
     // approval_status is answered here: approvals live in the hub (TODO-P6-11).
     if (op === 'approval_status') return approvals.status(args.approval_id, host);
+    locks.seen(clientSession);
+    // Operator locks are answered here too (multi-session D-MS4), frozen or not: they change
+    // nothing on a host.
+    if (LOCK_OPS.includes(op)) {
+      const out = await locks.handle(op, args, { principal, clientSession });
+      record(op === 'operator_lock' ? 'operator_lock' : 'operator_unlock', OPERATOR_AGENT_IDS[host], { request_id: requestId, principal: principal.id,
+        workspace_id: typeof args.workspace_id === 'string' ? args.workspace_id.slice(0, 40) : null, kind: args.kind ?? null,
+        outcome: out?.ok === false ? 'refused' : 'ok', code: out?.ok === false ? out.error : null });
+      return out;
+    }
     const frozen = hubFrozen();
     if (hubFreezeDenial(tier, frozen)) {
       record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'frozen'});
       return fail('frozen');
     }
+    // D-MS5: the workspace and the locks of a T1 to T3 call, before any approval is asked. The
+    // workspace_id is ours: it never reaches the agent, the signature or the approval hash.
+    let lockedArgs = args;
+    if (tier > 0) {
+      const gate = locks.check(op, args, { principal, clientSession });
+      if (!gate.ok) {
+        record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: gate.error});
+        return gate;
+      }
+    }
+    if (Object.hasOwn(args, 'workspace_id')) { const { workspace_id: _ws, ...rest } = args; args = rest; }
     const hash = argsSha256(args);
     let approval = null;
     const mode = approvalModes[host];
@@ -202,6 +239,7 @@ export function createHub(options) {
     const foreground = ['operator_run', 'operator_script'].includes(op) && args.background !== true;
     const timeoutMs = foreground ? Math.max(OPS[op].timeoutMs, ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 30) * 1000) : undefined;
     const out = await sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, requestId, clientSession, id, operator: signature, timeoutMs });
+    if (op === 'operator_upload_init') locks.recordUpload(lockedArgs, out);
     const data = op === 'operator_freeze_status' && out && out.ok !== false
       ? { ...out, hub_frozen: frozen, frozen_above_t0: Boolean(out.frozen_above_t0) || frozen } : out;
     // Hub journal (spec D7): tier, args hash and redacted args, approval, outcome, duration, output
@@ -489,7 +527,7 @@ export function createHub(options) {
     inventory, requestAgent, requestOperator, availableOps,
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
     setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
-    operatorApprovals: approvals,
+    operatorApprovals: approvals, operatorLocks: locks,
     // The Telegram bot (bridge/operator-telegram.mjs), built by hub-cli with the hub's owner hooks.
     attachOperatorBot(value) { bot = value; },
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }

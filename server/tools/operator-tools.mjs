@@ -14,7 +14,7 @@ export const OPERATOR_TOOLS = Object.freeze(['operator_policy', 'operator_state'
   'operator_search', 'operator_logs', 'operator_service_status', 'operator_freeze_status', 'operator_audit_verify',
   'operator_job_status', 'approval_status',
   'operator_edit', 'operator_upload_init', 'operator_upload_chunk', 'operator_upload_complete', 'operator_move', 'operator_copy',
-  'operator_delete', 'operator_chmod', 'operator_run', 'operator_service', 'operator_script']);
+  'operator_delete', 'operator_chmod', 'operator_run', 'operator_service', 'operator_script', 'operator_lock', 'operator_unlock']);
 // Validator presets of operator_edit (spec D9): names only, each a fixed argv on the agent
 // (bridge/operator-write.mjs VALIDATORS). Never a caller string.
 export const VALIDATOR_PRESETS = Object.freeze(['json', 'yaml', 'nginx', 'systemd', 'sh', 'python', 'toml', 'caddy', 'traefik']);
@@ -31,6 +31,12 @@ const host = z.enum(OPERATOR_HOSTS).describe('mac (the owner\'s Mac, as user mem
 const ref = z.string().min(1).max(128).regex(/^[\x20-\x7E]+$/).optional().describe('Optional correlation id, journaled.');
 const path = z.string().min(1).max(4096).describe('Absolute path on that host ("~/" on the Mac).');
 const glob = z.string().min(1).max(200).regex(/^[^/\0]+$/);
+// Multi-session (D-MS5): the caller's workspace. Required from remote conversations on every
+// write, command and root call, with an operator_lock covering it; the hub removes it before
+// the call is signed, so the agent never sees it.
+export const LOCK_KINDS = Object.freeze(['path', 'unit', 'container', 'global']);
+const workspaceId = z.string().max(40).optional()
+  .describe('Your workspace_id (ws_...). Required from a ChatGPT conversation, with an operator_lock that covers this call.');
 // journalctl --since forms: absolute date or time, relative (-2h), or the keywords.
 export const SINCE_RE = /^(?:\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?|-\d{1,5}(?:s|m|min|h|d)|today|yesterday)$/;
 
@@ -61,7 +67,7 @@ export const OPERATOR_SCHEMAS = Object.freeze({
   operator_audit_verify: z.object({ host, ref }),
   operator_job_status: z.object({ host, ref, job_id: z.string().regex(/^r?j_[A-Za-z0-9_-]{16,40}$/) }),
   approval_status: z.object({ host, ref, approval_id: z.string().regex(/^ap_[A-Za-z0-9_-]{16,40}$/) }),
-  operator_edit: z.object({ host, ref, path,
+  operator_edit: z.object({ host, ref, workspace_id: workspaceId, path,
     mode: z.enum(EDIT_MODES).describe('replace (old -> new_text), regex (pattern -> new_text), block (between start_marker and end_marker), append, prepend, write (whole file).'),
     old: z.string().min(1).max(256 * 1024).optional(),
     new_text: z.string().max(1024 * 1024).optional(),
@@ -74,28 +80,36 @@ export const OPERATOR_SCHEMAS = Object.freeze({
     dry_run: z.boolean().optional(),
     diff: z.boolean().optional(),
     validator: z.enum(VALIDATOR_PRESETS).optional().describe('Named check run on the new content before it replaces the file.') }),
-  operator_upload_init: z.object({ host, ref, path, size: z.number().int().min(0).max(UPLOAD_MAX_BYTES), overwrite: z.boolean().optional() }),
-  operator_upload_chunk: z.object({ host, ref, upload_id: z.string().regex(/^up_[A-Za-z0-9_-]{16,40}$/),
+  operator_upload_init: z.object({ host, ref, workspace_id: workspaceId, path, size: z.number().int().min(0).max(UPLOAD_MAX_BYTES), overwrite: z.boolean().optional() }),
+  operator_upload_chunk: z.object({ host, ref, workspace_id: workspaceId, upload_id: z.string().regex(/^up_[A-Za-z0-9_-]{16,40}$/),
     index: z.number().int().min(0).max(UPLOAD_MAX_BYTES / UPLOAD_CHUNK_BYTES),
     content_base64: z.string().max(Math.ceil(UPLOAD_CHUNK_BYTES / 3) * 4).regex(/^[A-Za-z0-9+/]*={0,2}$/) }),
-  operator_upload_complete: z.object({ host, ref, upload_id: z.string().regex(/^up_[A-Za-z0-9_-]{16,40}$/), sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
-  operator_move: z.object({ host, ref, src: path, dst: path, overwrite: z.boolean().optional() }),
-  operator_copy: z.object({ host, ref, src: path, dst: path, overwrite: z.boolean().optional(), recursive: z.boolean().optional() }),
-  operator_delete: z.object({ host, ref, path, recursive: z.boolean().optional().describe('Required to delete a directory.') }),
-  operator_chmod: z.object({ host, ref, path, mode: z.string().regex(/^0?[0-7]{3}$/).describe('Octal permissions, e.g. 644. No setuid, setgid or sticky bit.') }),
-  operator_run: z.object({ host, ref,
+  operator_upload_complete: z.object({ host, ref, workspace_id: workspaceId, upload_id: z.string().regex(/^up_[A-Za-z0-9_-]{16,40}$/), sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
+  operator_move: z.object({ host, ref, workspace_id: workspaceId, src: path, dst: path, overwrite: z.boolean().optional() }),
+  operator_copy: z.object({ host, ref, workspace_id: workspaceId, src: path, dst: path, overwrite: z.boolean().optional(), recursive: z.boolean().optional() }),
+  operator_delete: z.object({ host, ref, workspace_id: workspaceId, path, recursive: z.boolean().optional().describe('Required to delete a directory.') }),
+  operator_chmod: z.object({ host, ref, workspace_id: workspaceId, path, mode: z.string().regex(/^0?[0-7]{3}$/).describe('Octal permissions, e.g. 644. No setuid, setgid or sticky bit.') }),
+  operator_run: z.object({ host, ref, workspace_id: workspaceId,
     argv: z.array(z.string().min(1).max(4096)).min(1).max(64).describe('Program and arguments, run without a shell.'),
     cwd: path.optional(),
     env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/), z.string().max(4096)).optional().describe('Only names the host policy allows.'),
     timeout_s: z.number().int().min(1).max(3600).optional().describe('Default 30, at most 600; up to 3600 with background.'),
     background: z.boolean().optional().describe('Return a job_id at once; read the result with operator_job_status.'),
     as_root: z.boolean().optional().describe('Run as root on lab, through the root helper, in a transient unit (operator:root).') }),
-  operator_service: z.object({ host, ref, unit: z.string().min(1).max(128), action: z.enum(['start', 'stop', 'restart', 'reload']) }),
-  operator_script: z.object({ host, ref, interpreter: z.enum(['bash', 'python3']),
+  operator_service: z.object({ host, ref, workspace_id: workspaceId, unit: z.string().min(1).max(128), action: z.enum(['start', 'stop', 'restart', 'reload']) }),
+  operator_script: z.object({ host, ref, workspace_id: workspaceId, interpreter: z.enum(['bash', 'python3']),
     content: z.string().min(1).max(SCRIPT_MAX_BYTES),
     args: z.array(z.string().max(4096)).max(64).optional(),
     timeout_s: z.number().int().min(1).max(3600).optional(),
-    background: z.boolean().optional() })
+    background: z.boolean().optional() }),
+  operator_lock: z.object({ host, ref, workspace_id: z.string().max(40).describe('Your workspace_id from workspace_open.'),
+    kind: z.enum(LOCK_KINDS).describe('path: a file or directory subtree; unit: a systemd unit; container: a docker container; global: the whole host (root calls, scripts, commands without cwd).'),
+    target: z.string().min(1).max(4096).optional().describe('Absolute path ("~/" on the Mac), unit or container name. Not used for global.'),
+    ttl_seconds: z.number().int().min(30).max(7200).optional().describe('Default 900 (15 min), at most 7200. Lock again to renew.'),
+    reason: z.string().max(200).optional().describe('What you are doing, shown to the other conversations.') }),
+  operator_unlock: z.object({ host, ref, workspace_id: z.string().max(40).describe('Your workspace_id.'),
+    lock_id: z.string().max(40).optional().describe('One lock (lk_...); or kind and target; nothing releases all your locks on this host.'),
+    kind: z.enum(LOCK_KINDS).optional(), target: z.string().min(1).max(4096).optional() })
 });
 
 const DESCRIPTIONS = Object.freeze({
@@ -120,14 +134,17 @@ const DESCRIPTIONS = Object.freeze({
   operator_chmod: 'Change the permission bits of a path inside the host\'s write roots (no setuid, setgid or sticky bit).',
   operator_run: 'Run one program with arguments, without a shell (;, |, $() are plain bytes), as the agent user, or as root on lab with as_root. Output is redacted and bounded. Dangerous commands wait for the owner\'s approval in Telegram.',
   operator_service: 'Start, stop, restart or reload a systemd unit declared in the host policy (lab).',
-  operator_script: 'Run a bash or python3 script (at most 64 KiB) as root on lab, in a transient systemd unit with time and memory limits. Always needs the owner\'s approval when the host is in dangerous mode.'
+  operator_script: 'Run a bash or python3 script (at most 64 KiB) as root on lab, in a transient systemd unit with time and memory limits. Always needs the owner\'s approval when the host is in dangerous mode.',
+  operator_lock: 'Take (or renew) an operator lock for your workspace before any operator write, command or root call: a path subtree, a systemd unit, a docker container, or global for the whole host. Other conversations are refused with locked_by_other_session on what you lock, and you are refused the same way on theirs: then stop and tell the owner. TTL 15 min by default, at most 2 h; release it with operator_unlock when done. Changes nothing on the host.',
+  operator_unlock: 'Release your operator locks on a host: one lock_id, one kind and target, or all of them. Changes nothing on the host.'
 });
 
 // Annotations per tool: T0 read-only; delete, move, run, service and script destructive.
 const ANNOTATIONS = Object.freeze({
   operator_edit: writes, operator_upload_init: writes, operator_upload_chunk: writes, operator_upload_complete: writes,
   operator_copy: writes, operator_chmod: writes, operator_move: destructive, operator_delete: destructive,
-  operator_run: destructive, operator_service: destructive, operator_script: destructive
+  operator_run: destructive, operator_service: destructive, operator_script: destructive,
+  operator_lock: writes, operator_unlock: { ...writes, idempotentHint: true }
 });
 
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] });

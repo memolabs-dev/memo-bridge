@@ -27,6 +27,10 @@ import { makeHost, operatorKeys } from './helpers/operator-fixture.mjs';
 const OWNER_CHAT = 424242;
 const TOKEN = `123456789:${'A'.repeat(35)}`;
 const OWNER = makePrincipal('oidc:owner', Object.values(CAPABILITIES));
+// Multi-session D-MS5: a remote principal's operator writes name a workspace holding a lock.
+// The stack's workspace is verified by a stub (no runtime here) and holds a global lock on vps.
+const WS = 'ws_approvalTests001';
+const verifyWorkspace = async (principal, id) => ({ ok: true, workspace: { workspace_id: id, status: 'active', session_tag: null, project: 'drop' } });
 
 test('dangerous list (spec D5): what asks, what does not', () => {
   const yes = [
@@ -157,7 +161,7 @@ async function stack(t, { hubModes = { vps: 'dangerous' }, withBot = true } = {}
   const audit = [];
   const hub = createHub({ tlsKey, tlsCert, tokenSha256: 'a'.repeat(64), port: 0, audit: ev => audit.push(ev),
     allowedAgentKeys: { mac: generateAgentIdentity().publicKey, vps: generateAgentIdentity().publicKey, 'operator-vps': id.publicKey },
-    operator: { signingKeyPem: opKeys.privateKeyPem, approvalModes: hubModes, anchorIntervalMs: 0 } });
+    operator: { signingKeyPem: opKeys.privateKeyPem, approvalModes: hubModes, anchorIntervalMs: 0, verifyWorkspace } });
   const { port } = await hub.start();
   t.after(() => hub.stop());
   const tg = fakeTelegram();
@@ -176,7 +180,10 @@ async function stack(t, { hubModes = { vps: 'dangerous' }, withBot = true } = {}
     operations: { host_status: async () => ({ host: 'operator-vps', online: true }), ...handlers } });
   t.after(() => agent.stop());
   await until(() => hub.agentInfo('operator-vps')?.version === 2);
-  const call = (op, args) => hub.requestOperator('vps', op, { args: { host: 'vps', ...args }, principal: OWNER });
+  const locked = await hub.requestOperator('vps', 'operator_lock', { args: { host: 'vps', workspace_id: WS, kind: 'global', reason: 'approval tests' },
+    principal: OWNER });
+  if (!locked.ok) throw new Error(`lock: ${JSON.stringify(locked)}`);
+  const call = (op, args) => hub.requestOperator('vps', op, { args: { host: 'vps', workspace_id: WS, ...args }, principal: OWNER });
   const press = (approvalId, decision = 'a', from = OWNER_CHAT) => bot.handleUpdate({ update_id: 7, callback_query: { id: 'cb1', from: { id: from },
     data: `ap:${decision}:${approvalId}`, message: { message_id: 1, chat: { id: OWNER_CHAT }, text: 'req' } } });
   return { host, hub, tg, bot, call, press, audit, guard };
@@ -228,9 +235,9 @@ test('AC-P6-05: a dangerous call waits for the owner; confirm:true and another a
   assert.equal((await s.call('operator_run', { argv: ['df', '-h'] })).ok, true);
   // as_root needs operator:root on top of operator:exec (the call's tier is T3).
   const execOnly = makePrincipal('oidc:owner', [CAPABILITIES.OPERATOR_READ, CAPABILITIES.OPERATOR_EXEC]);
-  assert.deepEqual(await s.hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', argv: ['id'], as_root: true }, principal: execOnly }),
+  assert.deepEqual(await s.hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', workspace_id: WS, argv: ['id'], as_root: true }, principal: execOnly }),
     { ok: false, error: 'forbidden' });
-  assert.equal((await s.hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', argv: ['id'] }, principal: execOnly })).ok, true);
+  assert.equal((await s.hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', workspace_id: WS, argv: ['id'] }, principal: execOnly })).ok, true);
   // Deny.
   const denied = await s.call('operator_run', { argv: ['rm', s.host.p('srv/rw/third.txt')] });
   await s.press(denied.approval_id, 'd');
