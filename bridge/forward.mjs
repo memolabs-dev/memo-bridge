@@ -133,7 +133,7 @@ export function createForwarder({ requestAgent, host = 'vps', softDeadlineMs = S
       if (!retrySafe) return finish(withId(await settled));
 
       let timer;
-      const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(null), softDeadlineMs); timer.unref?.(); });
+      const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(null), softDeadlineMs); });
       const first = await Promise.race([settled, deadline]);
       clearTimeout(timer);
       if (first !== null) return finish(withId(first));
