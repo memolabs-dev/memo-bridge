@@ -8,7 +8,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, st
 import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -217,6 +217,25 @@ CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(host, status, created_at, id);
 CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(claim_id, status);
 `;
 
+// v4: remote clients (Phase 5). Additive only, so a v3 database keeps every row:
+//   events.via          'stdio' | 'hub' when the principal says where it came from
+//   events.client_type  the client kind derived by the server (D6), never from arguments
+//   events.request_id   the hub's request id: joins the hub journal line and this event
+//   workspaces.client_session  hash of the conversation hint recorded at workspace_open (D8)
+// ALTER TABLE ADD COLUMN is applied only to a column that is missing: a database rewound to an
+// older user_version (tests, a partial restore) may already have them.
+const V4_COLUMNS = Object.freeze([
+  ['events', 'via', 'TEXT'], ['events', 'client_type', 'TEXT'], ['events', 'request_id', 'TEXT'],
+  ['workspaces', 'client_session', 'TEXT']
+]);
+function migrateV4(db) {
+  for (const [table, column, type] of V4_COLUMNS) {
+    const present = db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === column);
+    if (!present) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS events_request ON events(request_id)');
+}
+
 // The idempotency key of a mutating call: sha256(principal|op|client_request_id), the same
 // derivation the hub uses, so a retry through either path finds the first result.
 export const CLIENT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -224,7 +243,40 @@ export function requestKey(principalId, op, clientRequestId) {
   return createHash('sha256').update(`${principalId}|${op}|${clientRequestId}`).digest('hex');
 }
 
-const WORKSPACE_COLUMNS = ['status', 'branch', 'updated_at', 'closed_at'];
+// Run a mutating operation once per client_request_id (REQ-P4-07, Phase 4 FU-5, REQ-P5-15).
+// - a stored first result is returned as is, with replayed: true, and `run` is not called;
+// - a retry that arrives while the first call is still running in this process waits for it
+//   and gets the same result (the soft deadline path answers 'accepted' and the model retries);
+// - only a successful result is stored: a refusal or a failure can be retried for real.
+// Results kept in the requests table must stay small (ids, shas, URLs).
+const inflight = new WeakMap(); // store -> Map(key -> Promise)
+export async function runOnce(store, { principal, op, clientRequestId, now = Date.now() }, run) {
+  if (clientRequestId === undefined || clientRequestId === null) return run();
+  if (!CLIENT_REQUEST_ID_RE.test(String(clientRequestId))) return { ok: false, error: 'invalid_input', detail: 'client_request_id' };
+  const key = requestKey(principal, op, clientRequestId);
+  const decode = row => { try { return { ...JSON.parse(row.result_json), replayed: true }; } catch { return { ok: false, error: 'store_unavailable' }; } };
+  const first = await store.transaction(repo => repo.getRequest(key), { write: false });
+  if (first) return decode(first);
+  let running = inflight.get(store);
+  if (!running) { running = new Map(); inflight.set(store, running); }
+  if (running.has(key)) return { ...(await running.get(key)), replayed: true };
+  const attempt = (async () => {
+    const result = await run();
+    if (result?.ok === true) {
+      const stored = await store.transaction(repo => {
+        repo.insertRequest({ key, principal, op, result_json: JSON.stringify(result), created_at: now });
+        return repo.getRequest(key);
+      }).catch(() => null);
+      // Another process recorded a result first: the first result wins.
+      if (stored && stored.result_json !== JSON.stringify(result)) return decode(stored);
+    }
+    return result;
+  })();
+  running.set(key, attempt);
+  try { return await attempt; } finally { running.delete(key); }
+}
+
+const WORKSPACE_COLUMNS =['status', 'branch', 'updated_at', 'closed_at', 'client_session'];
 const CLAIM_COLUMNS = ['fence_sha', 'expires_at', 'state', 'outcome', 'updated_at'];
 const WORKTREE_COLUMNS = ['status', 'issue_ref', 'updated_at', 'removed_at'];
 const JOB_COLUMNS = ['status', 'exit_code', 'pid', 'started_at', 'ended_at', 'summary', 'unit', 'status_reason'];
@@ -240,9 +292,9 @@ function repository(db) {
   return {
     insertWorkspace(w) {
       db.prepare(`INSERT INTO workspaces (id, principal, client_type, client_label, project_id, host, branch, status,
-        created_at, updated_at, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`)
+        created_at, updated_at, closed_at, client_session) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`)
         .run(w.id, w.principal, w.client_type, w.client_label ?? null, w.project_id, w.host, w.branch ?? null,
-          w.status, w.created_at, w.updated_at);
+          w.status, w.created_at, w.updated_at, w.client_session ?? null);
     },
     getWorkspace(id) { return plain(db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id)); },
     listWorkspaces({ principal, status, limit }) {
@@ -353,13 +405,16 @@ function repository(db) {
     },
     getEvent(seq) { return plain(db.prepare('SELECT * FROM events WHERE seq = ?').get(seq)); },
     appendEvent(e) {
-      db.prepare(`INSERT INTO events (at, principal, workspace_id, issue_ref, op, outcome, code)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(e.at, e.principal, e.workspace_id ?? null, e.issue_ref ?? null, e.op, e.outcome, e.code ?? null);
+      db.prepare(`INSERT INTO events (at, principal, workspace_id, issue_ref, op, outcome, code, via, client_type, request_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(e.at, e.principal, e.workspace_id ?? null, e.issue_ref ?? null, e.op, e.outcome, e.code ?? null,
+          e.via ?? null, e.client_type ?? null, e.request_id ?? null);
     },
-    listEvents({ principal, issue_ref, workspace_id, limit }) {
+    listEvents({ principal, issue_ref, workspace_id, request_id, with_request_id = false, limit }) {
       const where = []; const values = [];
       if (principal) { where.push('principal = ?'); values.push(principal); }
+      if (request_id) { where.push('request_id = ?'); values.push(request_id); }
+      if (with_request_id) where.push('request_id IS NOT NULL');
       if (issue_ref) { where.push('issue_ref = ?'); values.push(issue_ref); }
       if (workspace_id) { where.push('workspace_id = ?'); values.push(workspace_id); }
       const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -385,6 +440,7 @@ function migrate(db) {
       if (current < 1) db.exec(SCHEMA);
       if (current < 2) db.exec(SCHEMA_V2);
       if (current < 3) db.exec(SCHEMA_V3);
+      if (current < 4) migrateV4(db);
       if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');

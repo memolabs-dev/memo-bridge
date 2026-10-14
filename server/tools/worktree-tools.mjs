@@ -4,6 +4,7 @@
 // and the audit journal. The principal comes from the runtime, never from tool arguments.
 import { z } from 'zod/v4';
 import { LIMITS, createWorktreeRunner } from '../runners/worktrees.mjs';
+import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
 
 export const WORKTREE_TOOLS = Object.freeze(['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files',
   'worktree_read_file', 'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove']);
@@ -13,7 +14,9 @@ const WRITES = new Set(['worktree_create', 'worktree_write_file', 'worktree_comm
 // Policy refusals are journaled as 'denied'; anything else that fails is an 'error'.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'no_live_claim', 'stale_lease', 'lease_held', 'issue_changed',
   'lease_denied', 'protected_branch', 'branch_changed', 'branch_exists', 'path_exists', 'path_not_allowed', 'wrong_host',
-  'worktree_dirty', 'unpushed_commits', 'worktree_removed', 'push_rejected', 'job_active', 'ignored_files', 'worktree_link_changed']);
+  'worktree_dirty', 'unpushed_commits', 'worktree_removed', 'push_rejected', 'job_active', 'ignored_files', 'worktree_link_changed',
+  // Phase 5 remote invariants (bridge/write-gate.mjs).
+  'path_protected', 'project_not_allowed', 'session_mismatch']);
 
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -32,14 +35,18 @@ export function registerWorktreeTools(server, getRuntime) {
     return runners.get(rt);
   };
 
-  const call = (op, method) => async raw => {
+  // extra.meta: the hub's per-request metadata ({request_id, client_session}) for a forwarded
+  // call (bridge/agent.mjs); absent on stdio. The runner reads ctx.meta, never tool arguments.
+  const call = (op, method) => async (raw, extra) => {
     const args = raw ?? {};
     let rt;
     try { rt = await getRuntime(); } catch { return result({ ok: false, error: 'store_unavailable' }); }
-    const ctx = { ids: {} };
+    const meta = extra?.meta && typeof extra.meta === 'object' ? extra.meta : null;
+    const ctx = { ids: {}, meta };
+    const requestId = typeof meta?.request_id === 'string' ? { request_id: meta.request_id } : {};
     // Authorization first, before any validation, so every refusal is journaled.
     if (!rt.authorize(op)) {
-      await rt.audit(op, 'denied', 'forbidden', idsFrom(args));
+      await rt.audit(op, 'denied', 'forbidden', { ...idsFrom(args), ...requestId });
       return result({ ok: false, error: 'forbidden' });
     }
     let data;
@@ -52,7 +59,7 @@ export function registerWorktreeTools(server, getRuntime) {
     const failed = data?.ok === false;
     const denied = failed && DENIED.has(data.error);
     if (WRITES.has(op) || denied) {
-      await rt.audit(op, failed ? (denied ? 'denied' : 'error') : 'ok', failed ? data.error : null, { ...idsFrom(args), ...ctx.ids });
+      await rt.audit(op, failed ? (denied ? 'denied' : 'error') : 'ok', failed ? data.error : null, { ...idsFrom(args), ...ctx.ids, ...requestId });
     }
     return result(data);
   };
@@ -128,7 +135,9 @@ export function registerWorktreeTools(server, getRuntime) {
 
   server.registerTool('worktree_push', {
     description: 'Push the worktree branch to origin (--set-upstream, never --force, never the default branch as the remote reports it) after the lease ledger re-verifies the claim, then record a checkpoint so another machine can resume. The remote branch must not exist yet, or be at a commit this worktree pushed; otherwise push_rejected. Never merges.',
-    inputSchema: z.object({ worktree_id: worktreeId }),
+    inputSchema: z.object({ worktree_id: worktreeId,
+      client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
+        .describe('Your own id for this push attempt (8 to 128 of A-Z a-z 0-9 _ -). A retry with the same id returns the first result instead of pushing again.') }),
     annotations: { ...local, openWorldHint: true }
   }, call('worktree_push', 'push'));
 

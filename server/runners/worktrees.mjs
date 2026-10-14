@@ -21,7 +21,12 @@
 //   credential helper is switched off for those calls and no token is ever in argv or env;
 // - every path stays inside the worktree after realpath, and never under .git;
 // - every output is bounded, and text returned to models has control and bidi characters
-//   replaced.
+//   replaced;
+// - Phase 5 (D9): nothing under .github/workflows, .github/actions or .github/dependabot.yml is
+//   written, committed or pushed, whoever asks (a workflow change on a same-repository branch
+//   runs on CI runners: lab-infra #161); a remote principal creates worktrees only for an
+//   allowlisted project; writes check the D8 session binding when the caller's session hash
+//   is known; worktree_push takes client_request_id (a retry returns the first result).
 // Authorization and audit happen in server/tools/worktree-tools.mjs before these functions run.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -34,6 +39,9 @@ import { projectInfo } from '../catalog.mjs';
 import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
 import { PUSH_CREDENTIAL, credentialPath, credentialsRequired, parseIssueRef, readTokenFile } from '../coordinator/issue-lease.mjs';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
+import { runOnce } from '../coordinator/store.mjs';
+import { isProtectedRepoPath, protectedPaths, remotePolicyFromEnv, remoteProjectRefusal, requestMeta,
+  sessionBindingDecision } from '../../bridge/write-gate.mjs';
 import { ACTIVE_JOB_STATUSES } from './executor.mjs';
 import { reconcileJob } from './jobs.mjs';
 
@@ -402,6 +410,13 @@ async function trackFile(rt, id) {
   return join(dir, `${id}.json`);
 }
 const readTrack = (rt, id) => withTrack(rt, id, () => null).catch(() => ({ head: null, written: {} }));
+// Commits worktree_push sent for this worktree (newest last), for github_create_pr: a remote
+// pull request is opened only on a head this workspace pushed itself.
+export async function pushedCommits(rt, worktreeId) {
+  if (typeof worktreeId !== 'string' || !WT_RE.test(worktreeId)) return [];
+  const track = await readTrack(rt, worktreeId);
+  return Array.isArray(track.pushed) ? track.pushed.filter(c => typeof c === 'string') : [];
+}
 const digest = buffer => createHash('sha256').update(buffer).digest('hex');
 
 // ---------------------------------------------------------------------------------------------
@@ -439,7 +454,31 @@ function commitMessage(value) {
 
 // ---------------------------------------------------------------------------------------------
 
-export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) {
+// Paths a commit or a push would carry that touch a protected path (D9), bounded. `range` is
+// either ['--cached'] (the index against HEAD) or [base, 'HEAD'] plus the per-commit history of
+// base..HEAD, so a change added then reverted in a later commit is still seen.
+async function protectedChanges(root, env, { staged = false, base = null } = {}) {
+  const names = [];
+  const collect = r => {
+    if (r.code !== 0 || r.truncated) return false;
+    names.push(...r.stdout.toString('utf8').split('\0').filter(Boolean));
+    return true;
+  };
+  const diffArgs = ['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv'];
+  if (staged) {
+    if (!collect(await runGit(root, [...diffArgs, '--cached'], { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
+  } else {
+    if (!collect(await runGit(root, [...diffArgs, base, 'HEAD'], { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
+    if (!collect(await runGit(root, ['log', '--format=', '--name-only', '-z', '--no-renames', '-m', `${base}..HEAD`],
+      { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
+  }
+  return protectedPaths([...new Set(names)]);
+}
+const protectedRefusal = hits => fail('path_protected',
+  `${hits.count} change(s) under .github/workflows, .github/actions or .github/dependabot.yml: ${hits.shown.join(', ')}`);
+
+export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
+  remotePolicy = typeof rt?.remotePolicy === 'function' ? rt.remotePolicy() : remotePolicyFromEnv(runnerEnv) } = {}) {
   // Local Git calls never see the credentials directory; network calls get networkGit(runnerEnv).
   const env = gitBaseEnv(runnerEnv);
   const baseGitEnv = env; // methods below shadow `env` with the pinned one from locate()
@@ -474,6 +513,17 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
     if (forWrite && workspace.status !== 'active') return { error: fail('workspace_closed') };
     return { row, workspace };
   }
+
+  // D8: a write from a conversation other than the one the workspace is bound to. ctx.meta is
+  // the per-request metadata the runtime received next to the principal, never tool
+  // arguments. In 'warn' mode the call goes on and its result carries session_warning.
+  function sessionCheck(workspace, ctx) {
+    const decision = sessionBindingDecision(workspace.client_session, requestMeta(ctx.meta).client_session, remotePolicy.session_binding);
+    if (!decision.ok) return { error: decision };
+    if (decision.warning) ctx.sessionWarning = decision.warning;
+    return {};
+  }
+  const warned = (ctx, result) => (ctx.sessionWarning && result?.ok ? { ...result, session_warning: ctx.sessionWarning } : result);
 
   // Local mirror check: the workspace holds an unexpired claim on the worktree's Issue.
   async function liveClaim(row, workspace) {
@@ -580,6 +630,10 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const ws = await ownedWorkspace(args.workspace_id, ctx);
       if (ws.error) return ws.error;
       const { workspace } = ws;
+      const notAllowed = remoteProjectRefusal(rt.principal, workspace.project_id, remotePolicy);
+      if (notAllowed) return notAllowed;
+      const bound = sessionCheck(workspace, ctx);
+      if (bound.error) return bound.error;
       if (workspace.host !== rt.host) return fail('wrong_host', `workspace works on ${workspace.host}`);
       if (issue) {
         const claims = await read(repo => repo.claimsOf(workspace.id, 'claimed'));
@@ -657,7 +711,7 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
         return fail(recorded === false ? 'workspace_closed' : 'store_unavailable');
       }
       await withTrack(rt, id, () => ({ head: baseCommit, written: {} })).catch(() => {});
-      return { ok: true, worktree: publicWorktree({ ...row, status: 'active', removed_at: null }) };
+      return warned(ctx, { ok: true, worktree: publicWorktree({ ...row, status: 'active', removed_at: null }) });
     },
 
     async status(args, ctx) {
@@ -798,12 +852,15 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
     async writeFile(args, ctx) {
       const rel = normalizeRelPath(args.path);
       if (rel === null) return fail('invalid_input', 'path');
+      if (isProtectedRepoPath(rel)) return protectedRefusal(protectedPaths([rel]));
       if (typeof args.content !== 'string') return fail('invalid_input', 'content');
       const data = Buffer.from(args.content, 'utf8');
       if (data.length > LIMITS.writeBytes) return fail('invalid_input', 'content too large');
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
+      const bound = sessionCheck(workspace, ctx);
+      if (bound.error) return bound.error;
       const held = await liveClaim(row, workspace);
       if (held.error) return held.error;
       const located = await locate(row);
@@ -826,6 +883,10 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       }
       let dir = await realpath(ancestor);
       if (!insideWorktree(root, dir) || !(await stat(dir)).isDirectory()) return fail('path_not_allowed', 'outside the worktree or under .git');
+      // The path as it lands after symlinked parents are resolved: a link to .github must not
+      // carry a write into a protected directory.
+      const landing = [relative(root, dir).split(sep).filter(Boolean).join('/'), ...parts.slice(existing), name].filter(Boolean).join('/');
+      if (isProtectedRepoPath(landing)) return protectedRefusal(protectedPaths([landing]));
       for (const part of parts.slice(existing)) {
         dir = join(dir, part);
         try { await mkdir(dir, { mode: 0o755 }); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
@@ -859,7 +920,7 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
         if (keys.length > LIMITS.trackedFiles) delete written[keys[0]];
         return { ...track, written };
       }).catch(() => {});
-      return { ok: true, path: relReal, bytes: data.length, created };
+      return warned(ctx, { ok: true, path: relReal, bytes: data.length, created });
     },
 
     async diff(args, ctx) {
@@ -893,6 +954,8 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
+      const bound = sessionCheck(workspace, ctx);
+      if (bound.error) return bound.error;
       const busy = await unitJobActive(row);
       if (busy) return busy.error;
       const located = await locate(row);
@@ -915,139 +978,167 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const staged = await runGit(root, ['diff', '--cached', '--quiet', '--no-ext-diff'], { readOnly: true, env, maxBytes: 1024 });
       if (staged.code === 0) return fail('nothing_to_commit');
       if (staged.code !== 1) return fail('git_failed', 'diff --cached');
+      // Whatever wrote them (a job, an editor, a symlink), protected paths are never committed.
+      // The index is put back to HEAD (the working tree is untouched) so nothing stays staged.
+      const touched = await protectedChanges(root, env, { staged: true });
+      if (!touched || touched.count) {
+        await runGit(root, ['reset', '--quiet'], { env, maxBytes: 16 * 1024 });
+        return touched ? protectedRefusal(touched) : fail('git_failed', 'diff --cached --name-only');
+      }
       const committed = await runGit(root, ['commit', '--quiet', '--no-verify', '-m', message], { env, maxBytes: 64 * 1024, timeoutMs: 60_000 });
       if (committed.code !== 0) return fail('git_failed', committed.timedOut ? 'commit timeout' : 'commit');
       const head = await revParse(root, 'HEAD', env);
       const shortstat = await runGit(root, ['show', '--shortstat', '--format=', '--no-ext-diff', 'HEAD'], { readOnly: true, env, maxBytes: 1024 });
       await withTrack(rt, row.id, track => ({ ...track, head, written: {} })).catch(() => {});
       await write(repo => repo.updateWorktree(row.id, { updated_at: now() })).catch(() => {});
-      return { ok: true, commit: head, branch: row.branch, summary: cleanLine(out(shortstat), 200) };
+      return warned(ctx, { ok: true, commit: head, branch: row.branch, summary: cleanLine(out(shortstat), 200) });
     },
 
     async push(args, ctx) {
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
-      const busy = await unitJobActive(row);
-      if (busy) return busy.error;
-      const located = await locate(row);
-      if (located.error) return located.error;
-      const { root } = located;
-      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
-      const own = await onOwnBranch(root, row, env);
-      if (own.error) return own.error;
-      const head = await revParse(root, 'HEAD', env);
-      if (!head) return fail('git_failed', 'HEAD');
-      // Ask the remote itself (network): its default branch and its branches. The local
-      // origin/HEAD can be missing or stale, and a narrow fetch refspec hides other branches.
-      const unpinned = await networkGit(runnerEnv);
-      if (unpinned.error) return unpinned.error;
-      const net = { ...unpinned, env: { ...unpinned.env, ...located.pins } };
-      const remote = await remoteBranches(root, net);
-      if (!remote) return fail('push_failed', 'ls-remote');
-      if (isProtectedBranch(row.branch, [remote.head, await defaultBranch(root, env)])) return fail('protected_branch');
-      const variants = sameIgnoringCase([...remote.heads.keys()], row.branch).filter(name => name !== row.branch);
-      if (variants.length) return fail('push_rejected', 'remote_case_variant');
-      // The remote branch must not exist yet, or be at a commit this worktree pushed: a push
-      // never takes over (fast-forwards) a branch someone else created or moved.
-      const existing = remote.heads.get(row.branch);
-      if (existing) {
-        const track = await readTrack(rt, row.id);
-        if (!(track.pushed ?? []).includes(existing)) return fail('push_rejected', 'remote_branch_not_ours');
-      }
-      const held = await verifiedClaim(row, workspace);
-      if (held.error) return held.error;
-      const busyAfter = await unitJobActive(row);
-      if (busyAfter) return busyAfter.error;
-
-      // Explicit refspec without '+': a non-fast-forward is rejected by the remote, never forced.
-      const ref = `refs/heads/${row.branch}`;
-      const pushed = await runGit(root, [...net.config, 'push', '--porcelain', '--set-upstream', 'origin', `${ref}:${ref}`],
-        { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env: net.env });
-      if (pushed.code !== 0) {
-        const text = `${pushed.stdout.toString('utf8')}\n${pushed.stderr}`;
-        if (/\[rejected\]|non-fast-forward|fetch first/.test(text)) return fail('push_rejected', 'non_fast_forward');
-        if (/\[remote rejected\]/.test(text)) return fail('push_rejected', 'remote_rejected');
-        return fail('push_failed', pushed.timedOut ? 'timeout' : `exit ${pushed.code}`);
-      }
-      const remoteCommit = await revParse(root, `refs/remotes/origin/${row.branch}`, env);
-      await withTrack(rt, row.id, track => ({ ...track, head, pushed: [...(track.pushed ?? []).filter(c => c !== head), head].slice(-PUSHED_KEEP) }))
-        .catch(() => {});
-
-      // Durability is tracked by the Coordinator: a checkpoint under the workspace's claim.
-      let checkpoint;
-      try {
-        const coordinator = rt.coordinator();
-        const record = coordinator.taskCheckpoint ?? coordinator.issueCheckpoint;
-        const result = await record({ workspace_id: workspace.id, issue: row.issue_ref, task: row.issue_ref,
-          claim_id: held.claim.claim_id, fence: held.claim.fence_sha, branch: row.branch, commit: head,
-          note: `pushed from worktree ${row.id}` });
-        checkpoint = result?.ok ? { ok: true, durability: result.durability } : fail(result?.error ?? 'checkpoint_failed', result?.detail);
-      } catch {
-        checkpoint = fail('store_unavailable');
-      }
-      return {
-        ok: true, branch: row.branch, remote: 'origin', remote_ref: ref, commit: head, remote_commit: remoteCommit, checkpoint,
-        ...(checkpoint.ok ? {} : { warning: 'pushed, but the checkpoint was not recorded; record it again with task_checkpoint' })
-      };
+      const bound = sessionCheck(workspace, ctx);
+      if (bound.error) return bound.error;
+      // Idempotency (Phase 4 FU-5, REQ-P5-15): a retry with the same client_request_id returns
+      // the first successful push instead of pushing again.
+      const result = await runOnce(rt.store(), { principal: rt.principal.id, op: 'worktree_push',
+        clientRequestId: args.client_request_id, now: now() }, () => pushOnce(row, workspace));
+      return warned(ctx, result);
     },
 
     async remove(args, ctx) {
-      // Cleanup is allowed from a closed workspace too, like releasing a claim.
-      const wt = await ownedWorktree(args.worktree_id, ctx, { allowRemoved: true });
-      if (wt.error) return wt.error;
-      const { row } = wt;
-      if (row.status === 'removed') return { ok: true, worktree: publicWorktree(row), already_removed: true };
-      if (args.discard_ignored !== undefined && typeof args.discard_ignored !== 'boolean') return fail('invalid_input', 'discard_ignored');
-      // A job runs inside the directory: cancel it first (job_cancel).
-      // Reconciled first: a job whose processes are gone does not block the removal.
-      const activeJobs = await write(repo => ACTIVE_JOB_STATUSES.flatMap(status =>
-        repo.listJobs({ workspace_id: row.workspace_id, status, limit: 1000 }).filter(job => job.worktree_id === row.id))
-        .map(job => reconcileJob(repo, job, now())).filter(job => ACTIVE_JOB_STATUSES.includes(job.status)));
-      if (activeJobs.length) return fail('job_active', `${activeJobs.length} job(s) waiting or running in this worktree; cancel them with job_cancel`);
-      const markRemoved = async detail => {
-        const at = now();
-        await write(repo => repo.updateWorktree(row.id, { status: 'removed', removed_at: at, updated_at: at }));
-        trackQueues.delete(row.id);
-        await trackFile(rt, row.id).then(file => rm(file, { force: true })).catch(() => {});
-        return { ok: true, worktree: publicWorktree({ ...row, status: 'removed', removed_at: at }), ...(detail ? { detail } : {}) };
-      };
-      const located = await locate(row);
-      if (located.error?.error === 'worktree_missing') {
-        // Deleted by hand: nothing left to lose here. Git's own administrative entry is left for
-        // `git worktree prune`, which also touches other worktrees and is not run from here.
-        return markRemoved('path was already gone');
-      }
-      if (located.error) return located.error;
-      const { root } = located;
-      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
-      const changes = await statusEntries(root, env);
-      if (!changes) return fail('git_failed', 'status');
-      if (changes.count > 0) {
-        const untracked = changes.entries.filter(e => e.status === '??').length;
-        return fail('worktree_dirty', `${changes.count - untracked} modified, ${untracked} untracked`);
-      }
-      // Ignored files (.env, node_modules, build output) are not in the status above, and
-      // `git worktree remove` deletes them: only with explicit consent.
-      const ignored = await runGit(root, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'],
-        { readOnly: true, env, maxBytes: 256 * 1024 });
-      if (ignored.code !== 0 && !ignored.truncated) return fail('git_failed', 'ls-files');
-      const ignoredNames = ignored.stdout.toString('utf8').split('\0').filter(Boolean);
-      if (ignored.truncated) ignoredNames.pop();
-      if (ignoredNames.length && args.discard_ignored !== true) {
-        const shown = ignoredNames.slice(0, 10).map(name => cleanLine(name, 200)).join(', ');
-        return fail('ignored_files', `${ignoredNames.length}${ignored.truncated ? '+' : ''} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} would be deleted (${shown}${ignoredNames.length > 10 ? ', ...' : ''}); pass discard_ignored: true to delete them`);
-      }
-      const unpushed = await runGit(root, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], { readOnly: true, env, maxBytes: 100 });
-      if (unpushed.code !== 0) return fail('git_failed', 'rev-list');
-      const count = Number(out(unpushed));
-      if (count > 0) return fail('unpushed_commits', `${count} commit(s) not on origin`);
-      // The common dir validated by locate(), not asked from inside the worktree; `worktree
-      // remove` runs from the repository itself, without the worktree's pins.
-      // No --force: git itself refuses a worktree that became dirty in the meantime.
-      const removed = await runGit(located.commonDir, ['worktree', 'remove', '--', row.path], { env: baseGitEnv, maxBytes: 16 * 1024 });
-      if (removed.code !== 0) return fail('git_failed', 'worktree remove');
-      return markRemoved(ignoredNames.length ? `${ignoredNames.length} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} deleted` : undefined);
+      return removeWorktree(args, ctx);
     }
   };
+
+  async function pushOnce(row, workspace) {
+    const busy = await unitJobActive(row);
+    if (busy) return busy.error;
+    const located = await locate(row);
+    if (located.error) return located.error;
+    const { root } = located;
+    const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
+    const own = await onOwnBranch(root, row, env);
+    if (own.error) return own.error;
+    const head = await revParse(root, 'HEAD', env);
+    if (!head) return fail('git_failed', 'HEAD');
+    // Nothing the branch carries since its base may touch a protected path, including commits
+    // made outside Memo Bridge (a job, a terminal) and changes reverted by a later commit.
+    const touched = await protectedChanges(root, env, { base: row.base_commit });
+    if (!touched) return fail('git_failed', 'protected path check');
+    if (touched.count) return protectedRefusal(touched);
+    // Ask the remote itself (network): its default branch and its branches. The local
+    // origin/HEAD can be missing or stale, and a narrow fetch refspec hides other branches.
+    const unpinned = await networkGit(runnerEnv);
+    if (unpinned.error) return unpinned.error;
+    const net = { ...unpinned, env: { ...unpinned.env, ...located.pins } };
+    const remote = await remoteBranches(root, net);
+    if (!remote) return fail('push_failed', 'ls-remote');
+    if (isProtectedBranch(row.branch, [remote.head, await defaultBranch(root, env)])) return fail('protected_branch');
+    const variants = sameIgnoringCase([...remote.heads.keys()], row.branch).filter(name => name !== row.branch);
+    if (variants.length) return fail('push_rejected', 'remote_case_variant');
+    // The remote branch must not exist yet, or be at a commit this worktree pushed: a push
+    // never takes over (fast-forwards) a branch someone else created or moved.
+    const existing = remote.heads.get(row.branch);
+    if (existing) {
+      const track = await readTrack(rt, row.id);
+      if (!(track.pushed ?? []).includes(existing)) return fail('push_rejected', 'remote_branch_not_ours');
+    }
+    const held = await verifiedClaim(row, workspace);
+    if (held.error) return held.error;
+    const busyAfter = await unitJobActive(row);
+    if (busyAfter) return busyAfter.error;
+
+    // Explicit refspec without '+': a non-fast-forward is rejected by the remote, never forced.
+    const ref = `refs/heads/${row.branch}`;
+    const pushed = await runGit(root, [...net.config, 'push', '--porcelain', '--set-upstream', 'origin', `${ref}:${ref}`],
+      { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env: net.env });
+    if (pushed.code !== 0) {
+      const text = `${pushed.stdout.toString('utf8')}\n${pushed.stderr}`;
+      if (/\[rejected\]|non-fast-forward|fetch first/.test(text)) return fail('push_rejected', 'non_fast_forward');
+      if (/\[remote rejected\]/.test(text)) return fail('push_rejected', 'remote_rejected');
+      return fail('push_failed', pushed.timedOut ? 'timeout' : `exit ${pushed.code}`);
+    }
+    const remoteCommit = await revParse(root, `refs/remotes/origin/${row.branch}`, env);
+    await withTrack(rt, row.id, track => ({ ...track, head, pushed: [...(track.pushed ?? []).filter(c => c !== head), head].slice(-PUSHED_KEEP) }))
+      .catch(() => {});
+
+    // Durability is tracked by the Coordinator: a checkpoint under the workspace's claim.
+    let checkpoint;
+    try {
+      const coordinator = rt.coordinator();
+      const record = coordinator.taskCheckpoint ?? coordinator.issueCheckpoint;
+      const result = await record({ workspace_id: workspace.id, issue: row.issue_ref, task: row.issue_ref,
+        claim_id: held.claim.claim_id, fence: held.claim.fence_sha, branch: row.branch, commit: head,
+        note: `pushed from worktree ${row.id}` });
+      checkpoint = result?.ok ? { ok: true, durability: result.durability } : fail(result?.error ?? 'checkpoint_failed', result?.detail);
+    } catch {
+      checkpoint = fail('store_unavailable');
+    }
+    return {
+      ok: true, branch: row.branch, remote: 'origin', remote_ref: ref, commit: head, remote_commit: remoteCommit, checkpoint,
+      ...(checkpoint.ok ? {} : { warning: 'pushed, but the checkpoint was not recorded; record it again with task_checkpoint' })
+    };
+  }
+
+  async function removeWorktree(args, ctx) {
+    // Cleanup is allowed from a closed workspace too, like releasing a claim.
+    const wt = await ownedWorktree(args.worktree_id, ctx, { allowRemoved: true });
+    if (wt.error) return wt.error;
+    const { row } = wt;
+    const bound = sessionCheck(wt.workspace, ctx);
+    if (bound.error) return bound.error;
+    if (row.status === 'removed') return { ok: true, worktree: publicWorktree(row), already_removed: true };
+    if (args.discard_ignored !== undefined && typeof args.discard_ignored !== 'boolean') return fail('invalid_input', 'discard_ignored');
+    // A job runs inside the directory: cancel it first (job_cancel).
+    // Reconciled first: a job whose processes are gone does not block the removal.
+    const activeJobs = await write(repo => ACTIVE_JOB_STATUSES.flatMap(status =>
+      repo.listJobs({ workspace_id: row.workspace_id, status, limit: 1000 }).filter(job => job.worktree_id === row.id))
+      .map(job => reconcileJob(repo, job, now())).filter(job => ACTIVE_JOB_STATUSES.includes(job.status)));
+    if (activeJobs.length) return fail('job_active', `${activeJobs.length} job(s) waiting or running in this worktree; cancel them with job_cancel`);
+    const markRemoved = async detail => {
+      const at = now();
+      await write(repo => repo.updateWorktree(row.id, { status: 'removed', removed_at: at, updated_at: at }));
+      trackQueues.delete(row.id);
+      await trackFile(rt, row.id).then(file => rm(file, { force: true })).catch(() => {});
+      return { ok: true, worktree: publicWorktree({ ...row, status: 'removed', removed_at: at }), ...(detail ? { detail } : {}) };
+    };
+    const located = await locate(row);
+    if (located.error?.error === 'worktree_missing') {
+      // Deleted by hand: nothing left to lose here. Git's own administrative entry is left for
+      // `git worktree prune`, which also touches other worktrees and is not run from here.
+      return markRemoved('path was already gone');
+    }
+    if (located.error) return located.error;
+    const { root } = located;
+    const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
+    const changes = await statusEntries(root, env);
+    if (!changes) return fail('git_failed', 'status');
+    if (changes.count > 0) {
+      const untracked = changes.entries.filter(e => e.status === '??').length;
+      return fail('worktree_dirty', `${changes.count - untracked} modified, ${untracked} untracked`);
+    }
+    // Ignored files (.env, node_modules, build output) are not in the status above, and
+    // `git worktree remove` deletes them: only with explicit consent.
+    const ignored = await runGit(root, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'],
+      { readOnly: true, env, maxBytes: 256 * 1024 });
+    if (ignored.code !== 0 && !ignored.truncated) return fail('git_failed', 'ls-files');
+    const ignoredNames = ignored.stdout.toString('utf8').split('\0').filter(Boolean);
+    if (ignored.truncated) ignoredNames.pop();
+    if (ignoredNames.length && args.discard_ignored !== true) {
+      const shown = ignoredNames.slice(0, 10).map(name => cleanLine(name, 200)).join(', ');
+      return fail('ignored_files', `${ignoredNames.length}${ignored.truncated ? '+' : ''} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} would be deleted (${shown}${ignoredNames.length > 10 ? ', ...' : ''}); pass discard_ignored: true to delete them`);
+    }
+    const unpushed = await runGit(root, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], { readOnly: true, env, maxBytes: 100 });
+    if (unpushed.code !== 0) return fail('git_failed', 'rev-list');
+    const count = Number(out(unpushed));
+    if (count > 0) return fail('unpushed_commits', `${count} commit(s) not on origin`);
+    // The common dir validated by locate(), not asked from inside the worktree; `worktree
+    // remove` runs from the repository itself, without the worktree's pins.
+    // No --force: git itself refuses a worktree that became dirty in the meantime.
+    const removed = await runGit(located.commonDir, ['worktree', 'remove', '--', row.path], { env: baseGitEnv, maxBytes: 16 * 1024 });
+    if (removed.code !== 0) return fail('git_failed', 'worktree remove');
+    return markRemoved(ignoredNames.length ? `${ignoredNames.length} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} deleted` : undefined);
+  }
 }

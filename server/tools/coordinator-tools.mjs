@@ -8,6 +8,7 @@
 import { z } from 'zod/v4';
 import { CLIENT_TYPES, HOSTS, SUMMARY_MAX, TASKS_LIMIT } from '../coordinator/index.mjs';
 import { LEASE_TTL, OUTCOMES } from '../coordinator/issue-lease.mjs';
+import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
 
 export const COORDINATOR_TOOLS = Object.freeze(['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close',
   'workspace_recover', 'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete',
@@ -28,7 +29,9 @@ const ttl = z.number().int().min(LEASE_TTL.min).max(LEASE_TTL.max).optional()
 // opened lazily) or a coordinator directly. Storage opens lazily so the read-only tools of
 // other modules keep working when the private state directory is unavailable.
 export function registerCoordinatorTools(server, getService) {
-  const call = method => async args => {
+  // extra.meta is the hub's per-request metadata (request id, session hash) when the runtime
+  // serves a forwarded call (bridge/agent.mjs); stdio calls have none. Never tool arguments.
+  const call = method => async (args, extra) => {
     let coordinator;
     try {
       const service = await getService();
@@ -38,7 +41,7 @@ export function registerCoordinatorTools(server, getService) {
       const code = String(error?.message ?? '');
       return result({ ok: false, error: 'store_unavailable', ...(/^state_[a-z_]{1,40}$/.test(code) ? { detail: code } : {}) });
     }
-    return result(await coordinator[method](args ?? {}));
+    return result(await coordinator[method](args ?? {}, extra?.meta ?? null));
   };
 
   server.registerTool('workspace_open', {
@@ -72,7 +75,7 @@ export function registerCoordinatorTools(server, getService) {
   }, call('workspaceClose'));
 
   server.registerTool('workspace_recover', {
-    description: 'Resume a workspace after losing context. Read-only snapshot: the workspace, each held claim reconciled with the shared ledger (still_held with the current fence, expired, lost or unknown), active worktrees, the last 10 checkpoints of its tasks, recent jobs, and the next safe actions. Writes nothing.',
+    description: 'Resume a workspace after losing context. Snapshot: the workspace, each held claim reconciled with the shared ledger (still_held with the current fence, expired, lost or unknown), active worktrees, the last 10 checkpoints of its tasks, recent jobs, and the next safe actions. Changes no task, file or branch; for a remote conversation it binds the workspace to the recovering conversation, and that rebind is journaled.',
     inputSchema: z.object({ workspace_id: workspaceId }),
     annotations: read
   }, call('workspaceRecover'));
@@ -94,7 +97,9 @@ export function registerCoordinatorTools(server, getService) {
 
   server.registerTool('task_claim', {
     description: 'Reserve a task for a workspace through the Memo Labs lease ledger (a Git ref in memolabs-dev/.github, visible to every machine). The Issue must be open and labelled agent:ready with one priority label, and it must belong to the workspace project when the project Git origin is known. Exactly one worker can hold it.',
-    inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl }),
+    inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl,
+      client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
+        .describe('Your own id for this claim attempt (8 to 128 of A-Z a-z 0-9 _ -). A retry with the same id returns the first result instead of claiming again.') }),
     annotations: write
   }, call('taskClaim'));
 

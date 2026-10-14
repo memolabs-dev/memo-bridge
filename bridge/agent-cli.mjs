@@ -24,7 +24,7 @@
 // No token is ever copied into process.env or logged.
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { createAgent, createRuntimeOperations, probeOperations } from './agent.mjs';
+import { createAgent, createRuntimeOperations, probeOperations, wireClaim } from './agent.mjs';
 
 const env = process.env;
 const mode = env.MEMO_BRIDGE_AGENT_MODE || 'probe';
@@ -74,7 +74,7 @@ if (mode === 'runtime') {
   base = createRuntime({ host: 'vps' });
   runtimeOps = await createRuntimeOperations({
     runtimeFor: principal => base.as(principal),
-    principalFromWire: wire => base.principalFromHub({ id: wire?.id }),
+    principalFromWire: wire => base.principalFromHub(wireClaim(wire)),
     log: (event, details) => log(event, details)
   });
   operations = { ...operations, ...runtimeOps.handlers };

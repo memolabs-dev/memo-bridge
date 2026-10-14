@@ -1,6 +1,48 @@
 # Memo Bridge private hub: security
 
-Sections below are dated. The first one is the current state (v0.5.0, Phase 4); the later ones keep the v0.2 record.
+Sections below are dated. The first one is the current state (v0.6.0, Phase 5); the Phase 4 section still describes the 9443 listener; the later ones keep the v0.2 record.
+
+## Phase 5 (v0.6.0): two listeners, OAuth on the public one only
+
+Status: code on branch `feat/phase-5-chatgpt-remote` (v0.6.0), **not merged and not deployed**. End-to-end description: `docs/REMOTE_CHATGPT.md`.
+
+### Two listeners (decision D4)
+
+| | 9443 (Phase 4, unchanged) | 9445 (Phase 5, public listener) |
+|---|---|---|
+| Bind | 127.0.0.1 | 127.0.0.1 or ::1 only; 9443 refused |
+| Reached by | loopback clients, the Mac tunnel, agents | Traefik only (`bridge.memolabs.dev`, mTLS to the OpenAI Connectors CA) |
+| Credentials | owner bearer, read-only bearer | OAuth access tokens only (`bridge/oidc.mjs`) |
+| Paths | `/mcp`, `/agent` (WebSocket), `/health` | `POST /mcp`, the two protected resource metadata paths; everything else 404, every upgrade 404 |
+| Off switch | none | not configured unless `MEMO_BRIDGE_REMOTE_CONFIG` is set; `remote_enabled: false` answers 503 |
+
+Traefik connects from 127.0.0.1, so loopback is no longer a trust signal: the separation is structural. `bridge/public-listener.mjs` imports neither the bearer check, nor the WebSocket server, nor `hub.mjs`, and refuses the bearer digests, agent keys and mutating-ops options. The only thing the public side takes from the hub is `requestAgent()`. The Phase 1 OIDC mode of 9443 is removed: `createHub` refuses the `oidc` options and `hub-cli` refuses `MEMO_BRIDGE_OIDC_SETTINGS`.
+
+### Principals added
+
+| Credential | Principal | Capabilities |
+|---|---|---|
+| Pocket ID access token of the owner, through an allowlisted client (9445) | `oidc:<owner sub>`, `client_type` from the client id | token scopes, capped by the ceiling; no write capability while the write gate is closed |
+
+On the runner the grant of `oidc:<owner sub>` comes from the same `remote.json` (`MEMO_BRIDGE_REMOTE_CONFIG`): read while `remote_writes` is `disabled`, owner once `enabled`, and a remote principal loses every write capability while the file does not enable writes, whatever `MEMO_BRIDGE_HUB_PRINCIPALS` says. Without a readable `remote.json` the runner maps no remote principal at all (`unknown_principal`).
+
+### Envelope additions (protocol v2, additive)
+
+`principal.client_type` (a label checked against the known client kinds, it grants nothing) and `meta: {request_id, client_session}` set by the hub's forwarder. Capabilities still never travel. Tool handlers read `meta` as `extra.meta`, never from arguments; the runtime journal records `via`, `client_type` and `request_id`.
+
+### Write gate, three layers (D7)
+
+1. Remote write tools are listed only with `remote_writes: "enabled"`; an unlisted call is refused by the SDK and journaled by the listener (`remote_denied`, `write_gate_closed`).
+2. With writes enabled, the hub does not start while any `actions.runner.*` unit runs, or would start at boot, as root, or when `systemctl` cannot tell (`bridge/write-gate.mjs`, `bridge/remote-boot.mjs`).
+3. The runner's own grant, above.
+
+Status on 2026-10-14: **closed** (`remote_writes: disabled` in lab-infra; lab-infra #161 open, the emargo runner is active as root).
+
+### Settings added
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MEMO_BRIDGE_REMOTE_CONFIG` (hub and runner) | unset | absolute path of `remote.json`; opens the public listener on the hub, sets the remote policy on the runner |
 
 ## Phase 4 (v0.5.0): protocol v2, principals and the write gate
 
@@ -22,7 +64,7 @@ Status: code on branch `feat/phase-4-vps-runner` (v0.5.0), **not merged and not 
 |---|---|---|
 | owner bearer (`owner.token`) | `hub:owner` | all |
 | read-only bearer (`readonly.token`, optional, O-9) | `hub:readonly` | read |
-| OIDC token (`MEMO_BRIDGE_OIDC_SETTINGS`, Phase 5) | mapped, but with no capability yet | none |
+| OIDC token on 9443 | removed in Phase 5 (OAuth is served on 9445 only, see above) | none |
 
 The hub forwards only the principal id. The runtime maps it again with its own grants (`MEMO_BRIDGE_HUB_PRINCIPALS`), which are the ceiling: a hub claim can only narrow them. Unset, those grants are read-only for every hub principal (`RUNTIME_DEFAULT_HUB_GRANTS`), so the write gate holds on the runner side as well: the memo-bridge uid holds the hub's TLS key, and could otherwise send mutating ops straight to the runner whatever `MEMO_BRIDGE_HUB_MUTATING_OPS` says. It then calls `authorize()` again before reading any argument (`runtime.as(principal)`). A refusal is journaled on both sides with principal, op and reason code, never the arguments. Mutating ops that carry `client_request_id` get a request key `sha256(principal|op|client_request_id)`, so a retry returns the first result.
 

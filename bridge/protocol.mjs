@@ -5,7 +5,14 @@
 //
 //   agent -> hub  {v:2, type:'hello', host, version, ops:[...], max_inflight}
 //   hub -> agent  {v:2, type:'welcome', ops:[...]}                 effective ops (registry ∩ advertised)
-//   hub -> agent  {v:2, type:'request', id, op, args, principal:{id}, timeout_ms, request_key?}
+//   hub -> agent  {v:2, type:'request', id, op, args, principal:{id, client_type?}, timeout_ms, request_key?,
+//                  meta?:{request_id?, client_session?}}
+//
+// Phase 5 adds two optional, additive fields (an older agent ignores them):
+//   principal.client_type  the client kind the hub authenticated (D6), a label that grants nothing
+//   meta                   per-request metadata set by the hub (bridge/forward.mjs): the request id
+//                          shared by the hub journal and the runtime event, and the hash of the
+//                          ChatGPT conversation hint (D8). Never tool arguments.
 //   agent -> hub  {v:2, type:'result', id, data}  |  {v:2, type:'error', id, code}
 //   either way    {v:2, type:'part', id, seq, last, data}            one slice of a message above 16 KiB
 //
@@ -37,6 +44,8 @@ export const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 export const OP_RE = /^[a-z][a-z0-9_]{0,63}$/;
 export const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const PRINCIPAL_ID_RE = /^[a-z]+:[A-Za-z0-9._@-]{1,120}$/;
+const CLIENT_TYPE_RE = /^[a-z][a-z-]{1,19}$/;
+const CLIENT_SESSION_RE = /^[0-9a-f]{32}$/;
 const VERSION_RE = /^[0-9A-Za-z.+-]{1,40}$/;
 
 // Error codes a hub or agent may put on the wire, plus the tool-level codes they wrap.
@@ -147,13 +156,25 @@ export function validateHello(msg, host) {
   return { ok: true, ops: [...new Set(msg.ops)], version, maxInFlight };
 }
 
-export function makeRequest({ id = newId(), op, args = {}, principal, timeoutMs, requestKey }) {
-  return { v: PROTOCOL_VERSION, type: 'request', id, op, args, principal: { id: principal.id },
-    timeout_ms: timeoutMs, ...(requestKey ? { request_key: requestKey } : {}) };
+// The per-request metadata that may travel: well-formed values only, anything else dropped.
+export function wireMeta(meta) {
+  const out = {};
+  if (typeof meta?.request_id === 'string' && ID_RE.test(meta.request_id)) out.request_id = meta.request_id;
+  if (typeof meta?.client_session === 'string' && CLIENT_SESSION_RE.test(meta.client_session)) out.client_session = meta.client_session;
+  return Object.keys(out).length ? out : null;
+}
+
+export function makeRequest({ id = newId(), op, args = {}, principal, timeoutMs, requestKey, meta = null }) {
+  const claim = { id: principal.id };
+  if (typeof principal.client_type === 'string' && CLIENT_TYPE_RE.test(principal.client_type)) claim.client_type = principal.client_type;
+  const checkedMeta = wireMeta(meta);
+  return { v: PROTOCOL_VERSION, type: 'request', id, op, args, principal: claim,
+    timeout_ms: timeoutMs, ...(requestKey ? { request_key: requestKey } : {}), ...(checkedMeta ? { meta: checkedMeta } : {}) };
 }
 
 // Agent side: validate a v2 request envelope. Capabilities never travel on the wire: the
-// receiving side maps principal.id to capabilities with its own table.
+// receiving side maps principal.id to capabilities with its own table. client_type is only
+// shape-checked here; the runtime checks it against its known client kinds.
 export function validateRequest(msg) {
   if (msg?.v !== PROTOCOL_VERSION || msg.type !== 'request') return { ok: false, code: 'invalid_request' };
   const id = typeof msg.id === 'string' && ID_RE.test(msg.id) ? msg.id : null;
@@ -165,7 +186,11 @@ export function validateRequest(msg) {
   }
   const timeoutMs = Number.isInteger(msg.timeout_ms) && msg.timeout_ms > 0 ? msg.timeout_ms : null;
   const requestKey = typeof msg.request_key === 'string' && /^[0-9a-f]{64}$/.test(msg.request_key) ? msg.request_key : null;
-  return { ok: true, value: { id, op: msg.op, args: msg.args ?? {}, principal: { id: msg.principal.id }, timeoutMs, requestKey } };
+  if (msg.principal.client_type !== undefined && (typeof msg.principal.client_type !== 'string' || !CLIENT_TYPE_RE.test(msg.principal.client_type))) {
+    return { ok: false, code: 'unknown_principal', id };
+  }
+  const principal = { id: msg.principal.id, ...(msg.principal.client_type !== undefined ? { client_type: msg.principal.client_type } : {}) };
+  return { ok: true, value: { id, op: msg.op, args: msg.args ?? {}, principal, timeoutMs, requestKey, meta: wireMeta(msg.meta) } };
 }
 
 export const resultFrame = (id, data) => ({ v: PROTOCOL_VERSION, type: 'result', id, data });

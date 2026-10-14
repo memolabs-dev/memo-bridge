@@ -2,13 +2,18 @@
 // WebSocket. Stateless router (spec D1): it authenticates the caller, maps the credential to
 // a principal, checks the op registry (bridge/ops.mjs) and the principal's capabilities, and
 // forwards the op to the agent that serves it. Protocol v2 is described in bridge/protocol.mjs.
+//
+// This listener (127.0.0.1:9443) takes the static owner bearer, the optional read-only bearer
+// and the agents' WebSocket. It never takes OAuth tokens: ChatGPT reaches the hub through the
+// separate, OIDC-only public listener (bridge/public-listener.mjs, Phase 5 decision D4), which
+// shares nothing with this one except requestAgent(). The Phase 1 OIDC mode of this listener
+// was removed in Phase 5: it switched the whole 9443 surface to OAuth and accepted any JWT
+// with the right audience, ID tokens included.
 import { createServer } from 'node:https';
 import WebSocket, { WebSocketServer } from 'ws';
 import { McpServer, WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
 import { bearerValid, nonce, verifyChallenge, keyFingerprint } from './crypto.mjs';
-import { oidcGuard } from './oidc.mjs';
-import { makePrincipal } from '../server/coordinator/policy.mjs';
 import {
   MAX_FRAME_BYTES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, PING_INTERVAL_MS, PROTOCOL_VERSION, SUBPROTOCOL,
   CODE_RE, OP_RE, PACKAGE_VERSION, createReassembler, encodeFrames, idempotencyKey, makeRequest, newId, parseFrame,
@@ -21,16 +26,14 @@ const result = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
 const fail = error => ({ok:false,error});
 const MAX_HTTP_BYTES = 64 * 1024;
 
-// Phase 5 hook: an accepted OIDC token maps to this principal. Until Phase 5 defines OIDC
-// capabilities it holds none, so it reaches the hub-local read-only tools only.
-export const defaultOidcPrincipal = () => makePrincipal('oidc:owner', []);
-
-export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, readOnlyTokenSha256 = null, oidc = null,
-  oidcPrincipal = defaultOidcPrincipal, runtimeHost = null, mutatingOps = false, toolDefinitions = null,
-  port = 9443, bind = '127.0.0.1', audit = () => {}, pingIntervalMs = PING_INTERVAL_MS, timeouts = {} }) {
+export function createHub(options) {
+  // The OIDC options of Phase 1 are refused rather than ignored: a deployment still setting
+  // them must fail visibly, not silently fall back to the bearer.
+  for (const key of ['oidc', 'oidcPrincipal']) if (Object.hasOwn(options ?? {}, key)) throw new Error(`hub does not take ${key}: OAuth is served by the public listener only`);
+  const { tlsKey, tlsCert, allowedAgentKeys, tokenSha256, readOnlyTokenSha256 = null, runtimeHost = null, mutatingOps = false,
+    toolDefinitions = null, port = 9443, bind = '127.0.0.1', audit = () => {}, pingIntervalMs = PING_INTERVAL_MS, timeouts = {} } = options;
   if (!tlsKey || !tlsCert) throw new Error('TLS is mandatory');
-  const guard = oidc ? oidcGuard(oidc) : null;
-  if (!guard && !/^[0-9a-f]{64}$/.test(tokenSha256)) throw new Error('Invalid bearer token digest');
+  if (!/^[0-9a-f]{64}$/.test(tokenSha256)) throw new Error('Invalid bearer token digest');
   if (readOnlyTokenSha256 !== null && (!/^[0-9a-f]{64}$/.test(readOnlyTokenSha256) || readOnlyTokenSha256 === tokenSha256)) {
     throw new Error('Invalid read-only bearer token digest');
   }
@@ -64,7 +67,10 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, read
   }
 
   // Forward one op to `host`. Resolves with the agent's checked data, or {ok:false, error}.
-  function requestAgent(host, op, { args = {}, principal = HUB_PRINCIPALS[PRINCIPAL_IDS.readonly], timeoutMs } = {}) {
+  // requestId and clientSession (Phase 5, bridge/forward.mjs) travel in the envelope's meta,
+  // never in args; the wire id stays the hub's own.
+  function requestAgent(host, op, { args = {}, principal = HUB_PRINCIPALS[PRINCIPAL_IDS.readonly], timeoutMs, requestId = null,
+    clientSession = null } = {}) {
     if (!HOSTS.includes(host) || !isForwardable(op)) return Promise.resolve(fail('unsupported_op'));
     const spec = OPS[op];
     const conn = agents.get(host);
@@ -77,7 +83,8 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, read
       frames = [JSON.stringify({type:'request',id,op})];
     } else {
       const requestKey = spec.mutating ? idempotencyKey(principal.id, op, args.client_request_id) : null;
-      frames = encodeFrames(makeRequest({id, op, args, principal, timeoutMs: timeoutMs ?? timeouts[op] ?? spec.timeoutMs, requestKey}),
+      frames = encodeFrames(makeRequest({id, op, args, principal, timeoutMs: timeoutMs ?? timeouts[op] ?? spec.timeoutMs, requestKey,
+        meta: {request_id: requestId, client_session: clientSession}}),
         {maxMessageBytes:MAX_REQUEST_BYTES});
       if (!frames) return Promise.resolve(fail('request_too_large'));
     }
@@ -206,8 +213,8 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, read
     });
     mcp.registerTool('bridge_info',{description:'Show current security and feature limitations',inputSchema:z.object({}),annotations:tags},async()=>result({
       mode: gate.mutatingOps==='owner' ? 'read-write-owner' : 'read-only', protocol: PROTOCOL_VERSION, version: PACKAGE_VERSION,
-      transport:'https private-loopback', agent_transport:'authenticated-wss', oauth_resource_guard:!!guard, oauth_connected:false,
-      public_exposure:false, principal:{id:principal.id, capabilities:[...principal.capabilities].sort()},
+      transport:'https private-loopback', agent_transport:'authenticated-wss',
+      oauth:'public listener only (bridge/public-listener.mjs)', public_exposure:false, principal:{id:principal.id, capabilities:[...principal.capabilities].sort()},
       runtime_host: runtimeHost, mutating_ops: gate.mutatingOps==='owner' ? 'owner' : 'disabled',
       agents: [...agents.values()].map(c=>({host:c.host, protocol:c.version, version:c.agentVersion, ops:c.ops.size})),
       tools: availableOps(principal)
@@ -257,8 +264,7 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, read
     finally{await transport.close().catch(()=>{});await mcp.close().catch(()=>{});}
   }
   // Credential -> principal (spec D9). Both bearer digests are always compared, in constant time.
-  async function principalOf(header) {
-    if (guard) return (await guard.accepts(header)) ? oidcPrincipal() : null;
+  function principalOf(header) {
     const owner = bearerValid(header, tokenSha256);
     const reader = readOnlyTokenSha256 ? bearerValid(header, readOnlyTokenSha256) : false;
     if (owner) return HUB_PRINCIPALS[PRINCIPAL_IDS.owner];
@@ -270,14 +276,11 @@ export function createHub({ tlsKey, tlsCert, allowedAgentKeys, tokenSha256, read
     if (path==='/health' && req.method==='GET'){
       res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end('{"status":"ok"}');return;
     }
-    if (guard && path==='/.well-known/oauth-protected-resource' && req.method==='GET') {
-      res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify(guard.resourceMetadata));return;
-    }
     if (path!=='/mcp'){res.writeHead(404).end();return;}
-    const principal = await principalOf(req.headers.authorization);
+    const principal = principalOf(req.headers.authorization);
     if(!principal){
       record('owner_auth_denied',null);
-      res.writeHead(401,{'www-authenticate':guard?.challenge || 'Bearer realm="memo-bridge"', 'cache-control':'no-store'}).end();return;
+      res.writeHead(401,{'www-authenticate':'Bearer realm="memo-bridge"', 'cache-control':'no-store'}).end();return;
     }
     record('mcp_request',null,{principal:principal.id});
     await handleMcp(req,res,principal);
