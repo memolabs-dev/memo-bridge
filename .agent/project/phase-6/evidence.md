@@ -76,6 +76,15 @@ real key was generated: every run used a temporary HOME.
 | EV-P6-52 | DEV-P6-27, bundle | runtime | the bundle from the script, temporary HOME, hub URL on a closed port | `operator_ready` (max_tier exec, 24 ops, root_helper false), then `reconnect_scheduled`; `plutil -lint` OK on the staged plist |
 | EV-P6-53 | docs read | inspection | `man launchd.plist` on this Mac; lab-infra `feat/memo-operator-role` (`defaults/main.yml`, `tasks/enabled.yml`, `docs/memo-operator.md`, `Makefile`) read, not edited | Umask takes a decimal integer, ThrottleInterval seconds; the role reads `~/.memo-operator/operator-mac.pub` (`memo_operator_mac_pub_path`), copies it to `/var/lib/memo-bridge/secrets/operator-mac.pub` and restarts the hub; `make memo-operator-freeze` touches the hub freeze file too |
 
+| EV-P6-54 | Mac root: sources | inspection | `man launchd.plist`, `man launchctl`, `man 2 setrlimit`, `man tccutil` on macOS 27.0.1; `dscl . -read /Groups/{admin,staff,daemon}`; `stat` of `/Library`, `/Library/Application Support`, `/private/var/{db,log,run}`; `otool -L` of both nodes | UserName and GroupName apply in the system domain; `bootstrap system` needs root; daemons are subject to TCC; `RLIMIT_DATA` bounds sbrk only and `RLIMIT_RSS` is a preference, so no memory cap (DEV-P6-33); no group holds only memo (DEV-P6-34); every ancestor of the root tree, `/var/db` and `/var/log` is root-owned, not group or other writable, `/var/run` is root:daemon 0775; nvm node links `/usr/lib` and `/System` only and has the hardened runtime, Homebrew node links `/opt/homebrew` (DEV-P6-35); SIP enabled |
+| EV-P6-55 | DEV-P6-34 | runtime | `<scratchpad>/macroot/sockperm.mjs` | a Unix socket chmod 0000 answers EACCES to its own owner on connect: macOS enforces the socket's write permission |
+| EV-P6-56 | AC-MR-01 to 08 | automated | `tests/operator-root-mac.test.mjs` (11 tests) | start refusals (not root, group-writable root dir, node or script outside it, hub key writable, agent uid 0, policy without root, approval off, FROZEN outside the root dir); socket owned by the agent user 0600; unsigned, unknown key, replay, tampered args, T2, unsupported op, wrong host refused; auto-freeze; approval required for diskutil and scripts; argv `a;id $(id)` echoed as bytes; system PATH; script 0700 removed after; background job with `process_group`; timeout and exit kill the grandchild; root chain verifies, an edited line breaks it at line 2, mode 0600, no `audit_append` from the socket; the agent forwards only while the socket exists; `writePolicy` exec then root; Mac dangerous entries and free reads |
+| EV-P6-57 | AC-MR-09 | automated | same file, "install script dry run" | every plan target outside `$HOME`, owner root (socket: agent uid:gid 0600), node 0555, policy 0444, plist 0644; policy root, dangerous, FROZEN and journal under root paths; plist `UserName root`, program the root-owned node; the home folder listing unchanged; `--install` and `--uninstall` without root exit non-zero before any output |
+| EV-P6-58 | multi-session rules (#32) on Mac root | automated | same file, "hub" | with operator-mac connected: root and diskutil calls without host answer `host_required`; named, `workspace_required`, then `lock_required`; with a global lock the call reaches the Mac with signed host mac, tier 3, no `workspace_id`; a dangerous root call fails closed (`approval_unavailable`) |
+| EV-P6-59 | mutation checks, Mac root | automated | `<scratchpad>/macroot/mutate.py` plus one manual | 27 of 27 killed: uid check, ancestor chain, node inside the tree, approval off, agent uid, FROZEN location, user FROZEN, socket 0600, signature, T3 only, own host, system PATH, setsid, group kill, kill on exit, script removal, background group flag, agent socket gate, client available(), agent policy root only with the root policy, diskutil, dscl writes, /private fold, LaunchDaemons, install needs root, plist UserName root, no audit_append on the Mac |
+| EV-P6-60 | regression | automated | `MEMO_BRIDGE_GOVERNANCE_ROOT=~/memolabs/os/integrations/github pnpm test`, `pnpm run build`, `pnpm run smoke`, `pnpm run test:deploy`, after the rebase on #32 | 483 of 483 pass; build OK; smoke ok, 52 tools, round trip; deploy 124 OK |
+| EV-P6-61 | dry run on the real Mac | runtime (read only) | `deploy/mac/install-operator-root.sh` as memo | node `~/.nvm/.../v24.21.0/bin/node` system libraries only; hub key id a0391703c13b3a36; 19 plan steps; nothing written |
+
 ## Runtime checks pending (need lab or the owner)
 
 - AC-P6-09: a real `systemd-run` on lab: `id -u` prints 0, the unit is gone after the call,
@@ -87,6 +96,13 @@ real key was generated: every run used a temporary HOME.
   `launchctl print gui/<uid>/dev.memolabs.memo-operator-agent` running, `operator_ready` in
   `~/Library/Logs/memo-operator/stderr.log`, the hub journal showing `operator-mac` connected,
   `touch ~/.memo-operator/FROZEN` refusing a T1 call, and AC-P6-10 step 2 from ChatGPT.
+
+- Mac root (owner): `sudo deploy/mac/install-operator-root.sh --install`, then the agent reinstall;
+  `sudo launchctl print system/dev.memolabs.memo-operator-root` running; `root_helper_ready` in
+  `/var/log/memo-operator/helper.log`; `ls -l /var/run/memo-operator/root.sock` owned by memo 0600;
+  from ChatGPT `operator_run host:mac as_root argv:["id","-u"]` (with a global lock) prints 0;
+  `sudo touch .../operator-root/FROZEN` answers `frozen`; `/var/log/memo-operator/audit.jsonl`
+  root 0600.
 
 ## Not verified in Lot 1 (owned by later lots)
 

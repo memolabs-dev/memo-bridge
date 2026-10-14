@@ -277,5 +277,49 @@
     "evidence": "evidence.md EV-P6-43 to EV-P6-53",
     "stdio_decision": "operator tools not registered on stdio (DEV-P6-26)",
     "mac_public_key_for_lab_infra": "~/.memo-operator/operator-mac.pub"
+  },
+  "mac_root": {
+    "status": "READY_FOR_MANUAL_ACCEPTANCE (automated verification green; the owner runs the one sudo step and the runtime checks)",
+    "owner_decision": "2026-10-14: ajoute le root sur le Mac",
+    "branch": "feat/operator-mac-root (rebased on origin/main after #32)",
+    "requirements": {
+      "total": 10,
+      "covered": 10
+    },
+    "acceptance": {
+      "total": 9,
+      "verified_automated": [
+        "AC-MR-01",
+        "AC-MR-02",
+        "AC-MR-03",
+        "AC-MR-04",
+        "AC-MR-05",
+        "AC-MR-06",
+        "AC-MR-07",
+        "AC-MR-08",
+        "AC-MR-09"
+      ],
+      "runtime_pending_owner": "install with sudo, helper running, root call from ChatGPT, FROZEN, journal ownership",
+      "failed": 0
+    },
+    "todos": {
+      "p0_open": 0,
+      "p1_open": 0,
+      "p2_open": 1,
+      "p2_ids": [
+        "anchor the Mac root chain head in the hub (DEV-P6-36)"
+      ]
+    },
+    "risks": {
+      "R-MR-11": "hub signing key compromise now means Mac root; accepted by the owner, documented",
+      "R-MR-12": "a root program can leave its process group; no memory cap; accepted, documented"
+    },
+    "tests": {
+      "after": 483,
+      "new_tests": 11,
+      "mutations_killed": "27/27"
+    },
+    "deviations": "spec.md section 13, Mac root follow-up (DEV-P6-32 to 39, R-MR-11, R-MR-12)",
+    "evidence": "evidence.md EV-P6-54 to EV-P6-61"
   }
 }
