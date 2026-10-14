@@ -2,7 +2,7 @@
 
 The runner lets an AI client do the work of a task on the machine running Memo Bridge: get an isolated checkout, read and edit files in it, run the repository's own tests, commit, push, and open a pull request. It sits on top of the Coordinator (`docs/COORDINATOR.md`): every repository write, job and pull request happens under a live claim on the task.
 
-Version 0.4.0 runs it over the local stdio transport only. Nothing here is exposed on the hub (see "Not yet").
+Version 0.4.0 introduced it over the local stdio transport; it is unchanged in 0.5.0, where the same tools also run on the VPS behind the hub (`docs/RUNNER_VPS.md`). Nothing of the Mac runner is exposed on the hub (see "Not yet").
 
 ## What runs on the owner's machine
 
@@ -108,6 +108,6 @@ Beyond the Coordinator's codes: `invalid_input`, `invalid_configuration`, `unkno
 
 ## Not yet
 
-- No exposure on the hub: write tools stay local until the root CI runners on the VPS are isolated (Vault `1-Projects/memo-labs-os.md`).
-- No VPS runner and no job queue (`host_busy` instead). No job sandbox outside macOS.
+- No exposure on the hub for the Mac runner: write tools stay local until the root CI runners on the VPS are isolated (Vault `1-Projects/memo-labs-os.md`).
+- On the Mac, no job queue (`host_busy` instead) and no job sandbox outside macOS. The VPS runner (v0.5) has a queue and a systemd sandbox: `docs/RUNNER_VPS.md`.
 - Old job logs and stale `git worktree` entries are not cleaned up automatically.

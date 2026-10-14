@@ -1,0 +1,10 @@
+{
+  "name": "memo-runner-stress",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TEST-ONLY fixture: budget stress for memo-job units (memo-bridge Phase 4, AC-P4-16, 18, 19). Never a pilot repository.",
+  "type": "module",
+  "scripts": {
+    "test": "node stress.mjs"
+  }
+}

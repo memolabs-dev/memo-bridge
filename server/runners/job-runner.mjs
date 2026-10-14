@@ -1,4 +1,6 @@
 // Detached job runner: `node job-runner.mjs --protocol=<n> <stateDir> <jobId>`.
+// VPS unit mode (Phase 4): `node job-runner.mjs --executor=systemd <dispatchId>` inside
+// memo-job@<id>.service, see job-unit.mjs; it opens no store and decides no status.
 //
 // Started by jobs_submit in its own process group, it outlives the MCP session. It opens the
 // private store itself, takes the job (CAS queued -> running), runs the recipe argv without a
@@ -329,7 +331,18 @@ function isMain() {
   try { return realpathSync(process.argv[1] ?? '') === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
 }
 
-if (isMain()) {
+if (isMain() && process.argv[2]?.startsWith('--executor=')) {
+  // Unit mode: no store, no lease; systemd records the outcome (decision D5).
+  for (const sig of ['SIGHUP', 'SIGINT']) process.on(sig, () => {});
+  const { runJobUnit } = await import('./job-unit.mjs');
+  const journal = entry => { try { process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`); } catch { /* journal gone */ } };
+  const keepAlive = setInterval(() => {}, 1 << 30);
+  runJobUnit(process.argv.slice(2), { createLogSink, journal }).then(result => {
+    clearInterval(keepAlive);
+    if (result.signal) { process.kill(process.pid, result.signal); return; }
+    process.exitCode = result.code;
+  }, () => { clearInterval(keepAlive); process.exitCode = 1; });
+} else if (isMain()) {
   const { protocol, stateDir, jobId } = parseRunnerArgs(process.argv.slice(2));
   // The runner's own group never contains the job (the job has its own group). Hangups and
   // interrupts are ignored; a termination request stops the job first, then the runner exits.

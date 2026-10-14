@@ -103,9 +103,13 @@ try {
 
   // bridge_info reports exactly the registered tools.
   const info = await call('bridge_info');
-  assert.equal(info.version, '0.4.0');
+  assert.equal(info.version, '0.5.0');
   assert.deepEqual([...info.allowed_tools].sort(), EXPECTED);
   assert.ok(info.excluded.includes('arbitrary-shell') && info.excluded.includes('merge'));
+  // Phase 4: the bundle on the Mac keeps the local executor (no queue), and says so.
+  assert.equal(info.runner.executor, 'local');
+  assert.equal(info.runner.queueing, false);
+  assert.ok(info.runner.job_statuses.includes('deferred') && info.runner.ops.includes('jobs_submit'));
 
   // Phase 1: observation.
   for (const name of OBSERVER_TOOLS) {

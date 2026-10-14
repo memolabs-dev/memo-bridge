@@ -1,8 +1,8 @@
 # Memo Bridge
 
-Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
+Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Since v0.5 the same tools can run on the VPS behind the private hub, with jobs queued one at a time in an unprivileged systemd unit, so work continues with the Mac off (`docs/RUNNER_VPS.md`; not deployed yet). Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
 
-## Tools (v0.4.0, 48 tools)
+## Tools (v0.5.0, 48 tools)
 
 `bridge_info` returns the same list, grouped, with the capability each group needs.
 
@@ -27,19 +27,32 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 - Hosts: `host_capabilities`, `host_resources`
 - GitHub: `github_issues`, `github_pull_requests`, `github_workflows`, `github_checks` (reads of registered repositories), `github_create_pr` (opens a pull request from a pushed worktree branch)
 
+### Phase 4: the VPS runner (`docs/RUNNER_VPS.md`, `docs/HUB_SECURITY.md`)
+
+No new tool: the runtime tools above run on the VPS as `memo-bridge-runner.service` (user `memo-runner`) and are reached through the private hub (protocol v2, owner and read-only bearers). On the VPS:
+
+- `jobs_submit` queues instead of answering `host_busy`: FIFO, one job at a time, `deferred` while disk, memory or pressure leave no room for it, `client_request_id` for safe retries, `release_on_finish` to release the claim when the job ends;
+- each job runs as `memo-job@<id>.service` (user `memo-job`, `memo-dev.slice`, no credentials, no loopback or private network, only its worktree and output writable), started by a root dispatcher that re-validates every request (`deploy/`);
+- the final status comes from systemd (`succeeded`, `failed`, `timed_out`, `oom`, `budget_exceeded`, `cancelled`, `interrupted`), never from the job's own output;
+- the runner keeps the claim's lease alive while its job waits or runs, and stops the job when the lease is lost.
+
+Write tools stay off the hub until the root CI runners on the VPS are isolated (the write gate in `docs/HUB_SECURITY.md`).
+
 ### What Memo Bridge never does
 
 Through its own tools: no shell (every command is a fixed argument list), no file access outside its own worktrees and the canonical register, no write to a default branch (compared without case, and checked against the remote itself), no force-push, no merge, no deployment, no service change. Every repository write, job and pull request needs a live claim on the task, and commit, push, job submission and pull request creation re-verify that claim with the shared ledger first. Pull requests land through the Memo Labs landing contract (`.github/workflows/land.yml`), never through an agent.
 
-Jobs are different: they run the repository's own scripts, which a model can edit, so they are code a model wrote. On macOS they run inside a sandbox: writes only to the worktree, no network beyond loopback, no access to the state directory, other repositories, `~/.agent`, `~/Vault` or credentials, an allow-listed environment, and every process stopped with the job. They are refused on other platforms. `MEMO_BRIDGE_JOB_SANDBOX=off` runs them unsandboxed, which makes a job owner-equivalent. Details and residual risks: `SECURITY.md`.
+Jobs are different: they run the repository's own scripts, which a model can edit, so they are code a model wrote. On macOS they run inside a sandbox: writes only to the worktree, no network beyond loopback, no access to the state directory, other repositories, `~/.agent`, `~/Vault` or credentials, an allow-listed environment, and every process stopped with the job. On the VPS runner they run as the unprivileged `memo-job` systemd unit described above. They are refused on other platforms. `MEMO_BRIDGE_JOB_SANDBOX=off` runs them unsandboxed, which makes a job owner-equivalent. Details and residual risks: `SECURITY.md`.
 
 ## Development
 
 ```sh
 npm ci
 npm test
+npm run test:runner       # Phase 4 subset, including the root helpers (python3 -I unittest)
 npm run build
 npm run smoke
+npm run release:manifest  # VPS release: dist/release/SHA256SUMS + memo-bridge-release.json for lab-infra
 npm run install:local   # stable copy for AI clients: ~/.local/share/memo-bridge/stdio/{index,job-runner}.mjs
 ```
 
@@ -51,8 +64,8 @@ The plugin package is under `plugin/`. It is a **local stdio plugin**, not a clo
 
 1. Observation and project catalogue (done).
 2. Coordination on GitHub Issues through the canonical lease ledger (done).
-3. Mac runner: worktrees, file edits, recipes, commit, push, pull requests (this version, local stdio only).
-4. Remote HTTPS hub with OIDC, per-capability authorization and audit; write tools stay off the hub until the root CI runners on the VPS are isolated.
-5. VPS runner and a job queue, so work continues without the Mac.
+3. Mac runner: worktrees, file edits, recipes, commit, push, pull requests (done, v0.4, local stdio).
+4. VPS runner behind the private hub: protocol v2, principals, job queue, systemd sandbox, lease renewal (v0.5, code done, deployment pending; write tools on the hub after the root CI runners are isolated).
+5. Public HTTPS hub with OIDC, per-capability authorization and audit (Phase 5).
 
 Existing Sentinel X configuration is untouched. No endpoints are exposed publicly.

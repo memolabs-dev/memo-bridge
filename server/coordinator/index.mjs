@@ -15,6 +15,7 @@ import { platform } from 'node:os';
 import { join } from 'node:path';
 import { projectInfo, readProjectRegistry } from '../catalog.mjs';
 import { authorize, ownsWorkspace, workerFor } from './policy.mjs';
+import { ACTIVE_JOB_STATUSES } from '../runners/executor.mjs';
 import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
@@ -399,7 +400,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         actions.push(`Ledger unreachable for ${c.issue}: do not write until task_status confirms the lease.`);
       }
     }
-    for (const j of jobs.filter(j => j.status === 'queued' || j.status === 'running')) {
+    for (const j of jobs.filter(j => ACTIVE_JOB_STATUSES.includes(j.status))) {
       actions.push(`Job ${j.job_id} is ${j.status}: follow it with job_status or job_events.`);
     }
     if (active && worktrees.length && !claims.some(c => c.state === 'still_held')) {

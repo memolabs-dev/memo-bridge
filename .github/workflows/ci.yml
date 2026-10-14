@@ -35,5 +35,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm test
+      # Phase 4 root helpers of the VPS runner (dispatcher, result recorder): stdlib unittest,
+      # temporary folders and a fake systemctl, no root and no systemd needed.
+      - run: npm run test:deploy
       - run: npm run build
       - run: npm run smoke

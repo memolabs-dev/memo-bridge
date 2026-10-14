@@ -1,18 +1,21 @@
 {
   "name": "memo-bridge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
-  "description": "Memo Labs MCP: read-only Mac and VPS observation, project catalogue, coordination of AI work sessions on GitHub Issues, and a Mac runner (worktrees, test/build/lint jobs, pull requests)",
+  "description": "Memo Labs MCP: read-only Mac and VPS observation, project catalogue, coordination of AI work sessions on GitHub Issues, a Mac runner (worktrees, test/build/lint jobs, pull requests) and a VPS runner (queued, sandboxed systemd jobs behind the private hub)",
   "engines": {
     "node": ">=22.16"
   },
   "scripts": {
     "build": "esbuild server/index.mjs server/runners/job-runner.mjs --bundle --platform=node --format=esm --target=node22 --outdir=plugin/server/dist --entry-names=[name] --out-extension:.js=.mjs",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test --test-timeout=180000 tests/*.test.mjs",
+    "test:hub": "node --test tests/hub-auth.test.mjs tests/hub-oidc-http.test.mjs tests/agent-protocol.test.mjs tests/hub-dispatch.test.mjs",
+    "test:runner": "node --test tests/agent-protocol.test.mjs tests/hub-dispatch.test.mjs tests/runtime-principal.test.mjs tests/credentials.test.mjs tests/worktrees.test.mjs tests/executor-systemd.test.mjs tests/job-queue.test.mjs tests/lease-supervisor.test.mjs tests/job-unit.test.mjs tests/runner-integration.test.mjs tests/release-manifest.test.mjs tests/coordinator-store-contract.test.mjs && npm run test:deploy",
+    "test:deploy": "python3 -I -B -m unittest discover -s deploy/tests",
     "smoke": "node tests/mcp-smoke.mjs",
+    "release:manifest": "node scripts/release-manifest.mjs",
     "package:plugin": "npm run build && node scripts/package-plugin.mjs",
-    "test:hub": "node --test tests/hub-auth.test.mjs",
     "start:hub": "node bridge/hub-cli.mjs",
     "start:agent": "node bridge/agent-cli.mjs",
     "install:local": "npm run build && node scripts/install-local.mjs"

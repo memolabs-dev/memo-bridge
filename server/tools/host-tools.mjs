@@ -45,7 +45,10 @@ export function registerHostTools(server, getRuntime, deps = {}) {
       try {
         jobs = await rt.store().transaction(repo => ({
           running: repo.listJobs({ host, status: 'running', limit: 1000 }).length,
-          queued: repo.listJobs({ host, status: 'queued', limit: 1000 }).length
+          queued: repo.listJobs({ host, status: 'queued', limit: 1000 }).length,
+          // Phase 4 (VPS queue): waiting for admission, and handed to the dispatcher.
+          deferred: repo.listJobs({ host, status: 'deferred', limit: 1000 }).length,
+          dispatched: repo.listJobs({ host, status: 'dispatched', limit: 1000 }).length
         }), { write: false });
       } catch { jobs = null; }
     }
