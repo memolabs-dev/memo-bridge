@@ -24,7 +24,7 @@ Status: code on branch `feat/phase-4-vps-runner` (v0.5.0), **not merged and not 
 | read-only bearer (`readonly.token`, optional, O-9) | `hub:readonly` | read |
 | OIDC token (`MEMO_BRIDGE_OIDC_SETTINGS`, Phase 5) | mapped, but with no capability yet | none |
 
-The hub forwards only the principal id. The runtime maps it again with its own grants (`MEMO_BRIDGE_HUB_PRINCIPALS`), which are the ceiling: a hub claim can only narrow them. It then calls `authorize()` again before reading any argument (`runtime.as(principal)`). A refusal is journaled on both sides with principal, op and reason code, never the arguments. Mutating ops that carry `client_request_id` get a request key `sha256(principal|op|client_request_id)`, so a retry returns the first result.
+The hub forwards only the principal id. The runtime maps it again with its own grants (`MEMO_BRIDGE_HUB_PRINCIPALS`), which are the ceiling: a hub claim can only narrow them. Unset, those grants are read-only for every hub principal (`RUNTIME_DEFAULT_HUB_GRANTS`), so the write gate holds on the runner side as well: the memo-bridge uid holds the hub's TLS key, and could otherwise send mutating ops straight to the runner whatever `MEMO_BRIDGE_HUB_MUTATING_OPS` says. It then calls `authorize()` again before reading any argument (`runtime.as(principal)`). A refusal is journaled on both sides with principal, op and reason code, never the arguments. Mutating ops that carry `client_request_id` get a request key `sha256(principal|op|client_request_id)`, so a retry returns the first result.
 
 ### Settings
 
@@ -42,7 +42,9 @@ The rule above still holds: **no write-capable tool on the hub until the root CI
 - no container on host networking can reach it, or each one is justified;
 - the emargo GitHub runner no longer runs as root and the dead root `drop` runner is disabled (lab-infra #161, TODO-P4-25, owner window O-5).
 
-Until then `MEMO_BRIDGE_HUB_MUTATING_OPS` stays unset: through the hub, the owner can read runner state (`jobs_list`, `job_status`, `job_results`, `host_resources`, `workspace_list`...) but cannot claim, submit, push or cancel. Status on 2026-10-14: **gate closed** (AC-P4-14 not verified, #161 open). The runner itself (`memo-bridge-runner.service`) is ready for it, and authorizes every op again on its side.
+Until then `MEMO_BRIDGE_HUB_MUTATING_OPS` stays unset on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS` stays unset on the runner: through the hub, the owner can read runner state (`jobs_list`, `job_status`, `job_results`, `host_resources`, `workspace_list`...) but cannot claim, submit, push or cancel. Opening the gate (TODO-P4-40) sets both: `MEMO_BRIDGE_HUB_MUTATING_OPS=owner` on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS={"hub:owner":"owner","hub:readonly":"read"}` on the runner. Status on 2026-10-14: **gate closed** (AC-P4-14 not verified, #161 open). The runner authorizes every op again on its side.
+
+Known pre-Phase 4 exposure: on the VPS, `/var/lib/memo-bridge/agent/agent.key` is `root:memo-bridge 0640`, so the hub's user can read the VPS agent key (the legacy `memo-bridge-vps-agent` runs as memo-bridge and needs it). Once the runner replaces that agent, the key is only needed through `LoadCredential=` (root reads it); tightening the file is a lab-infra change on a live file, left to the owner (it must be undone if the immediate rollback brings the legacy agent back).
 
 Details of the runner: `docs/RUNNER_VPS.md`.
 

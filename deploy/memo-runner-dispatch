@@ -474,6 +474,14 @@ def load_config(path):
     recipes = values.get('recipes')
     if recipes is None:
         cfg.recipes = {name: frozenset(shapes) for name, shapes in BUILTIN_RECIPES.items()}
+    elif isinstance(recipes, list):
+        # A list of recipe names (lab-infra renders memo_runner_recipes this way): each one keeps
+        # its built-in argv shapes; a name left out is not allowed at all.
+        if not all(isinstance(name, str) for name in recipes) or len(set(recipes)) != len(recipes):
+            raise ConfigError('recipes_invalid')
+        if any(name not in BUILTIN_RECIPES for name in recipes):
+            raise ConfigError('recipe_not_builtin')
+        cfg.recipes = {name: frozenset(BUILTIN_RECIPES[name]) for name in recipes}
     else:
         if not isinstance(recipes, dict):
             raise ConfigError('recipes_invalid')

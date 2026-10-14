@@ -67,3 +67,22 @@ Fully verified: AC-P4-02, 07, 11. Automated part verified, runtime pending: 04, 
 - Anything that needs systemd 257 or the VPS (TODO-P4-01 spike, TODO-P4-30 to 35): owner windows O-6, O-7.
 - Linux CI for the new tests: the branch is not pushed. The Python helpers have only run on macOS.
 - Real GitHub tokens (O-1, O-2) and the write gate (#161, O-5).
+
+## Verifier findings (second independent pass, 2026-10-14) and their fixes
+
+Every fix has a regression test; each test was checked to fail with its fix removed (scratch mutation script, file restored after each run).
+
+| Finding | Fix | Regression test |
+|---|---|---|
+| 1 HIGH: disk budget fails open (`du` timeout or partial reading ignored; no free-disk check while a job runs) | `supervisor.mjs` `checkBudgets`: a `du` that times out, fails or is partial is unmeasured; `max_unmeasured_readings` (default 3) in a row end the job `budget_exceeded`/`disk_unmeasurable`; a partial reading already over budget ends it at once; free disk on the runner tree below `min_free_disk_running_gib` (default 20 GiB, lab-infra `budgets.min_free_disk_running_bytes`) ends it on every tick (`disk_floor`) | `job-queue`: "AC-P4-18 fails closed", "AC-P4-18 free-disk floor" |
+| 2 MEDIUM: `memo_runner_recipes` and `memo_runner_job_timeout_max_sec` had no effect | lab-infra `runner.json.j2` renders a `dispatch` section (root, users, `max_timeout_seconds`, `recipes`); the dispatcher accepts a list of recipe names; the runtime reads the narrowest recipes and ceiling and refuses at submit (`recipe_not_allowed`, `invalid_input`); template comments corrected (no `MemoryMax=`/`TasksMax=` in the drop-in) | `test_dispatch.py` `test_recipe_name_list_*`, `test_lab_infra_dispatch_section_lowers_the_timeout`; `job-queue` "verifier finding 2"; `runner-integration`; lab-infra `test_runner_json_dispatch_section_carries_the_limits` |
+| 3 LOW: a job could make its own end look like an outside stop | `statusFromResult`: a signal ending (TERM counted clean by systemd, or KILL) is `failed` unless root's cancel marker says otherwise or the unit ended before the supervisor started (runner restart, reboot: `interrupted`, AC-P4-08); `record-result` writes `failed`/`stopped_by_signal` for success/killed | `executor-systemd` mapping test; `job-queue` "verifier finding 3" and AC-P4-08; `test_record_result.py` |
+| 5 HIGH (plausible, confirmed by test): `.git` link swap between `locate()` and later Git calls | `locate()` returns the validated gitdir and common dir; every Git call of the op runs with `GIT_DIR`/`GIT_WORK_TREE` pinned; `worktree remove` runs from the validated common dir; `worktree_commit`/`worktree_push` refuse `job_active` while a VPS unit job waits or runs, before and after the ledger verify | `worktrees` "verifier finding 5" (a foreign clean filter never runs; the commit lands in the project repository) and the `job_active` test |
+| 6 MEDIUM (plausible, confirmed by test): next dispatch while the previous unit is still deactivating fails as `host_busy` | `supervisor.mjs` `recentUnitBusy`: every recently ended unit must be seen inactive before a dispatch (`waiting_for_unit` in the status view) | `job-queue` "verifier finding 6" |
+| 7 LOW: runtime granted `hub:owner` everything whatever the hub gate | `RUNTIME_DEFAULT_HUB_GRANTS` read-only for every hub principal; writes need `MEMO_BRIDGE_HUB_PRINCIPALS` on the runner as well as `MEMO_BRIDGE_HUB_MUTATING_OPS=owner` on the hub | `runtime-principal` "verifier finding 7" |
+| 8 LOW: job network edges | lab-infra denies the host's public IPv4 and /64 to jobs; AF_UNIX kept (documented), the AC-P4-12 probe now reports listening abstract unix sockets (`/proc/net/unix`); read-only check on lab 2026-10-14: 0 abstract listeners, resolvers external | lab-infra `test_network_and_privileges`; `test_dispatch.py` probe tests |
+
+Left open, with reason:
+- `/var/lib/memo-bridge/agent/agent.key` readable by the hub user (finding 7, pre-Phase 4, live file adopted byte-identically by PR-A): owner decision, documented in `HUB_SECURITY.md` and lab-infra `docs/memo-runner.md`.
+- Abstract-namespace unix sockets stay reachable in principle (finding 8): removing `AF_UNIX` would break Node, Python and Git; monitored by the probe.
+- Integrator items not in the verifier's findings: hub `MEMO_BRIDGE_HUB_RUNTIME_HOST` (FU-1), pilot repositories on the VPS (FU-2), release checksum (FU-3), TODO-P4-01 spike.

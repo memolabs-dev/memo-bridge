@@ -4,7 +4,7 @@ Two throwaway repositories whose `test` recipe exercises a `memo-job@<id>.servic
 
 | Folder | `npm test` runs | Acceptance |
 |---|---|---|
-| `isolation/` | `probe.mjs`: tries loopback ports 4000, 5000, 9443, 4096 (IPv4 and `::1`), 10.0.4.1 and 172.17.0.1, the Docker sockets, reads of `/var/lib/memo-bridge`, `/etc/credstore`, `/etc/github.env`, the runner state, spool and governance and the other `InaccessiblePaths=` of spec §3, writes outside the worktree; expects TCP to `github.com:443` and `registry.npmjs.org:443`, a write in the worktree and in `$MEMO_JOB_OUT`, no secret-looking variable, no privileged group, `NoNewPrivs: 1` and an empty `CapEff` | AC-P4-12 |
+| `isolation/` | `probe.mjs`: tries loopback ports 4000, 5000, 9443, 4096 (IPv4 and `::1`), 10.0.4.1 and 172.17.0.1, the Docker sockets, reads of `/var/lib/memo-bridge`, `/etc/credstore`, `/etc/github.env`, the runner state, spool and governance and the other `InaccessiblePaths=` of spec §3, writes outside the worktree; expects TCP to `github.com:443` and `registry.npmjs.org:443`, a write in the worktree and in `$MEMO_JOB_OUT`, no listening abstract-namespace unix socket in `/proc/net/unix` (the job shares the host network namespace and keeps `AF_UNIX`), no secret-looking variable, no privileged group, `NoNewPrivs: 1` and an empty `CapEff` | AC-P4-12 |
 | `stress/` | `stress.mjs`, mode from `stress.config.json`: `sleep`, `cpu`, `memory`, `fork`, `disk`, `mixed` | AC-P4-16, AC-P4-18, AC-P4-19 |
 
 ## Output

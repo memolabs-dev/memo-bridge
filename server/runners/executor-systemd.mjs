@@ -36,6 +36,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readSync, renameSync, statSync,
   unlinkSync, writeSync } from 'node:fs';
 import { isAbsolute, join, normalize } from 'node:path';
+import { runnerWatchStart } from './executor.mjs';
 
 export const DEFAULT_RUNNER_ROOT = '/var/lib/memo-runner';
 // Debian 13 path; an absolute path so PATH never chooses the binary.
@@ -65,7 +66,9 @@ export function cancelReasonFor(statusReason) {
   if (statusReason === 'disk_budget' || statusReason === 'budget_exceeded') return 'budget_exceeded';
   return CANCEL_REASONS.includes(statusReason) ? statusReason : 'cancelled';
 }
-// Signals that mean "someone stopped it" rather than "it crashed".
+// Signals that can mean "someone stopped it" rather than "it crashed". The job can send them to
+// itself, so they only mean an outside stop when the unit ended while no supervisor was
+// watching (a runner restart or a reboot): see statusFromResult.
 const STOP_SIGNALS = new Set(['HUP', 'INT', 'TERM', 'KILL', 'PIPE']);
 const ACTIVE_STATES = new Set(['active', 'activating', 'deactivating', 'reloading', 'refreshing']);
 
@@ -208,21 +211,40 @@ export function readStatusFile(path, dispatchId, { ownerUid = 0 } = {}) {
 }
 
 // systemd's verdict -> job status. `reason` lands in status_reason.
-export function statusFromResult({ service_result: result, exit_code: code, exit_status: status, reason = null }) {
+//
+// A job that is still dispatched or running when its status file arrives was not ended by the
+// supervisor (that path records the status first). What it can forge is its own end: a process
+// may exit by SIGTERM (systemd counts it as a clean "success", systemd.service(5)
+// SuccessExitStatus=) or SIGKILL itself ("signal"). Such an end is therefore `failed`
+// (verifier finding 3), except:
+// - root's cancel marker (record-result `reason` in CANCEL_REASONS): the dispatcher stopped it
+//   at memo-runner's request, so it ends cancelled or budget_exceeded;
+// - `unobserved`: the unit ended while no supervisor was watching (ended_at, written by root,
+//   before this runner's supervisor started): a runner restart or a reboot with the job
+//   killed meanwhile ends `interrupted` (AC-P4-08). The job cannot choose when the runner is
+//   down, so this does not reopen the forgery.
+export function statusFromResult({ service_result: result, exit_code: code, exit_status: status, reason = null },
+  { unobserved = false } = {}) {
+  if (result === 'oom-kill') return { status: 'oom', exit_code: null, reason: 'oom_kill' };
+  if (result !== DISPATCH_REFUSED && CANCEL_REASONS.includes(reason)) {
+    return reason === 'budget_exceeded'
+      ? { status: 'budget_exceeded', exit_code: null, reason }
+      : { status: 'cancelled', exit_code: null, reason };
+  }
   switch (result) {
     case 'success':
       if (code === 'exited' && status === '0') return { status: 'succeeded', exit_code: 0 };
-      // Killed by HUP/INT/TERM/PIPE, which systemd counts as clean: someone stopped the unit
-      // (shutdown, a manual systemctl stop). Our own stops are recorded before they happen.
-      return { status: 'interrupted', exit_code: null, reason: 'unit_stopped' };
+      // Killed by HUP/INT/TERM/PIPE, which systemd counts as clean.
+      return unobserved
+        ? { status: 'interrupted', exit_code: null, reason: 'unit_stopped' }
+        : { status: 'failed', exit_code: null, reason: `signal_${status ?? 'unknown'}` };
     case 'exit-code': {
       const n = Number.parseInt(status ?? '', 10);
       return { status: 'failed', exit_code: Number.isInteger(n) ? n : null };
     }
     case 'timeout': return { status: 'timed_out', exit_code: null, reason: 'runtime_max' };
-    case 'oom-kill': return { status: 'oom', exit_code: null, reason: 'oom_kill' };
     case 'signal':
-      return STOP_SIGNALS.has(status)
+      return unobserved && STOP_SIGNALS.has(status)
         ? { status: 'interrupted', exit_code: null, reason: `signal_${status}` }
         : { status: 'failed', exit_code: null, reason: `signal_${status ?? 'unknown'}` };
     case 'core-dump': return { status: 'failed', exit_code: null, reason: `core_dump_${status ?? 'unknown'}` };
@@ -273,7 +295,7 @@ function tailText(buffer, cut) {
  * uid). limits: what is recorded with each job (from runner.json).
  */
 export function createSystemdExecutor({ root = DEFAULT_RUNNER_ROOT, systemctl = SYSTEMCTL, run = execSystemctl,
-  statusOwnerUid = 0, limits = {}, maxQueue } = {}) {
+  statusOwnerUid = 0, limits = {}, maxQueue, policy = null } = {}) {
   const paths = runnerPaths(root);
   const didOf = job => dispatchIdOfUnit(job.unit) ?? dispatchIdFor(job.id);
   const statusPath = did => join(paths.jobs, did, 'status.json');
@@ -286,6 +308,10 @@ export function createSystemdExecutor({ root = DEFAULT_RUNNER_ROOT, systemctl = 
     paths,
     // Bound on queued plus running jobs per host (runner.json max_queue); jobs.mjs refuses beyond.
     ...(Number.isInteger(maxQueue) ? { maxQueue } : {}),
+    // runner.json recipes and longest timeout (resources.mjs loadRunnerConfig); jobs.mjs refuses
+    // beyond them at submit, the dispatcher refuses again before any unit starts.
+    policy: policy ? Object.freeze({ recipes: policy.recipes ? Object.freeze([...policy.recipes]) : null,
+      max_timeout_seconds: policy.max_timeout_seconds ?? null }) : null,
     sandbox() {
       // The isolation is the unit itself (memo-job, memo-dev.slice, lab-infra). Without the
       // spool there is no dispatcher to hand jobs to.
@@ -382,9 +408,12 @@ export function hasEvent(repo, jobId, kind) {
 // Record systemd's verdict once. A job still dispatched or running takes the mapped status;
 // a job we already ended (cancelled, budget_exceeded, interrupted by the supervisor) keeps
 // its status and only gains the exit event and code.
-export function applyUnitResult(repo, job, result, at, { summary = null } = {}) {
+// watchingSince: when the supervisor of this process started (executor.mjs runnerWatchStart);
+// a unit that ended before it was not observed (statusFromResult).
+export function applyUnitResult(repo, job, result, at, { summary = null, watchingSince = runnerWatchStart() } = {}) {
   if (hasEvent(repo, job.id, 'exit')) return repo.getJob(job.id) ?? job;
-  const outcome = statusFromResult(result);
+  const unobserved = Number.isFinite(watchingSince) && Number.isFinite(result.ended_at) && result.ended_at < watchingSince;
+  const outcome = statusFromResult(result, { unobserved });
   const detail = { service_result: result.service_result, exit_code: result.exit_code, exit_status: result.exit_status,
     ...(result.reason ? { root_reason: result.reason } : {}) };
   if (job.status === 'dispatched' || job.status === 'running') {

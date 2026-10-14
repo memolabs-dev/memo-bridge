@@ -301,6 +301,99 @@ test('AC-P4-18: a job whose worktree plus output outgrows the budget is stopped 
   assert.deepEqual([ev.detail.used_bytes, ev.detail.budget_bytes], [1.5 * GIB, GIB]);
 });
 
+test('AC-P4-18 fails closed: du that times out or is partial, N times in a row, stops the job (verifier finding 1)', async t => {
+  const v = await vps(t, { config: { disk_budget_gib: 1, max_unmeasured_readings: 3 } });
+  const { job } = await v.jobs.submit(v.submitArgs);
+  await v.supervisor.tick();
+  v.startUnit(job.job_id);
+  await v.supervisor.tick();
+  assert.equal((await v.row(job.job_id)).status, 'running');
+  // The job made part of its tree unreadable to memo-runner (du partial) then outran du (timeout, null).
+  const readings = [{ bytes: 0.1 * GIB, partial: true }, null, { bytes: 0.2 * GIB, partial: true }];
+  for (const [i, reading] of readings.entries()) {
+    v.reading.usage = reading;
+    v.clock.t += 61_000;
+    await v.supervisor.tick();
+    const r = await v.row(job.job_id);
+    if (i < readings.length - 1) assert.equal(r.status, 'running', `reading ${i + 1} alone does not stop it`);
+    else assert.deepEqual([r.status, r.status_reason], ['budget_exceeded', 'disk_unmeasurable']);
+  }
+  assert.deepEqual(v.cancels(), [v.did(job.job_id)], 'the dispatcher is asked to stop the unit');
+  const kinds = await v.kinds(job.job_id);
+  assert.equal(kinds.filter(k => k === 'disk_unmeasured').length, 2);
+
+  // A complete reading in between resets the count; a partial reading already over the budget stops at once.
+  const w = await vps(t, { config: { disk_budget_gib: 1, max_unmeasured_readings: 2 } });
+  const second = (await w.jobs.submit(w.submitArgs)).job;
+  await w.supervisor.tick();
+  w.startUnit(second.job_id);
+  await w.supervisor.tick();
+  for (const reading of [null, { bytes: 0.1 * GIB, partial: false }, null]) {
+    w.reading.usage = reading;
+    w.clock.t += 61_000;
+    await w.supervisor.tick();
+  }
+  assert.equal((await w.row(second.job_id)).status, 'running', 'unmeasured readings must be consecutive');
+  w.reading.usage = { bytes: 1.2 * GIB, partial: true };
+  w.clock.t += 61_000;
+  await w.supervisor.tick();
+  assert.deepEqual([(await w.row(second.job_id)).status, (await w.row(second.job_id)).status_reason], ['budget_exceeded', 'disk_budget']);
+});
+
+test('AC-P4-18 free-disk floor: a running job is stopped as soon as free disk falls below the floor (verifier finding 1)', async t => {
+  const v = await vps(t, { config: { min_free_disk_running_gib: 20 } });
+  const { job } = await v.jobs.submit(v.submitArgs);
+  await v.supervisor.tick();
+  v.startUnit(job.job_id);
+  await v.supervisor.tick();
+  // du says the job is tiny (it hid its tree), but the shared disk is filling up.
+  v.reading.usage = { bytes: 0, partial: false };
+  v.reading.snapshot = { ...HEALTHY(), disk: { path: '/', free_bytes: 25 * GIB, total_bytes: 300 * GIB } };
+  v.clock.t += 5_000;
+  await v.supervisor.tick();
+  assert.equal((await v.row(job.job_id)).status, 'running');
+  v.reading.snapshot = { ...HEALTHY(), disk: { path: '/', free_bytes: 19 * GIB, total_bytes: 300 * GIB } };
+  v.clock.t += 5_000;
+  await v.supervisor.tick();
+  const r = await v.row(job.job_id);
+  assert.deepEqual([r.status, r.status_reason], ['budget_exceeded', 'disk_floor'], 'checked every tick, not only at the du interval');
+  assert.deepEqual(v.cancels(), [v.did(job.job_id)]);
+  assert.equal(v.supervisor.status().disk_free.floor_gib, 20);
+  // runner.json in the lab-infra shape sets the floor in bytes.
+  const dir = await mkdtemp(join(tmpdir(), 'memo-floor-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'runner.json'), JSON.stringify({ budgets: { disk_bytes: 2 * GIB, du_interval_sec: 60, min_free_disk_running_bytes: 30 * GIB } }));
+  const cfg = loadRunnerConfig(join(dir, 'runner.json'));
+  assert.deepEqual([cfg.min_free_disk_running_gib, cfg.max_unmeasured_readings, cfg.errors], [30, 3, []]);
+});
+
+test('runner.json recipes and timeout ceiling reach jobs_submit (verifier finding 2)', async t => {
+  const v = await vps(t);
+  const dir = await mkdtemp(join(tmpdir(), 'memo-policy-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The lab-infra shape: top-level recipe names, job_unit ceiling, and the dispatch section it renders from the same vars.
+  await writeFile(join(dir, 'runner.json'), JSON.stringify({ recipes: ['test', 'lint'], job_unit: { timeout_max_sec: 1200 },
+    dispatch: { max_timeout_seconds: 1800, recipes: ['test', 'build', 'lint'] } }));
+  const cfg = loadRunnerConfig(join(dir, 'runner.json'));
+  assert.deepEqual([cfg.recipes, cfg.max_timeout_seconds, cfg.errors], [['test', 'lint'], 1200, []], 'the narrowest source wins');
+  const executor = createSystemdExecutor({ root: v.root, systemctl: v.systemctl.path, statusOwnerUid: UID,
+    policy: { recipes: cfg.recipes, max_timeout_seconds: cfg.max_timeout_seconds } });
+  const jobs = createJobService(v.rt, { executor });
+  const build = await jobs.submit({ ...v.submitArgs, recipe: 'build' });
+  assert.equal(build.error, 'recipe_not_allowed', JSON.stringify(build));
+  const long = await jobs.submit({ ...v.submitArgs, timeout_seconds: 1201 });
+  assert.equal(long.error, 'invalid_input', JSON.stringify(long));
+  assert.match(long.detail, /maximum \(1200\)/);
+  const ok = await jobs.submit({ ...v.submitArgs, timeout_seconds: 1200 });
+  assert.equal(ok.job?.status, 'queued', JSON.stringify(ok));
+  // Defaults: every recipe, the dispatcher's hard ceiling; malformed values narrow to nothing.
+  const none = loadRunnerConfig('/nonexistent/runner.json');
+  assert.deepEqual([none.recipes, none.max_timeout_seconds], [null, 3600]);
+  await writeFile(join(dir, 'bad.json'), JSON.stringify({ recipes: 'test', job_unit: { timeout_max_sec: 7200 } }));
+  const bad = loadRunnerConfig(join(dir, 'bad.json'));
+  assert.deepEqual([bad.recipes, bad.max_timeout_seconds, bad.errors], [[], 3600, ['recipes', 'job_unit.timeout_max_sec']]);
+});
+
 test('AC-P4-20: cancel reaches the unit through the dispatcher, even when it came from task_release', async t => {
   const v = await vps(t);
   const { job } = await v.jobs.submit(v.submitArgs);
@@ -348,6 +441,28 @@ test('the next job waits until a stopped unit has really ended (the dispatcher w
   assert.deepEqual(v.queued(), [`${v.did(b.job_id)}.json`]);
 });
 
+test('a job settled while its unit is still deactivating holds the next dispatch until systemd says inactive (verifier finding 6)', async t => {
+  const v = await vps(t, { worktrees: 2 });
+  const a = (await v.jobs.submit(v.submitArgs)).job;
+  const b = (await v.jobs.submit({ ...v.submitArgs, worktree_id: 'wt_1' })).job;
+  await v.supervisor.tick();
+  v.startUnit(a.job_id);
+  await v.supervisor.tick();
+  // record-result wrote status.json; the unit is still deactivating (ExecStopPost, cgroup teardown).
+  await v.finishUnit(a.job_id, SUCCESS);
+  v.systemctl.set(`memo-job@${v.did(a.job_id)}.service`, 'deactivating');
+  await v.supervisor.tick();
+  assert.equal((await v.row(a.job_id)).status, 'succeeded', 'the result is recorded at once');
+  assert.equal((await v.row(b.job_id)).status, 'queued', 'but the dispatcher would refuse b as host_busy now');
+  assert.deepEqual(v.queued(), []);
+  assert.equal(v.supervisor.status().waiting_for_unit.state, 'deactivating');
+  v.systemctl.set(`memo-job@${v.did(a.job_id)}.service`, 'inactive');
+  await v.supervisor.tick();
+  assert.deepEqual(v.queued(), [`${v.did(b.job_id)}.json`]);
+  assert.equal((await v.row(b.job_id)).status, 'dispatched');
+  assert.equal(v.supervisor.status().waiting_for_unit, null);
+});
+
 test('AC-P4-08: reconcile on start follows a running unit, settles a finished one, and reports a vanished one interrupted', async t => {
   const v = await vps(t, { worktrees: 1 });
   const ids = [];
@@ -361,8 +476,10 @@ test('AC-P4-08: reconcile on start follows a running unit, settles a finished on
   });
   v.systemctl.set(`memo-job@${v.did(ids[0])}.service`, 'active');
   await v.finishUnit(ids[1], SUCCESS);
-  await v.finishUnit(ids[2], { service_result: 'signal', exit_code: 'killed', exit_status: 'KILL' }); // killed while the runner was down
+  // Killed while the runner was down: root's ended_at is before the new supervisor started.
+  await v.finishUnit(ids[2], { service_result: 'signal', exit_code: 'killed', exit_status: 'KILL', ended_at: new Date(v.clock.t).toISOString() });
   // ids[3]: unit inactive and no status file (lost across a reboot)
+  v.clock.t += 60_000; // the runner restarts a minute later
   const fresh = createSupervisor(v.rt, { executor: v.executor, resources: { snapshot: () => HEALTHY(), usage: async () => ({ bytes: 0, partial: false }) },
     config: loadRunnerConfig('/nonexistent') });
   await fresh.reconcileOnStart();
@@ -372,6 +489,30 @@ test('AC-P4-08: reconcile on start follows a running unit, settles a finished on
   assert.equal((await v.row(ids[3])).status_reason, 'no_unit_status');
   // A job a client cancels while the runner is down is still stopped on start.
   assert.deepEqual(v.cancels(), []);
+});
+
+test('a job that kills itself (SIGKILL, or SIGTERM which systemd counts clean) ends failed, not interrupted (verifier finding 3)', async t => {
+  const v = await vps(t, { worktrees: 2 });
+  const a = (await v.jobs.submit(v.submitArgs)).job;
+  await v.supervisor.tick();
+  v.startUnit(a.job_id);
+  await v.supervisor.tick();
+  v.clock.t += 10_000;
+  await v.finishUnit(a.job_id, { service_result: 'signal', exit_code: 'killed', exit_status: 'KILL', reason: 'signal',
+    ended_at: new Date(v.clock.t).toISOString() });
+  await v.supervisor.tick();
+  const ra = await v.row(a.job_id);
+  assert.deepEqual([ra.status, ra.status_reason], ['failed', 'signal_KILL']);
+  const b = (await v.jobs.submit({ ...v.submitArgs, worktree_id: 'wt_1' })).job;
+  await v.supervisor.tick();
+  v.startUnit(b.job_id);
+  await v.supervisor.tick();
+  v.clock.t += 10_000;
+  await v.finishUnit(b.job_id, { service_result: 'success', exit_code: 'killed', exit_status: 'TERM', reason: 'stopped_by_signal',
+    ended_at: new Date(v.clock.t).toISOString() });
+  await v.supervisor.tick();
+  const rb = await v.row(b.job_id);
+  assert.deepEqual([rb.status, rb.status_reason], ['failed', 'signal_TERM']);
 });
 
 test('a crash between the spool write and the compare-and-set never starts a unit twice', async t => {

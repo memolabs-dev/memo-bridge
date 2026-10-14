@@ -442,6 +442,7 @@ function commitMessage(value) {
 export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) {
   // Local Git calls never see the credentials directory; network calls get networkGit(runnerEnv).
   const env = gitBaseEnv(runnerEnv);
+  const baseGitEnv = env; // methods below shadow `env` with the pinned one from locate()
   const read = fn => rt.store().transaction(repo => fn(repo), { write: false });
   const write = fn => rt.store().transaction(repo => fn(repo));
   const now = () => rt.now();
@@ -492,37 +493,61 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
   }
 
   // The worktree must still be on its own branch, which is never a protected one (any case).
-  async function onOwnBranch(root, row) {
-    const branch = await currentBranch(root, env);
+  async function onOwnBranch(root, row, gitEnv) {
+    const branch = await currentBranch(root, gitEnv);
     if (branch !== row.branch) return { error: fail('branch_changed', 'the worktree is no longer on its branch') };
-    if (isProtectedBranch(branch, [await defaultBranch(root, env)])) return { error: fail('protected_branch') };
+    if (isProtectedBranch(branch, [await defaultBranch(root, gitEnv)])) return { error: fail('protected_branch') };
     return { branch };
+  }
+
+  // A VPS job (a memo-job unit) waiting or running in the worktree: runner-side Git that writes
+  // or uses the network (commit, push) waits until it ends (verifier finding 5, defense in
+  // depth behind the pinned GIT_DIR). On the Mac the job runs as the same user, so nothing is
+  // gained and Phase 3 behaviour is kept.
+  async function unitJobActive(row) {
+    const active = await write(repo => ACTIVE_JOB_STATUSES.flatMap(status =>
+      repo.listJobs({ workspace_id: row.workspace_id, status, limit: 1000 }).filter(job => job.worktree_id === row.id && job.unit))
+      .map(job => reconcileJob(repo, job, now())).filter(job => ACTIVE_JOB_STATUSES.includes(job.status)));
+    return active.length
+      ? { error: fail('job_active', `${active.length} job(s) waiting or running in this worktree; wait for them or cancel them with job_cancel`) }
+      : null;
   }
 
   // The worktree directory, and proof that its `.git` link still points at this project's
   // repository: a plain file "gitdir: <repo>/.git/worktrees/<name>". Anything else (a
   // directory, a symlink, another repository) would make every Git command below run against
   // a repository and configuration that someone else wrote.
+  //
+  // The link is read once, here. Every Git call that follows gets the validated paths pinned in
+  // GIT_DIR and GIT_WORK_TREE (git(1), ENVIRONMENT), so Git never reads the link file again
+  // (verifier finding 5): on the VPS the worktree is group-writable by memo-job (setgid 2770,
+  // UMask=0007), and a running job could otherwise swap the link between this check and a later
+  // Git call (commit waits on a ledger verify in between) and point Git at a configuration it
+  // wrote. The gitdir and the common dir live under repos/, read-only to the job.
   async function locate(row) {
     const located = await worktreeRoot(row);
     if (located.error) return located;
     const { root } = located;
     const bad = { error: fail('worktree_link_changed', 'the worktree .git link no longer points at the project repository') };
+    let gitdir; let commonDir;
     try {
       const link = join(root, '.git');
       if (!(await lstat(link)).isFile()) return bad;
       const text = await readRegular(link, 4096);
       const match = text && /^gitdir: (\/.+)\n?$/.exec(text.toString('utf8'));
       if (!match) return bad;
-      const gitdir = await realpath(match[1]);
+      gitdir = await realpath(match[1]);
       if (basename(dirname(gitdir)) !== 'worktrees') return bad;
       const info = await projectInfo(row.project_id, rt.catalogOptions);
       if (!info.ok || !info.project.local_path) return bad;
-      if (dirname(dirname(gitdir)) !== await realpath(join(info.project.local_path, '.git'))) return bad;
+      commonDir = dirname(dirname(gitdir));
+      if (commonDir !== await realpath(join(info.project.local_path, '.git'))) return bad;
+      if (!(await stat(gitdir)).isDirectory()) return bad;
     } catch {
       return bad;
     }
-    return { root };
+    const pins = { GIT_DIR: gitdir, GIT_WORK_TREE: root };
+    return { root, gitdir, commonDir, pins, env: { ...env, ...pins } };
   }
 
   return {
@@ -642,6 +667,7 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
       const head = await revParse(root, 'HEAD', env);
       if (!head) return fail('git_failed', 'HEAD');
       const branch = await currentBranch(root, env);
@@ -701,6 +727,7 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const located = await locate(wt.row);
       if (located.error) return located.error;
       const { root } = located;
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
       if (rel) {
         const target = await resolveExisting(root, rel);
         if (target.error) return target.error;
@@ -782,7 +809,8 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
-      const own = await onOwnBranch(root, row);
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
+      const own = await onOwnBranch(root, row, env);
       if (own.error) return own.error;
 
       // Find the nearest existing ancestor and check it before creating anything.
@@ -841,6 +869,7 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const located = await locate(wt.row);
       if (located.error) return located.error;
       const { root } = located;
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
       // No external diff programs and no textconv filters: only git's own diff runs.
       const base = ['diff', '--no-color', '--no-ext-diff', '--no-textconv', ...(args.staged ? ['--cached'] : [])];
       const statOut = await runGit(root, [...base, '--stat=200'], { readOnly: true, env, maxBytes: LIMITS.statBytes });
@@ -864,16 +893,22 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
+      const busy = await unitJobActive(row);
+      if (busy) return busy.error;
       const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
-      const own = await onOwnBranch(root, row);
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
+      const own = await onOwnBranch(root, row, env);
       if (own.error) return own.error;
       // The commit is authored by the user's own Git identity; nothing is added to it.
       const ident = await runGit(root, ['var', 'GIT_AUTHOR_IDENT'], { readOnly: true, env, maxBytes: 1024 });
       if (ident.code !== 0) return fail('git_identity_missing');
       const held = await verifiedClaim(row, workspace);
       if (held.error) return held.error;
+      // A job may have been queued and dispatched during the ledger call.
+      const busyAfter = await unitJobActive(row);
+      if (busyAfter) return busyAfter.error;
 
       const added = await runGit(root, ['add', '-A', '--', '.'], { env, maxBytes: 64 * 1024 });
       if (added.code !== 0) return fail('git_failed', 'add');
@@ -893,17 +928,21 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
+      const busy = await unitJobActive(row);
+      if (busy) return busy.error;
       const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
-      const own = await onOwnBranch(root, row);
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
+      const own = await onOwnBranch(root, row, env);
       if (own.error) return own.error;
       const head = await revParse(root, 'HEAD', env);
       if (!head) return fail('git_failed', 'HEAD');
       // Ask the remote itself (network): its default branch and its branches. The local
       // origin/HEAD can be missing or stale, and a narrow fetch refspec hides other branches.
-      const net = await networkGit(runnerEnv);
-      if (net.error) return net.error;
+      const unpinned = await networkGit(runnerEnv);
+      if (unpinned.error) return unpinned.error;
+      const net = { ...unpinned, env: { ...unpinned.env, ...located.pins } };
       const remote = await remoteBranches(root, net);
       if (!remote) return fail('push_failed', 'ls-remote');
       if (isProtectedBranch(row.branch, [remote.head, await defaultBranch(root, env)])) return fail('protected_branch');
@@ -918,6 +957,8 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       }
       const held = await verifiedClaim(row, workspace);
       if (held.error) return held.error;
+      const busyAfter = await unitJobActive(row);
+      if (busyAfter) return busyAfter.error;
 
       // Explicit refspec without '+': a non-fast-forward is rejected by the remote, never forced.
       const ref = `refs/heads/${row.branch}`;
@@ -979,6 +1020,7 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       }
       if (located.error) return located.error;
       const { root } = located;
+      const env = located.env; // GIT_DIR and GIT_WORK_TREE pinned (locate)
       const changes = await statusEntries(root, env);
       if (!changes) return fail('git_failed', 'status');
       if (changes.count > 0) {
@@ -1000,10 +1042,10 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) 
       if (unpushed.code !== 0) return fail('git_failed', 'rev-list');
       const count = Number(out(unpushed));
       if (count > 0) return fail('unpushed_commits', `${count} commit(s) not on origin`);
-      const common = await runGit(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { readOnly: true, env, maxBytes: 4096 });
-      if (common.code !== 0) return fail('git_failed', 'common dir');
+      // The common dir validated by locate(), not asked from inside the worktree; `worktree
+      // remove` runs from the repository itself, without the worktree's pins.
       // No --force: git itself refuses a worktree that became dirty in the meantime.
-      const removed = await runGit(out(common), ['worktree', 'remove', '--', row.path], { env, maxBytes: 16 * 1024 });
+      const removed = await runGit(located.commonDir, ['worktree', 'remove', '--', row.path], { env: baseGitEnv, maxBytes: 16 * 1024 });
       if (removed.code !== 0) return fail('git_failed', 'worktree remove');
       return markRemoved(ignoredNames.length ? `${ignoredNames.length} ignored entr${ignoredNames.length === 1 ? 'y' : 'ies'} deleted` : undefined);
     }

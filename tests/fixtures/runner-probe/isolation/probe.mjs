@@ -55,6 +55,9 @@ export function plan(cwd = process.cwd(), env = process.env) {
   if (env.MEMO_JOB_OUT) checks.push({ check: 'write_job_out', kind: 'write', dir: env.MEMO_JOB_OUT, expect: 'allow' });
   checks.push({ check: 'tcp_github.com_443', kind: 'tcp', host: 'github.com', port: 443, expect: 'allow' });
   checks.push({ check: 'tcp_registry.npmjs.org_443', kind: 'tcp', host: 'registry.npmjs.org', port: 443, expect: 'allow' });
+  // The job shares the host network namespace (it needs the internet, so no PrivateNetwork=) and
+  // keeps AF_UNIX: a host abstract-namespace unix socket would be reachable. None should listen.
+  checks.push({ check: 'abstract_unix_listeners', kind: 'abstract', file: '/proc/net/unix', expect: 'deny' });
   checks.push({ check: 'env_no_secrets', kind: 'env', expect: 'deny' });
   checks.push({ check: 'groups_unprivileged', kind: 'groups', expect: 'deny' });
   checks.push({ check: 'no_new_privileges', kind: 'privileges', expect: 'deny' });
@@ -124,6 +127,17 @@ function write(check) {
   }
 }
 
+// /proc/net/unix (proc(5)): "Num RefCount Protocol Flags Type St Inode Path"; a listening
+// socket has Flags 00010000 (__SO_ACCEPTCON), an abstract one a Path starting with '@'. Only
+// the count is reported, never the names.
+function abstractCheck(check) {
+  let text;
+  try { text = readFileSync(check.file, 'utf8'); } catch (error) { return result(check, 'inconclusive', String(error?.code ?? 'error')); }
+  const listening = text.split('\n').slice(1).map(line => line.trim().split(/\s+/))
+    .filter(f => f.length >= 8 && f[3] === '00010000' && f[7].startsWith('@')).length;
+  return result(check, listening === 0 ? 'pass' : 'fail', `abstract_listeners:${listening}`);
+}
+
 function envCheck(check, env) {
   const names = Object.keys(env).filter(name => SECRET_NAMES.has(name) || SECRET_NAME_RE.test(name)).sort();
   return result(check, names.length === 0 ? 'pass' : 'fail', names.length === 0 ? 'none' : `names:${names.join(',')}`);
@@ -169,6 +183,7 @@ export async function run(checks, env = process.env) {
       case 'unix': results.push(await unix(check)); break;
       case 'read': results.push(read(check)); break;
       case 'write': results.push(write(check)); break;
+      case 'abstract': results.push(abstractCheck(check)); break;
       case 'env': results.push(envCheck(check, env)); break;
       case 'groups': results.push(groupsCheck(check)); break;
       case 'privileges': results.push(privilegesCheck(check)); break;

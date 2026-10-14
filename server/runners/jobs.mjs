@@ -147,6 +147,7 @@ export function defaultExecutor(env = process.env, { runnerPath = DEFAULT_RUNNER
   if (!root.ok) return unavailableExecutor(root.error, root.detail);
   const config = loadRunnerConfig(env.MEMO_BRIDGE_RUNNER_CONFIG);
   return createSystemdExecutor({ root: root.root, maxQueue: config.max_queue,
+    policy: { recipes: config.recipes, max_timeout_seconds: config.max_timeout_seconds },
     limits: { slice: 'memo-dev.slice', disk_budget_gib: config.disk_budget_gib } });
 }
 
@@ -292,6 +293,14 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       const timeoutSeconds = args.timeout_seconds ?? TIMEOUT_SECONDS.default;
       if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < TIMEOUT_SECONDS.min || timeoutSeconds > TIMEOUT_SECONDS.max) {
         return journal(op, fail('invalid_input', 'timeout_seconds'), ids);
+      }
+      // The VPS runner's own limits (runner.json, also enforced by the root dispatcher).
+      const policy = exec.policy ?? null;
+      if (policy?.recipes && !policy.recipes.includes(recipe)) {
+        return journal(op, fail('recipe_not_allowed', policy.recipes.length ? `allowed on this host: ${policy.recipes.join(', ')}` : 'no recipe is allowed on this host'), ids);
+      }
+      if (Number.isInteger(policy?.max_timeout_seconds) && timeoutSeconds > policy.max_timeout_seconds) {
+        return journal(op, fail('invalid_input', `timeout_seconds above this host's maximum (${policy.max_timeout_seconds})`), ids);
       }
       if (args.client_request_id !== undefined && !CLIENT_REQUEST_ID_RE.test(String(args.client_request_id))) {
         return journal(op, fail('invalid_input', 'client_request_id'), ids);

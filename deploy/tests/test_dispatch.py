@@ -799,6 +799,46 @@ class LayoutTests(DispatchTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('started=1', result.stderr)
 
+    def test_recipe_name_list_narrows_the_allowlist(self):
+        # Verifier finding 2: lab-infra renders dispatch.recipes from memo_runner_recipes, a list
+        # of names. A name left out is refused; a listed name keeps its built-in shapes.
+        self.box = Sandbox(self, {'recipes': ['test', 'lint']})
+        self.box.request(recipe='build')
+        self.assertRefused(self.box.run(), 'recipe_not_allowed')
+        self.box = Sandbox(self, {'recipes': ['test']})
+        self.box.request()
+        result = self.box.run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.box.dropin_file()) as handle:
+            self.assertIn('MEMO_JOB_ALLOWED_ARGV=cargo:test,go:test:./...,make:test,npm:test,python3:-m:pytest:-q ',
+                          handle.read())
+
+    def test_recipe_name_list_cannot_add_or_repeat(self):
+        for recipes, reason in ((['test', 'deploy'], 'recipe_not_builtin'), (['test', 'test'], 'recipes_invalid'),
+                                (['test', 1], 'recipes_invalid')):
+            with self.subTest(recipes=recipes):
+                self.box = Sandbox(self, {'recipes': recipes})
+                self.box.request()
+                result = self.box.run()
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f'reason={reason}', result.stderr)
+                self.assertEqual(self.box.calls(), [])
+
+    def test_lab_infra_dispatch_section_lowers_the_timeout(self):
+        # Verifier finding 2: memo_runner_job_timeout_max_sec reaches the dispatcher as
+        # dispatch.max_timeout_seconds, so a lower ceiling refuses a longer job (the drop-in's
+        # RuntimeMaxSec= would otherwise override the template's).
+        with open(self.box.config) as handle:
+            document = json.load(handle)
+        document['dispatch'].update({'max_timeout_seconds': 600, 'recipes': ['test', 'build', 'lint']})
+        document.update({'recipes': ['test', 'build', 'lint'], 'job_unit': {'timeout_max_sec': 600}})
+        self.box.write_config(document)
+        self.box.request(timeout_seconds=601)
+        self.assertRefused(self.box.run(), 'invalid_timeout')
+        self.box.request(DID2, timeout_seconds=600)
+        result = self.box.run()
+        self.assertIn('started=1', result.stderr)
+
     def test_empty_spool_is_a_no_op(self):
         result = self.box.run()
         self.assertEqual(result.returncode, 0)
@@ -958,7 +998,7 @@ class FixtureTests(DispatchTestCase):
         checks = {item['check']: item['expect'] for item in json.loads(result.stdout)['plan']}
         for port in (4000, 5000, 9443, 4096):
             self.assertEqual(checks[f'tcp_loopback_{port}'], 'deny')
-        for name in ('tcp_private_10.0.4.1', 'unix_run_docker.sock', 'read_var_lib_memo-bridge',
+        for name in ('tcp_private_10.0.4.1', 'unix_run_docker.sock', 'read_var_lib_memo-bridge', 'abstract_unix_listeners',
                      'read_etc_credstore', 'read_etc_github.env', 'write_worktree_parent', 'write_etc',
                      'env_no_secrets', 'groups_unprivileged', 'no_new_privileges'):
             self.assertEqual(checks[name], 'deny', name)
@@ -972,6 +1012,15 @@ class FixtureTests(DispatchTestCase):
             handle.write('GH_TOKEN=do-not-print-me\n')
         writable = os.path.join(self.box.tmp, 'writable')
         os.mkdir(writable)
+        # /proc/net/unix as the job would see it in the host network namespace (verifier finding 8).
+        header = 'Num       RefCount Protocol Flags    Type St Inode Path\n'
+        unix_none = os.path.join(self.box.tmp, 'unix-none')
+        unix_one = os.path.join(self.box.tmp, 'unix-one')
+        with open(unix_none, 'w') as handle:
+            handle.write(header + '0000000000000000: 00000002 00000000 00010000 0001 01 13716 /run/containerd/s/x\n'
+                                  '0000000000000000: 00000002 00000000 00000000 0001 03 13717 @client-side\n')
+        with open(unix_one, 'w') as handle:
+            handle.write(header + '0000000000000000: 00000002 00000000 00010000 0001 01 13718 @/tmp/.X11-unix/X0\n')
         script = (
             'const { run } = await import(process.argv[2]);'
             'const checks = JSON.parse(process.argv[3]);'
@@ -985,6 +1034,8 @@ class FixtureTests(DispatchTestCase):
             {'check': 'write_allowed_dir', 'kind': 'write', 'dir': writable, 'expect': 'allow'},
             {'check': 'env', 'kind': 'env', 'expect': 'deny'},
             {'check': 'closed_port', 'kind': 'tcp', 'host': '127.0.0.1', 'port': 9, 'expect': 'deny'},
+            {'check': 'abstract_none', 'kind': 'abstract', 'file': unix_none, 'expect': 'deny'},
+            {'check': 'abstract_one', 'kind': 'abstract', 'file': unix_one, 'expect': 'deny'},
         ]
         # argv[1] is a placeholder, so probe.mjs does not see itself as the main module.
         result = self.node('--input-type=module', '-e', script, '_', probe, json.dumps(checks))
@@ -997,6 +1048,9 @@ class FixtureTests(DispatchTestCase):
         self.assertEqual(outcomes['env'], ('fail', 'names:GH_TOKEN'))
         # A closed port answers ECONNREFUSED: the packet got through, so that is not isolation.
         self.assertEqual(outcomes['closed_port'], ('fail', 'ECONNREFUSED'))
+        self.assertEqual(outcomes['abstract_none'], ('pass', 'abstract_listeners:0'))
+        self.assertEqual(outcomes['abstract_one'], ('fail', 'abstract_listeners:1'))
+        self.assertNotIn('X11', result.stdout)
         self.assertNotIn('do-not-print-me', result.stdout)
         self.assertEqual(os.listdir(writable), [], 'files the probe creates are removed')
 

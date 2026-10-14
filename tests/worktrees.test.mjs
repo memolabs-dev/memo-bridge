@@ -75,7 +75,7 @@ async function fixture(t, { principal = OWNER } = {}) {
   const receipt = async () => ({ ok: true, receipt: {} });
   const ledger = {
     status: receipt, claim: receipt, heartbeat: receipt, release: receipt,
-    verify: async (...args) => { ledgerCalls.push(args); return state.verify; }
+    verify: async (...args) => { ledgerCalls.push(args); return typeof state.verify === 'function' ? state.verify(...args) : state.verify; }
   };
   const rt = createRuntime({ stateDir: join(base, 'state'), principal, ledger, catalogOptions: { projectsRoot }, host: 'mac' });
   t.after(async () => { await rt.close(); await rm(base, { recursive: true, force: true }); });
@@ -708,4 +708,50 @@ test('a redirected .git link is refused before any Git command runs in the workt
   execFileSync('git', ['-C', other, 'worktree', 'add', '-q', '-b', 'agent/x', join(f.base, 'other-wt')]);
   await writeFile(join(path, '.git'), `gitdir: ${join(other, '.git', 'worktrees', 'other-wt')}\n`);
   assert.equal((await f.call('worktree_status', { worktree_id: id })).error, 'worktree_link_changed');
+});
+
+test('runner Git never re-reads the .git link: one swapped during the ledger verify cannot run a foreign config (verifier finding 5)', async t => {
+  const f = await fixture(t);
+  const { id, path } = await f.ready();
+  // A job (group-writable worktree on the VPS) prepared a repository whose config runs a clean
+  // filter, and an attributes file that applies it to every file.
+  const evil = join(f.base, 'evil');
+  const marker = join(f.base, 'pwned');
+  execFileSync('git', ['init', '-q', '-b', 'main', evil]);
+  git(evil, 'config', 'filter.evil.clean', `touch '${marker}'; cat`);
+  await writeFile(join(path, '.gitattributes'), '* filter=evil\n');
+  assert.equal((await f.call('worktree_write_file', { worktree_id: id, path: 'a.txt', content: 'x\n' })).ok, true);
+  // ... and swaps the link while the runner waits on the ledger (after locate() checked it).
+  f.state.verify = async () => {
+    await writeFile(join(path, '.git'), `gitdir: ${join(evil, '.git')}\n`);
+    return { ok: true, receipt: {} };
+  };
+  const committed = await f.call('worktree_commit', { worktree_id: id, message: 'wip' });
+  assert.equal(committed.ok, true, JSON.stringify(committed));
+  assert.equal(existsSync(marker), false, 'the foreign filter never ran');
+  // The commit went to the project repository, on the worktree's branch, not to the foreign one.
+  assert.equal(git(f.repo, 'rev-parse', `refs/heads/${committed.branch}`), committed.commit);
+  assert.throws(() => git(evil, 'rev-parse', 'HEAD'));
+  // Once swapped, the next operation refuses the worktree.
+  f.state.verify = { ok: true, receipt: {} };
+  assert.equal((await f.call('worktree_status', { worktree_id: id })).error, 'worktree_link_changed');
+});
+
+test('commit and push wait while a VPS job unit is queued or running in the worktree (verifier finding 5)', async t => {
+  const f = await fixture(t);
+  const { ws, id } = await f.ready();
+  assert.equal((await f.call('worktree_write_file', { worktree_id: id, path: 'b.txt', content: 'y\n' })).ok, true);
+  const jobId = `job_${randomBytes(12).toString('base64url')}`;
+  await f.rt.store().transaction(r => r.insertJob({ id: jobId, workspace_id: ws, worktree_id: id, project_id: 'demo', host: 'mac',
+    recipe: 'test', argv_json: '["npm","test"]', timeout_ms: 60000, log_path: join(f.base, 'u.log'), created_at: Date.now(),
+    unit: 'memo-job@j0123456789abcdef0123456789abcde.service' }));
+  for (const op of ['worktree_commit', 'worktree_push']) {
+    const refused = await f.call(op, { worktree_id: id, ...(op === 'worktree_commit' ? { message: 'wip' } : {}) });
+    assert.equal(refused.error, 'job_active', `${op} ${JSON.stringify(refused)}`);
+  }
+  // A local (Mac) job keeps Phase 3 behaviour; a finished unit job no longer blocks.
+  await f.rt.store().transaction(r => r.updateJob(jobId, { status: 'succeeded', ended_at: Date.now() }, 'queued'));
+  const committed = await f.call('worktree_commit', { worktree_id: id, message: 'wip' });
+  assert.equal(committed.ok, true, JSON.stringify(committed));
+  assert.equal((await f.call('worktree_push', { worktree_id: id })).ok, true);
 });

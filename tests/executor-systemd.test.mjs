@@ -184,11 +184,26 @@ test('status.json: only a regular file of the expected owner, not group/world wr
 test('systemd result variables map to job statuses (systemd.exec(5), v257)', () => {
   const map = (service_result, exit_code = null, exit_status = null) => statusFromResult({ service_result, exit_code, exit_status });
   assert.deepEqual(map('success', 'exited', '0'), { status: 'succeeded', exit_code: 0 });
-  assert.deepEqual(map('success', 'killed', 'TERM'), { status: 'interrupted', exit_code: null, reason: 'unit_stopped' });
+  // A stop signal while the runner watches is the job's own doing unless root marked a cancel
+  // (verifier finding 3): failed. Ended while no supervisor watched: interrupted (AC-P4-08).
+  assert.deepEqual(map('success', 'killed', 'TERM'), { status: 'failed', exit_code: null, reason: 'signal_TERM' });
+  const unobserved = (service_result, exit_code, exit_status) => statusFromResult({ service_result, exit_code, exit_status }, { unobserved: true });
+  assert.deepEqual(unobserved('success', 'killed', 'TERM'), { status: 'interrupted', exit_code: null, reason: 'unit_stopped' });
+  assert.deepEqual(unobserved('signal', 'killed', 'KILL'), { status: 'interrupted', exit_code: null, reason: 'signal_KILL' });
+  assert.deepEqual(unobserved('signal', 'killed', 'SEGV'), { status: 'failed', exit_code: null, reason: 'signal_SEGV' });
+  assert.deepEqual(unobserved('exit-code', 'exited', '1'), { status: 'failed', exit_code: 1 });
+  // Root's cancel marker (record-result reason) wins over the signal, oom-kill over everything.
+  assert.deepEqual(statusFromResult({ service_result: 'success', exit_code: 'killed', exit_status: 'TERM', reason: 'cancelled' }),
+    { status: 'cancelled', exit_code: null, reason: 'cancelled' });
+  assert.deepEqual(statusFromResult({ service_result: 'timeout', exit_code: 'killed', exit_status: 'KILL', reason: 'budget_exceeded' }),
+    { status: 'budget_exceeded', exit_code: null, reason: 'budget_exceeded' });
+  assert.deepEqual(statusFromResult({ service_result: 'oom-kill', exit_code: 'killed', exit_status: 'KILL', reason: 'cancelled' }).status, 'oom');
+  assert.deepEqual(statusFromResult({ service_result: 'success', exit_code: 'killed', exit_status: 'TERM', reason: 'stopped_by_signal' }).status,
+    'failed', 'a reason that is not a cancel marker changes nothing');
   assert.deepEqual(map('exit-code', 'exited', '3'), { status: 'failed', exit_code: 3 });
   assert.deepEqual(map('timeout', 'killed', 'TERM'), { status: 'timed_out', exit_code: null, reason: 'runtime_max' });
   assert.deepEqual(map('oom-kill', 'killed', 'KILL'), { status: 'oom', exit_code: null, reason: 'oom_kill' });
-  assert.deepEqual(map('signal', 'killed', 'KILL'), { status: 'interrupted', exit_code: null, reason: 'signal_KILL' });
+  assert.deepEqual(map('signal', 'killed', 'KILL'), { status: 'failed', exit_code: null, reason: 'signal_KILL' });
   assert.deepEqual(map('signal', 'killed', 'SEGV'), { status: 'failed', exit_code: null, reason: 'signal_SEGV' });
   assert.deepEqual(map('core-dump', 'dumped', 'ABRT'), { status: 'failed', exit_code: null, reason: 'core_dump_ABRT' });
   assert.deepEqual(map('dispatch_refused'), { status: 'failed', exit_code: null, reason: 'dispatch_refused' });
@@ -312,7 +327,7 @@ test('AC-P4-20 (service): cancelling a dispatched or running job writes the canc
   const after = await jobs.status({ job_id: id });
   assert.equal(after.job.status, 'cancelled');
   const exit = (await jobs.events({ job_id: id })).events.find(e => e.kind === 'exit');
-  assert.deepEqual(exit.detail, { service_result: 'success', exit_code: 'killed', exit_status: 'TERM', status: 'cancelled', unit_status: 'interrupted' });
+  assert.deepEqual(exit.detail, { service_result: 'success', exit_code: 'killed', exit_status: 'TERM', status: 'cancelled', unit_status: 'failed' });
   assert.deepEqual((await jobs.cancel({ job_id: id })).error, 'job_finished');
 });
 

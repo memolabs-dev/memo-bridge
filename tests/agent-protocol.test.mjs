@@ -294,8 +294,10 @@ test('agent: a hub that stops pinging is dropped by the liveness timer', async t
 
 test('runtime dispatcher re-authorizes forwarded requests and journals refusals (AC-P4-10 runtime side)', async t => {
   // Same wiring as bridge/agent-cli.mjs runtime mode: one base runtime, a view per principal.
+  // Owner writes enabled on the runner side (TODO-P4-40); the default is read-only (runtime-principal tests).
   const base = createRuntime({ stateDir: await tempStateDir(t), ledger: stubLedger(), host: 'vps', resolveProject: stubProjects(),
-    projectRemote: project => Promise.resolve(PROJECT_ORIGINS[project.name] ?? null) });
+    projectRemote: project => Promise.resolve(PROJECT_ORIGINS[project.name] ?? null),
+    hubGrants: { 'hub:owner': 'owner', 'hub:readonly': 'read' } });
   t.after(() => base.close());
   const logged = [];
   const ops = await createRuntimeOperations({ runtimeFor: principal => base.as(principal),

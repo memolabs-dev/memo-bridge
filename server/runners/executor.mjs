@@ -77,6 +77,17 @@ export function runnerStatus() {
   try { return runnerStatusProvider ? runnerStatusProvider() : null; } catch { return null; }
 }
 
+// When the supervisor of this process started watching units (ms), or null. A unit whose root
+// status says it ended before that was not observed by this runner (executor-systemd.mjs
+// statusFromResult: an outside stop while the runner was down, not a job ending itself).
+let runnerWatchingSince = null;
+export function setRunnerWatchStart(ms) {
+  runnerWatchingSince = Number.isFinite(ms) ? ms : null;
+}
+export function runnerWatchStart() {
+  return runnerWatchingSince;
+}
+
 // Wake the supervisor of this process (a job was queued or cancelled) instead of waiting for
 // its next tick. Never throws, never blocks the caller (it may run inside a transaction).
 let supervisorNudge = null;

@@ -104,6 +104,12 @@ export const HUB_ROLES = Object.freeze({
 });
 export const HUB_PRINCIPALS = Object.freeze({ OWNER: 'hub:owner', READ_ONLY: 'hub:readonly' });
 export const DEFAULT_HUB_GRANTS = Object.freeze({ [HUB_PRINCIPALS.OWNER]: 'owner', [HUB_PRINCIPALS.READ_ONLY]: 'read' });
+// The runtime's own default, until the owner enables hub writes (TODO-P4-40, AC-P4-14 gate):
+// read for everyone. The hub's MEMO_BRIDGE_HUB_MUTATING_OPS gate is one side; this is the
+// other, so whoever holds the hub's TLS key (the memo-bridge uid) cannot send mutating ops
+// straight to the runner either (verifier finding 7). Enabling writes takes both
+// MEMO_BRIDGE_HUB_MUTATING_OPS=owner on the hub and MEMO_BRIDGE_HUB_PRINCIPALS on the runner.
+export const RUNTIME_DEFAULT_HUB_GRANTS = Object.freeze({ [HUB_PRINCIPALS.OWNER]: 'read', [HUB_PRINCIPALS.READ_ONLY]: 'read' });
 const MAX_HUB_GRANTS = 32;
 const MAX_CLAIMED_CAPABILITIES = 16;
 
@@ -122,11 +128,11 @@ export function parseHubGrants(value) {
   return Object.freeze(Object.fromEntries(entries));
 }
 
-// The runtime's grants: MEMO_BRIDGE_HUB_PRINCIPALS (JSON) when set, else DEFAULT_HUB_GRANTS.
-// An invalid value throws; callers fail closed.
+// The runtime's grants: MEMO_BRIDGE_HUB_PRINCIPALS (JSON) when set, else
+// RUNTIME_DEFAULT_HUB_GRANTS (read only). An invalid value throws; callers fail closed.
 export function hubGrantsFromEnv(env = process.env) {
   const raw = env.MEMO_BRIDGE_HUB_PRINCIPALS;
-  if (raw === undefined || raw === '') return DEFAULT_HUB_GRANTS;
+  if (raw === undefined || raw === '') return RUNTIME_DEFAULT_HUB_GRANTS;
   try { return parseHubGrants(raw); } catch { throw new Error('invalid_hub_grants'); }
 }
 

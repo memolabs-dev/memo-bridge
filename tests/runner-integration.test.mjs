@@ -27,7 +27,8 @@ const temp = t => {
 };
 
 // /etc/memo-bridge/runner.json as lab-infra renders it (templates/runner.json.j2 with
-// group_vars/lab.yml at 117ff83), with three values moved off the defaults so the test sees them.
+// group_vars/lab.yml after the verifier fixes: dispatch section, running free-disk floor), with
+// a few values moved off the defaults so the test sees them.
 const LAB_INFRA_RUNNER_JSON = {
   version: 1, managed_by: 'lab-infra role memo-bridge', host: 'vps', concurrency: 1,
   pilot_repos: ['memolabs-dev/memo-bridge'], recipes: ['test', 'build', 'lint'],
@@ -35,7 +36,9 @@ const LAB_INFRA_RUNNER_JSON = {
     spool: '/var/lib/memo-runner/spool', jobs: '/var/lib/memo-runner/jobs', governance: '/var/lib/memo-runner/governance' },
   job_unit: { template: 'memo-job@.service', slice: 'memo-dev.slice', dropin: '50-dispatch.conf', timeout_default_sec: 1800,
     timeout_max_sec: 3600, memory_max: '2560M', tasks_max: 256, stop_timeout_sec: 30 },
-  budgets: { disk_bytes: 10 * GIB, du_interval_sec: 90 },
+  budgets: { disk_bytes: 10 * GIB, du_interval_sec: 90, min_free_disk_running_bytes: 25 * GIB },
+  dispatch: { root: '/var/lib/memo-runner', runner_user: 'memo-runner', job_user: 'memo-job', max_timeout_seconds: 2400,
+    recipes: ['test', 'lint'] },
   admission: { min_free_disk_bytes: 42949672960, min_mem_available_bytes: 4294967296, psi_cpu_some_avg10_max: 50.0,
     psi_memory_full_avg10_max: 5.0, psi_io_full_avg10_max: 10.0, retry_sec: 45 }
 };
@@ -52,6 +55,8 @@ test('runner.json written by lab-infra drives admission, the disk budget and the
   assert.equal(cfg.disk_budget_gib, 10);
   assert.equal(cfg.defer_retry_seconds, 45);
   assert.equal(cfg.du_interval_seconds, 90);
+  assert.equal(cfg.min_free_disk_running_gib, 25);
+  assert.deepEqual([cfg.recipes, cfg.max_timeout_seconds], [['test', 'lint'], 2400], 'the dispatch section narrows the runtime too');
   // Both shapes for one setting: reported, the canonical key kept.
   writeFileSync(file, JSON.stringify({ disk_budget_gib: 5, budgets: { disk_bytes: GIB }, admission: { psi_cpu_some_avg10_max: 1, max_psi: {} } }));
   const both = loadRunnerConfig(file);

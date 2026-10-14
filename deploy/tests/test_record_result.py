@@ -130,11 +130,12 @@ class MappingTests(RecordResultTestCase):
                 self.assertIsNone(document['exit_code'])
                 self.assertIsNone(document['exit_status'])
 
-    def test_clean_sigterm_without_marker_is_interrupted(self):
-        # A stop by SIGTERM counts as success for systemd (SuccessExitStatus=); without the
-        # dispatcher's marker someone else stopped the unit (operator, shutdown, reboot).
+    def test_clean_sigterm_without_marker_is_failed(self):
+        # A stop by SIGTERM counts as success for systemd (SuccessExitStatus=). Without the
+        # dispatcher's marker it may be the job killing itself, so it is not an outside stop
+        # (verifier finding 3); the runtime alone says interrupted, when the runner was down.
         self.assertRecorded(self.run_record(SERVICE_RESULT='success', EXIT_CODE='killed', EXIT_STATUS='TERM'),
-                            'interrupted', 'stopped_externally')
+                            'failed', 'stopped_by_signal')
 
 
 class CancelTests(RecordResultTestCase):

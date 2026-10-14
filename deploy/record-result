@@ -34,8 +34,13 @@ Mapping (first match wins):
                                                      budget_exceeded) or cancelled (any other)
   SERVICE_RESULT=timeout                          -> timed_out (RuntimeMaxSec= overrun)
   success, exited, 0                              -> succeeded
-  success, killed (HUP, INT, TERM, PIPE)          -> interrupted (stopped outside the dispatcher:
-                                                     an operator, a shutdown or a reboot)
+  success, killed (HUP, INT, TERM, PIPE)          -> failed (reason stopped_by_signal: the job
+                                                     itself, an operator, a shutdown or a reboot;
+                                                     the job can send itself these signals, so this
+                                                     is never read as an outside stop. The runtime
+                                                     reports interrupted only when the unit ended
+                                                     while the runner was down: executor-systemd.mjs
+                                                     statusFromResult)
   exit-code                                       -> failed (reason exit_status)
   signal, core-dump                               -> failed (reason signal)
   anything else (resources, protocol, watchdog,
@@ -204,7 +209,7 @@ def classify(result, known, code, status, cancel_reason):
     if result == 'success':
         if code == 'exited' and status == '0':
             return 'succeeded', None
-        return 'interrupted', 'stopped_externally'
+        return 'failed', 'stopped_by_signal'
     if result == 'exit-code':
         return 'failed', 'exit_status'
     if result in ('signal', 'core-dump'):

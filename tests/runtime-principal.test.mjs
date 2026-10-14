@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRuntime } from '../server/runtime.mjs';
 import {
-  CAPABILITIES, DEFAULT_HUB_GRANTS, HUB_PRINCIPALS, HUB_ROLES, authorize, hubGrantsFromEnv, isPrincipal, makePrincipal,
+  CAPABILITIES, DEFAULT_HUB_GRANTS, HUB_PRINCIPALS, HUB_ROLES, RUNTIME_DEFAULT_HUB_GRANTS, authorize, hubGrantsFromEnv, isPrincipal, makePrincipal,
   parseHubGrants, principalFromHub
 } from '../server/coordinator/policy.mjs';
 import { registerWorktreeTools } from '../server/tools/worktree-tools.mjs';
@@ -20,8 +20,11 @@ const ALL = Object.values(CAPABILITIES).sort();
 const LOCAL_OWNER = makePrincipal('local:owner', Object.values(CAPABILITIES));
 const ISSUE = 'memolabs-dev/drop#7';
 
+// The runner with owner writes enabled (TODO-P4-40); the default is read-only (verifier finding 7).
+const OWNER_WRITES = JSON.stringify({ 'hub:owner': 'owner', 'hub:readonly': 'read' });
 function runtimeFor(t, stateDir, options = {}) {
-  const rt = createRuntime({ stateDir, principal: LOCAL_OWNER, ledger: stubLedger(), host: 'vps', env: {},
+  const rt = createRuntime({ stateDir, principal: LOCAL_OWNER, ledger: stubLedger(), host: 'vps',
+    env: { MEMO_BRIDGE_HUB_PRINCIPALS: OWNER_WRITES },
     resolveProject: stubProjects(), projectRemote: project => Promise.resolve(PROJECT_ORIGINS[project.name] ?? null),
     ...options });
   t.after(() => rt.close());
@@ -100,8 +103,9 @@ test('principalFromHub: every malformed or unknown claim is refused (null)', () 
   assert.equal(principalFromHub('hub:owner', null), null);
 });
 
-test('hub grants: parsed strictly from MEMO_BRIDGE_HUB_PRINCIPALS, defaults otherwise', () => {
-  assert.equal(hubGrantsFromEnv({}), DEFAULT_HUB_GRANTS);
+test('hub grants: parsed strictly from MEMO_BRIDGE_HUB_PRINCIPALS, read-only defaults otherwise', () => {
+  assert.equal(hubGrantsFromEnv({}), RUNTIME_DEFAULT_HUB_GRANTS);
+  assert.deepEqual(RUNTIME_DEFAULT_HUB_GRANTS, { 'hub:owner': 'read', 'hub:readonly': 'read' });
   assert.deepEqual(hubGrantsFromEnv({ MEMO_BRIDGE_HUB_PRINCIPALS: '{"hub:ops":"read"}' }), { 'hub:ops': 'read' });
   for (const bad of ['not json', '[]', '"hub:owner"', '{"local:x":"owner"}', '{"hub:x":"admin"}', '{"hub:x":1}',
     JSON.stringify(Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`hub:p${i}`, 'read'])))]) {
@@ -120,6 +124,22 @@ test('runtime.principalFromHub uses the runtime grants and fails closed on a bad
   assert.equal(broken.principalFromHub('hub:owner'), null);
   const explicit = runtimeFor(t, `${dir}-c`, { hubGrants: { 'hub:owner': 'read' } });
   assert.deepEqual([...explicit.principalFromHub('hub:owner').capabilities], [CAPABILITIES.READ]);
+});
+
+test('the runtime enforces the hub write gate itself: by default hub:owner may only read (verifier finding 7)', async t => {
+  const rt = runtimeFor(t, await tempStateDir(t), { env: {} });
+  const owner = rt.principalFromHub('hub:owner');
+  assert.deepEqual([...owner.capabilities], [CAPABILITIES.READ]);
+  const ownerCall = toolsOn(rt.as(owner));
+  // A mutating op sent straight to the runner (holder of the hub's TLS key, gate unset) is refused and journaled.
+  const out = await ownerCall('workspace_open', { project: 'drop', client_type: 'claude-code', host: 'vps' });
+  assert.deepEqual({ ok: out.ok, error: out.error }, { ok: false, error: 'forbidden' });
+  assert.equal((await ownerCall('workspace_list', {})).ok, true, 'reads still work');
+  const journal = await events(rt);
+  assert.ok(journal.some(e => e.principal === 'hub:owner' && e.op === 'workspace_open' && e.outcome === 'denied'), JSON.stringify(journal));
+  // Enabled explicitly on the runner side (TODO-P4-40), the owner gets its capabilities back.
+  const enabled = runtimeFor(t, await tempStateDir(t), { env: { MEMO_BRIDGE_HUB_PRINCIPALS: OWNER_WRITES } });
+  assert.deepEqual([...enabled.principalFromHub('hub:owner').capabilities].sort(), ALL);
 });
 
 test('runtime.as: only minted principals, cached views, fixed identity, shared store', async t => {

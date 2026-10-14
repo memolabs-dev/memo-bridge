@@ -36,24 +36,24 @@ queued <-> deferred (deferred_disk, deferred_pressure; re-admitted every retry i
 queued | deferred -> cancelled (job_cancel before start: nothing is started)
 ```
 
-1. `jobs_submit` writes the job `queued` in the store and returns at once. It never answers `host_busy` on the VPS: jobs wait in a FIFO, one runs at a time (concurrency 1, `server/runners/hosts.mjs`). `client_request_id` makes a retry return the first job (store table `requests`). The hub derives `sha256(principal|op|client_request_id)` the same way.
-2. The supervisor (`server/runners/supervisor.mjs`, in the runner process) admits the head of the queue only when free disk, MemAvailable and PSI are within `runner.json` limits (`server/runners/resources.mjs`). Otherwise the job is `deferred` with a reason.
+1. `jobs_submit` refuses a recipe outside `runner.json` (`recipe_not_allowed`) and a timeout above its ceiling, then writes the job `queued` in the store and returns at once. It never answers `host_busy` on the VPS: jobs wait in a FIFO, one runs at a time (concurrency 1, `server/runners/hosts.mjs`). `client_request_id` makes a retry return the first job (store table `requests`). The hub derives `sha256(principal|op|client_request_id)` the same way.
+2. The supervisor (`server/runners/supervisor.mjs`, in the runner process) admits the head of the queue only when free disk, MemAvailable and PSI are within `runner.json` limits (`server/runners/resources.mjs`). Otherwise the job is `deferred` with a reason. It also waits until systemd reports every recently ended job unit inactive: a unit still deactivating after its status was recorded would make the dispatcher refuse the next job as `host_busy`.
 3. On admission it writes `spool/queue/<id>.json` atomically (`server/runners/executor-systemd.mjs`). `<id>` is the dispatch id, `j` plus 31 hex characters of `sha256(job id)`.
-4. The root dispatcher re-checks everything (id, strict schema, owner, worktree path without symlink, recipe in the allow-list, at most one active job unit) and starts `memo-job@<id>.service` with a runtime drop-in `50-dispatch.conf` (`deploy/memo-runner-dispatch`).
+4. The root dispatcher re-checks everything (id, strict schema, owner, worktree path without symlink, recipe in the allow-list and timeout under the ceiling of the `runner.json` `dispatch` section, at most one active job unit) and starts `memo-job@<id>.service` with a runtime drop-in `50-dispatch.conf` (`deploy/memo-runner-dispatch`).
 5. Inside the unit, `job-runner.mjs --executor=systemd <id>` (`server/runners/job-unit.mjs`) checks the drop-in values against its instance and working directory, re-detects the recipe argv and runs it only if it is one of the shapes the dispatcher allowed. It runs it without a shell and with an allow-listed environment, and writes the output to `jobs/<id>/out/job.log`. It decides no status.
 6. When the unit ends, `ExecStopPost=+record-result` writes `jobs/<id>/status.json` as root from systemd's `$SERVICE_RESULT`, `$EXIT_CODE` and `$EXIT_STATUS` (decision D5). The supervisor reads it only when it is a root-owned, non-writable regular file. Output written by the job never sets a status.
 7. While a job waits or runs, the supervisor renews its claim's lease once less than a third of the TTL is left. `stale_lease` cancels the claim's jobs. With `release_on_finish: true` the claim is released when its last job ends: `completed` on success, `cancelled` for cancelled or interrupted, `failed` otherwise.
-8. The supervisor measures the worktree plus `out/` with `du` every `du_interval` and stops the job as `budget_exceeded` past the disk budget.
+8. The supervisor measures the worktree plus `out/` with `du` every `du_interval` and stops the job as `budget_exceeded` past the disk budget (`disk_budget`). The budget fails closed: the job owns what it writes and can make it unreadable to memo-runner or too slow to walk, so a `du` that times out, fails or is partial counts as unmeasured, and `max_unmeasured_readings` (default 3) in a row stop the job (`disk_unmeasurable`). Independently, on every tick, free disk on the runner tree below `min_free_disk_running_gib` (default 20 GiB) stops the running job (`disk_floor`): a `statfs(2)` the job cannot influence, so production keeps room whatever `du` says.
 9. On start the supervisor reconciles: a unit that ended while the runner was down is settled from `status.json`, and one that vanished without a status becomes `interrupted`.
 
-Status mapping (`statusFromResult`): `success` with exit 0 gives `succeeded`; `exit-code` gives `failed` with the exit code; `timeout` gives `timed_out`; `oom-kill` gives `oom`; a stop by TERM, INT, HUP or PIPE gives `interrupted` unless the dispatcher wrote a cancel marker (then `cancelled` or `budget_exceeded`); a refused spool request gives `failed` (`dispatch_refused`), or `cancelled` when it was withdrawn before start.
+Status mapping (`statusFromResult`): `success` with exit 0 gives `succeeded`; `exit-code` gives `failed` with the exit code; `timeout` gives `timed_out`; `oom-kill` gives `oom`; root's cancel marker gives `cancelled` or `budget_exceeded`; a refused spool request gives `failed` (`dispatch_refused`), or `cancelled` when it was withdrawn before start. A job can end itself by any signal, including TERM (which systemd counts as a clean `success`) and KILL, so a signal ending gives `failed` (`signal_<NAME>`). The exception is a unit that ended by HUP, INT, TERM, PIPE or KILL while no supervisor was watching: root's `ended_at` is before the runner's supervisor started, so it was a runner restart or a reboot, and the job is `interrupted` (AC-P4-08). A job cannot choose when the runner is down.
 
 ## Authorization in depth (flow G)
 
 1. The hub authenticates the bearer: the owner bearer maps to `hub:owner`, the optional read-only bearer to `hub:readonly`. A missing or bad token gets 401.
 2. The op must be in the hub registry (`bridge/ops.mjs`) and advertised by the agent in its hello, or the answer is `unsupported_op`.
 3. The hub checks the capability. Mutating ops are forwarded only with `MEMO_BRIDGE_HUB_MUTATING_OPS=owner`, which stays unset until the write gate passes (`docs/HUB_SECURITY.md`).
-4. The runtime maps the principal id again with its own grants (`MEMO_BRIDGE_HUB_PRINCIPALS`, default owner and read) and calls `authorize()` again before reading the arguments (`bridge/agent.mjs`, `runtime.as(principal)`).
+4. The runtime maps the principal id again with its own grants (`MEMO_BRIDGE_HUB_PRINCIPALS`) and calls `authorize()` again before reading the arguments (`bridge/agent.mjs`, `runtime.as(principal)`). Unset, the grants are read-only for both `hub:owner` and `hub:readonly` (`RUNTIME_DEFAULT_HUB_GRANTS`): the write gate is enforced on the runner too, so whoever holds the hub's TLS key cannot send mutating ops straight to the runner. Enabling writes (TODO-P4-40) takes both `MEMO_BRIDGE_HUB_MUTATING_OPS=owner` on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS={"hub:owner":"owner","hub:readonly":"read"}` on the runner.
 5. The dispatcher validates the spool request again (`deploy/memo-runner-dispatch`).
 
 Every refusal is journaled with time, principal, op and reason code, never arguments or secrets.
@@ -73,7 +73,7 @@ Every refusal is journaled with time, principal, op and reason code, never argum
 | `MEMO_BRIDGE_SPOOL_DIR`, `MEMO_BRIDGE_JOBS_DIR` | `<root>/spool`, `<root>/jobs` | checked only: any other value refuses to start, since the dispatcher knows only that layout |
 | `MEMO_BRIDGE_STATE_DIR` | `<root>/state` | the store, the ledger's private `GH_CONFIG_DIR`, the askpass copy |
 | `MEMO_BRIDGE_PROJECTS_ROOT`, `MEMO_BRIDGE_WORKTREES_ROOT`, `MEMO_BRIDGE_GOVERNANCE_ROOT` | `<root>/repos`, `<root>/worktrees`, `<root>/governance` | catalog, worktrees, ledger |
-| `MEMO_BRIDGE_HUB_PRINCIPALS` | unset (owner and read-only defaults) | runtime grants, JSON `{"hub:owner":"owner","hub:readonly":"read"}` |
+| `MEMO_BRIDGE_HUB_PRINCIPALS` | unset until the write gate passes (every hub principal read-only), then `{"hub:owner":"owner","hub:readonly":"read"}` | runtime grants (JSON); the runner side of the write gate |
 
 Credentials (`LoadCredential=`, systemd.exec(5), systemd 257):
 
@@ -93,7 +93,7 @@ The hub (`memo-bridge-hub.service`) needs, for the runner to be reachable:
 | `MEMO_BRIDGE_HUB_MUTATING_OPS` | unset until the write gate passes, then `owner` | forwards mutating ops for the owner only |
 | `readonly.token` in `MEMO_BRIDGE_SECRETS` | optional | enables the read-only bearer (O-9) |
 
-`runner.json` (root-owned, written by lab-infra): the dispatcher reads only its `dispatch` section (all defaults when absent). The runtime reads the admission floors and PSI ceilings, the disk budget, the retry and `du` intervals, in either lab-infra's shape (`admission.min_free_disk_bytes`, `admission.psi_cpu_some_avg10_max`, `admission.retry_sec`, `budgets.disk_bytes`, `budgets.du_interval_sec`) or the canonical one (`admission.min_free_disk_gib`, `admission.max_psi`, `disk_budget_gib`). An invalid value falls back to the default and its key name is logged once at start (`runner_config_errors`).
+`runner.json` (root-owned, written by lab-infra): the dispatcher reads only its `dispatch` section (all defaults when absent); lab-infra renders it from the same variables as the rest (`recipes` from `memo_runner_recipes`, `max_timeout_seconds` from `memo_runner_job_timeout_max_sec`), so removing a recipe or lowering the ceiling takes effect at the dispatcher. The runtime reads the same recipe list and ceiling (the narrowest of `dispatch` and the top-level `recipes` / `job_unit.timeout_max_sec`) to refuse at submit, plus the admission floors and PSI ceilings, the disk budget, the running free-disk floor, the retry and `du` intervals, in either lab-infra's shape (`admission.min_free_disk_bytes`, `admission.psi_cpu_some_avg10_max`, `admission.retry_sec`, `budgets.disk_bytes`, `budgets.du_interval_sec`, `budgets.min_free_disk_running_bytes`) or the canonical one (`admission.min_free_disk_gib`, `admission.max_psi`, `disk_budget_gib`, `min_free_disk_running_gib`, `max_unmeasured_readings`). An invalid value falls back to the default and its key name is logged once at start (`runner_config_errors`).
 
 ## Release and deployment
 
@@ -134,6 +134,14 @@ systemctl start memo-bridge-vps-agent.service     # stops memo-bridge-runner (Co
 ## Tokens: rotation and revocation (O-10)
 
 Both PATs expire within 30 to 90 days. Before expiry: create the new PAT with the same scope, update the keychain entry (`memo-runner-ledger-gh` or `memo-runner-push-gh`), run `make deploy-memo-bridge` (it rewrites `/etc/credstore/memo-runner.*`), make sure `memo-bridge-runner` restarted so `LoadCredential=` copies the new file, check `task_status` on a pilot Issue, then revoke the old PAT in GitHub settings. On suspected leak: revoke first in GitHub (the runner fails closed with `ledger_unavailable` or `credential_unavailable`), then rotate.
+
+## Runner-side Git and running jobs
+
+The worktree is shared with memo-job (setgid 2770, `UMask=0007`), so a running job can rewrite anything in it, the `.git` link file included. Runner-side Git therefore reads that link once: `locate()` (`server/runners/worktrees.mjs`) checks it points at `<project>/.git/worktrees/<name>`, then every Git call of the operation runs with `GIT_DIR` and `GIT_WORK_TREE` pinned to the validated real paths, so a link swapped later cannot point Git at a configuration the job wrote (filters, aliases). The gitdir and common dir live under `repos/`, read-only to the job. `worktree_commit` and `worktree_push` also refuse with `job_active` while a VPS job unit waits or runs in the worktree, before and after the ledger check. `GIT_SAFETY` (hooks and fsmonitor off) stays on every call.
+
+## Job network sandbox: residual edges
+
+`memo-job@.service` denies loopback, link-local, multicast, the private and CGNAT ranges, and the VPS's own public addresses (`memo_runner_job_deny_host_addresses` in lab-infra: the IPv4 address and the server's /64), so a service published on the host is not reachable through its public address either. `AF_UNIX` stays allowed, since Node, Python and Git need local sockets. Path sockets are covered by `InaccessiblePaths=`; abstract-namespace sockets are not, because the job shares the host network namespace (it needs the internet, so no `PrivateNetwork=`). On 2026-10-14 no abstract unix socket listened on lab (`ss -xl`); the AC-P4-12 probe re-checks it.
 
 ## Still to verify on the VPS
 

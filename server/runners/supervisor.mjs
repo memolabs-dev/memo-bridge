@@ -8,7 +8,8 @@
 //   2. lifecycle   an active job whose workspace closed, worktree was removed or claim was
 //                  released or expired is cancelled (the Phase 3 runner did this on the Mac).
 //   3. budgets     a running job whose worktree plus output exceeds the disk budget (du, every
-//                  60 s) becomes budget_exceeded (REQ-P4-18).
+//                  60 s), that cannot be measured several times in a row, or that runs while
+//                  free disk is below the running floor becomes budget_exceeded (REQ-P4-18).
 //   4. stop sweep  a job we ended (cancelled, budget_exceeded) while its unit may still run gets
 //                  spool/cancel/<id>; repeated if the unit is still active a minute later.
 //   5. release     a finished job with release_on_finish releases its claim, once no other job
@@ -32,10 +33,10 @@ import { realpathSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { workerFor } from '../coordinator/policy.mjs';
-import { ACTIVE_JOB_STATUSES, STARTED_JOB_STATUSES, WAITING_JOB_STATUSES, executorKindFromEnv, setRunnerStatusProvider,
-  setSupervisorNudge } from './executor.mjs';
+import { ACTIVE_JOB_STATUSES, STARTED_JOB_STATUSES, WAITING_JOB_STATUSES, executorKindFromEnv, runnerWatchStart,
+  setRunnerStatusProvider, setRunnerWatchStart, setSupervisorNudge } from './executor.mjs';
 import { applyUnitResult, createSystemdExecutor, runnerRootFromEnv } from './executor-systemd.mjs';
-import { admit, createResourceReader, loadRunnerConfig, summarizeSnapshot } from './resources.mjs';
+import { DEFAULT_RUNNER_CONFIG, admit, createResourceReader, loadRunnerConfig, summarizeSnapshot } from './resources.mjs';
 
 export const SUPERVISOR_PRINCIPAL = 'runner:supervisor';
 export const SUPERVISOR_DEFAULTS = Object.freeze({
@@ -59,6 +60,8 @@ export const SUPERVISOR_DEFAULTS = Object.freeze({
   concurrency: 1
 });
 // Ledger answers that do not prove the lease is lost: try again on the next round.
+const SUPERVISOR_DEFAULTS_DISK = Object.freeze({ min_free_disk_running_gib: DEFAULT_RUNNER_CONFIG.min_free_disk_running_gib,
+  max_unmeasured_readings: DEFAULT_RUNNER_CONFIG.max_unmeasured_readings });
 const TRANSIENT = new Set(['ledger_unavailable', 'ledger_outcome_unknown', 'lease_race_lost']);
 const RELEASE_OUTCOME = { succeeded: 'completed', cancelled: 'cancelled', interrupted: 'cancelled' };
 
@@ -73,6 +76,10 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
   const o = { ...SUPERVISOR_DEFAULTS, ...options };
   const cfg = config ?? { admission: undefined, disk_budget_gib: 20, lease_ttl_seconds: 1800 };
   const now = () => rt.now();
+  // From now on this supervisor sees units end; one that ended earlier was not observed
+  // (statusFromResult: interrupted rather than failed for a stop signal).
+  const watchingSince = now();
+  setRunnerWatchStart(watchingSince);
   const read = fn => rt.store().transaction(repo => fn(repo, now()), { write: false });
   const write = fn => rt.store().transaction(repo => fn(repo, now()));
   const event = (repo, jobId, at, kind, detail) =>
@@ -86,12 +93,23 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
   const lastDiskCheck = new Map();
   const lastStop = new Map();
   const rejectedStatus = new Set();
+  const unmeasured = new Map();
   const stalled = new Set();
   const view = {
     started_at: null, last_tick_at: null, queue_depth: 0, deferred: 0, active: null, last_result: null,
-    admission: null, ledger: null, dispatcher: { stalled: false }, systemctl: null, disk: null, errors: 0
+    admission: null, ledger: null, dispatcher: { stalled: false }, systemctl: null, disk: null, disk_free: null,
+    waiting_for_unit: null, errors: 0
   };
   let ticking = null; let again = false; let renewing = null; let intervals = []; let lastPrune = 0;
+
+  // Free space on the runner tree (statfs), or null when it cannot be read.
+  const diskFree = () => {
+    try {
+      const d = typeof resources.disk === 'function' ? resources.disk(executor.paths.root)
+        : resources.snapshot({ diskPath: executor.paths.root })?.disk;
+      return d && Number.isFinite(d.free_bytes) ? d : null;
+    } catch { return null; }
+  };
 
   const startedJobs = () => read(repo => repo.listQueue({ host: rt.host, statuses: [...STARTED_JOB_STATUSES], limit: 50 }));
 
@@ -111,8 +129,8 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       const r = executor.result(job);
       if (r.ok) {
         const summary = executor.summary(job);
-        const after = await write((repo, t) => applyUnitResult(repo, repo.getJob(job.id), r.result, t, { summary }));
-        inactiveSince.delete(job.id); lastDiskCheck.delete(job.id); stalled.delete(job.id);
+        const after = await write((repo, t) => applyUnitResult(repo, repo.getJob(job.id), r.result, t, { summary, watchingSince }));
+        inactiveSince.delete(job.id); lastDiskCheck.delete(job.id); stalled.delete(job.id); unmeasured.delete(job.id);
         view.last_result = { job_id: job.id, status: after.status, at: new Date(at).toISOString() };
         continue;
       }
@@ -179,10 +197,25 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
     for (const { job, reason } of doomed) await end(job, 'cancelled', reason, 'cancelled');
   }
 
-  // 3. disk budget
+  // 3. disk budget. Fails closed (R-P4-06, scenario H): the job owns what it writes and can
+  // make it unreadable to memo-runner (du partial) or slow to walk (du timeout). Such a reading
+  // is "unmeasured"; max_unmeasured_readings in a row stop the job. A partial reading already
+  // above the budget stops it at once (it is a lower bound). Independently of du, free disk on
+  // the runner tree below min_free_disk_running_gib stops the running job on every tick: a
+  // statfs(2) the job cannot influence, so production keeps room whatever du says.
   async function checkBudgets() {
     const budget = cfg.disk_budget_gib * 1024 ** 3;
-    for (const job of (await startedJobs()).filter(j => j.status === 'running')) {
+    const floorGib = cfg.min_free_disk_running_gib ?? SUPERVISOR_DEFAULTS_DISK.min_free_disk_running_gib;
+    const maxUnmeasured = cfg.max_unmeasured_readings ?? SUPERVISOR_DEFAULTS_DISK.max_unmeasured_readings;
+    const running = (await startedJobs()).filter(j => j.status === 'running');
+    if (!running.length) return;
+    const free = diskFree();
+    if (free) view.disk_free = { free_gib: Math.round(free.free_bytes / 1024 ** 3 * 100) / 100, floor_gib: floorGib };
+    for (const job of running) {
+      if (free && free.free_bytes < floorGib * 1024 ** 3) {
+        await end(job, 'budget_exceeded', 'disk_floor', 'budget_exceeded', { free_bytes: free.free_bytes, floor_bytes: floorGib * 1024 ** 3 });
+        continue;
+      }
       const at = now();
       if (at - (lastDiskCheck.get(job.id) ?? 0) < o.diskCheckMs) continue;
       lastDiskCheck.set(job.id, at);
@@ -191,11 +224,25 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       let wt = null;
       try { wt = worktree?.path ? realpathSync(worktree.path) : null; } catch { wt = null; }
       const usage = await resources.usage([wt, dirname(executor.logPath(job))].filter(Boolean));
-      if (!usage) continue; // unknown: measured again next interval
-      view.disk = { job_id: job.id, used_gib: Math.round(usage.bytes / 1024 ** 3 * 100) / 100, budget_gib: cfg.disk_budget_gib,
-        partial: usage.partial };
-      if (usage.bytes > budget) {
+      if (usage) {
+        view.disk = { job_id: job.id, used_gib: Math.round(usage.bytes / 1024 ** 3 * 100) / 100, budget_gib: cfg.disk_budget_gib,
+          partial: usage.partial };
+      }
+      if (usage && usage.bytes > budget) {
+        unmeasured.delete(job.id);
         await end(job, 'budget_exceeded', 'disk_budget', 'budget_exceeded', { used_bytes: usage.bytes, budget_bytes: budget, partial: usage.partial });
+        continue;
+      }
+      if (usage && !usage.partial) { unmeasured.delete(job.id); continue; }
+      const count = (unmeasured.get(job.id) ?? 0) + 1;
+      unmeasured.set(job.id, count);
+      const why = usage ? 'partial' : 'unavailable';
+      if (count >= maxUnmeasured) {
+        unmeasured.delete(job.id);
+        await end(job, 'budget_exceeded', 'disk_unmeasurable', 'budget_exceeded', { readings: count, last: why,
+          ...(usage ? { lower_bound_bytes: usage.bytes } : {}), budget_bytes: budget });
+      } else {
+        await write((repo, t) => event(repo, job.id, t, 'disk_unmeasured', { reading: count, of: maxUnmeasured, last: why }));
       }
     }
   }
@@ -218,7 +265,7 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       const r = executor.result(job);
       if (r.ok) {
         const summary = executor.summary(job);
-        await write((repo, t) => applyUnitResult(repo, repo.getJob(job.id), r.result, t, { summary }));
+        await write((repo, t) => applyUnitResult(repo, repo.getJob(job.id), r.result, t, { summary, watchingSince }));
         continue;
       }
       if (stopRequested) {
@@ -294,6 +341,30 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       return kinds.has('dispatched') && !kinds.has('exit') && !kinds.has('no_unit');
     });
 
+  // A job settled from its status file as soon as root wrote it is final in the store while its
+  // unit is still deactivating (ExecStopPost=, record-result, cgroup teardown). The dispatcher
+  // counts deactivating units as busy and would refuse the next job as host_busy, a permanent
+  // failure (verifier finding 6). So before a dispatch, every recently ended unit must be seen
+  // inactive by systemd; once seen, it is not asked again. A reading error waits too.
+  const seenInactive = new Set();
+  async function recentUnitBusy() {
+    const at = now();
+    const recent = await read(repo => repo.listJobs({ host: rt.host, limit: 20 })
+      .filter(job => job.unit && !ACTIVE_JOB_STATUSES.includes(job.status) && !seenInactive.has(job.id)
+        && (job.ended_at ?? 0) > at - 3600_000)
+      .filter(job => repo.listJobEvents(job.id, 0, 1000).some(e => e.kind === 'dispatched')));
+    for (const job of recent) {
+      const s = await executor.show(job);
+      if (!s.ok || s.active) {
+        view.waiting_for_unit = { job_id: job.id, state: s.ok ? s.active_state : null, error: s.ok ? null : s.error };
+        return true;
+      }
+      seenInactive.add(job.id);
+    }
+    view.waiting_for_unit = null;
+    return false;
+  }
+
   // 6. dispatch
   async function dispatchNext() {
     const head = await read(repo => {
@@ -302,6 +373,7 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       return repo.listQueue({ host: rt.host, statuses: [...WAITING_JOB_STATUSES], limit: 1 })[0] ?? null;
     });
     if (!head) return;
+    if (await recentUnitBusy()) return;
     const at = now();
     if (head.status === 'deferred') {
       const last = await read(repo => repo.listJobEvents(head.id, 0, 1000).filter(e => e.kind === 'deferred').pop()?.at ?? 0);
@@ -505,6 +577,7 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       intervals = [];
       setSupervisorNudge(null);
       setRunnerStatusProvider(null);
+      if (runnerWatchStart() === watchingSince) setRunnerWatchStart(null);
       await Promise.allSettled([ticking, renewing].filter(Boolean));
     },
     // Synchronous view for host_resources (REQ-P4-21): numbers and ids only.
@@ -532,6 +605,7 @@ export async function startSupervisorFromEnv(rt, env = process.env, { log, os, r
   const config = loadRunnerConfig(env.MEMO_BRIDGE_RUNNER_CONFIG);
   if (config.errors.length) log?.('runner_config_errors', { keys: config.errors });
   const executor = createSystemdExecutor({ root: root.root, maxQueue: config.max_queue, ...(run ? { run } : {}),
+    policy: { recipes: config.recipes, max_timeout_seconds: config.max_timeout_seconds },
     limits: { slice: 'memo-dev.slice', disk_budget_gib: config.disk_budget_gib } });
   const supervisor = createSupervisor(rt, { executor, config, ...(log ? { log } : {}), ...(resources ? { resources } : {}),
     ...(timers ? { timers } : {}),

@@ -113,7 +113,7 @@ The `+` prefix of `ExecStopPost=` runs it with full privileges and without the u
  "invocation_id":"<32 hex>","started_at":null,"ended_at":"2026-10-14T00:00:00.000Z"}
 ```
 
-The executor relies on `version`, `id`, `service_result`, `exit_code`, `exit_status` and `ended_at`, and maps them itself. An unknown `$SERVICE_RESULT` is written as `resources` (the documented catch-all). An unknown `$EXIT_CODE` or `$EXIT_STATUS` is written as `null`, so the executor never sees a value it would reject. `job_id` comes from `dispatch.json`. `status`, `reason` and `cancel_reason` are record-result's own reading, for operators and `--status`:
+The executor relies on `version`, `id`, `service_result`, `exit_code`, `exit_status`, `reason` (a cancel marker) and `ended_at`, and maps them itself: a signal ending is `failed` unless the unit ended before the runner's supervisor started (a runner restart or a reboot), which is `interrupted` (`server/runners/executor-systemd.mjs` `statusFromResult`). An unknown `$SERVICE_RESULT` is written as `resources` (the documented catch-all). An unknown `$EXIT_CODE` or `$EXIT_STATUS` is written as `null`, so the executor never sees a value it would reject. `job_id` comes from `dispatch.json`. `status`, `reason` and `cancel_reason` are record-result's own reading, for operators and `--status`:
 
 | Condition (first match wins) | `status` | `reason` |
 |---|---|---|
@@ -122,7 +122,7 @@ The executor relies on `version`, `id`, `service_result`, `exit_code`, `exit_sta
 | `cancel.json` present, any other reason | `cancelled` | the reason |
 | `SERVICE_RESULT=timeout` | `timed_out` | `runtime_max_sec` |
 | `success`, `exited`, `0` | `succeeded` | null |
-| `success`, `killed` (HUP, INT, TERM, PIPE) | `interrupted` | `stopped_externally` (an operator, a shutdown or a reboot) |
+| `success`, `killed` (HUP, INT, TERM, PIPE) | `failed` | `stopped_by_signal` (the job itself, an operator, a shutdown or a reboot: the job can send itself these signals, so this is never read as an outside stop) |
 | `exit-code` | `failed` | `exit_status` |
 | `signal`, `core-dump` | `failed` | `signal` |
 | an unknown result | `failed` | `unknown_service_result` |
@@ -148,7 +148,7 @@ The cancel marker matters because systemd counts a stop by `SIGTERM` as a clean 
 }
 ```
 
-All keys are optional. The values above are the defaults, except `recipes`, which defaults to the full built-in table. An empty list disables a recipe. When it runs as root, the dispatcher refuses a configuration where memo-runner or memo-job is root, or where both are the same user.
+All keys are optional. The values above are the defaults, except `recipes`, which defaults to the full built-in table. An empty list disables a recipe. `recipes` may also be a list of names (`["test", "lint"]`, the form lab-infra renders from `memo_runner_recipes`): each listed name keeps its built-in shapes and an unlisted one is refused; an unknown or repeated name refuses the configuration. lab-infra renders this section from the same variables as the rest of the file (`max_timeout_seconds` from `memo_runner_job_timeout_max_sec`); without it the dispatcher would fall back to the defaults and ignore them. When it runs as root, the dispatcher refuses a configuration where memo-runner or memo-job is root, or where both are the same user.
 
 Before reading anything, the dispatcher checks the layout. If a check fails, it exits with status 2 and leaves the spool untouched:
 
