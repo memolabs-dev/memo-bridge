@@ -2,7 +2,7 @@
 // HTTPS on loopback, with locally minted tokens. No identity provider, no network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -324,12 +324,16 @@ test('hub-cli refuses to start on a bad remote.json, the old OIDC mode, or remot
       env: { PATH: process.env.PATH, MEMO_BRIDGE_SECRETS: secrets, MEMO_BRIDGE_REMOTE_CONFIG: path, ...extraEnv }
     });
   };
-  // remote_writes enabled: the systemctl probe runs and fails closed (no systemd on this machine,
-  // or a root runner on a real one); the fixture-driven cases are in tests/remote-boot.test.mjs.
-  const writes = run({ ...LAB_REMOTE_JSON, remote_writes: 'enabled' });
-  assert.notEqual(writes.status, 0);
-  assert.match(writes.stderr, /remote writes refused/);
-  assert.doesNotMatch(writes.stderr, /hub_started/);
+  // remote_writes enabled: where systemctl is missing the probe cannot run and the hub must refuse.
+  // Where systemd runs (Linux CI) the probe may pass legitimately, so the refusal is only asserted
+  // without systemctl; root-runner refusals are covered with an injected systemctl in
+  // tests/remote-write-gate.test.mjs and tests/remote-boot.test.mjs.
+  if (!['/usr/bin/systemctl', '/bin/systemctl'].some(file => existsSync(file))) {
+    const writes = run({ ...LAB_REMOTE_JSON, remote_writes: 'enabled' });
+    assert.notEqual(writes.status, 0);
+    assert.match(writes.stderr, /remote writes refused/);
+    assert.doesNotMatch(writes.stderr, /hub_started/);
+  }
   const bad = run({ ...LAB_REMOTE_JSON, listen: { host: '0.0.0.0', port: 9445 } });
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /invalid_remote_config \(listen\.host\)/);
