@@ -35,12 +35,17 @@ const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
 
 // Run one fixed argv without a shell. Resolves {code, signal, stdout, stderr, timedOut,
 // truncated}; never rejects (a missing binary answers code null, error 'spawn_failed').
-export function runArgv(argv, { timeoutMs = LIMITS.commandTimeoutMs, maxBytes = LIMITS.commandMaxBytes, env = SAFE_ENV, cwd } = {}) {
+// Repatriation D-R7: the program leads its own process group (spawn detached: setsid), and the
+// whole group gets SIGKILL at the timeout and once the program exits, so a grandchild cannot
+// outlive the call. A program that leaves the group on purpose (setsid, daemons) is out of reach.
+export function runArgv(argv, { timeoutMs = LIMITS.commandTimeoutMs, maxBytes = LIMITS.commandMaxBytes, env = SAFE_ENV, cwd,
+  kill = (pid, signal) => process.kill(pid, signal) } = {}) {
   return new Promise(resolve => {
     let child;
     try {
-      child = spawn(argv[0], argv.slice(1), { shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: { ...env }, ...(cwd ? { cwd } : {}) });
+      child = spawn(argv[0], argv.slice(1), { shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...env }, ...(cwd ? { cwd } : {}) });
     } catch { resolve({ code: null, error: 'spawn_failed', stdout: '', stderr: '', timedOut: false, truncated: false }); return; }
+    const killGroup = () => { if (child.pid) { try { kill(-child.pid, 'SIGKILL'); } catch { /* group already gone */ } } };
     const out = []; const err = []; let size = 0; let truncated = false; let timedOut = false;
     const take = (chunks, chunk) => {
       if (size >= maxBytes) { truncated = true; return; }
@@ -51,7 +56,8 @@ export function runArgv(argv, { timeoutMs = LIMITS.commandTimeoutMs, maxBytes = 
     };
     child.stdout.on('data', c => take(out, c));
     child.stderr.on('data', c => take(err, c));
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; killGroup(); }, timeoutMs);
+    child.on('exit', () => { clearTimeout(timer); killGroup(); });
     child.on('error', () => { clearTimeout(timer); resolve({ code: null, error: 'spawn_failed', stdout: '', stderr: '', timedOut, truncated }); });
     child.on('close', (code, signal) => {
       clearTimeout(timer);

@@ -25,6 +25,8 @@
 //                   LANG, LC_ALL, TZ, TERM, NO_COLOR; loader and linker variables are refused
 //   root_helper     {socket: abs path} the root helper's Unix socket; required for "root" (lab, and
 //                   the Mac once its root helper is installed)
+//   run_path        [abs dir, ...] put before the fixed PATH of user runs (operator_run and
+//                   operator_script as the agent user; never root calls), repatriation D-R8
 // Paths are absolute; "~/" is accepted on the Mac only and expands to the agent user's home.
 //
 // The file itself must be trustworthy before anything in it is believed: a regular file (no
@@ -46,7 +48,7 @@ const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_LIST = 128;
 const MAX_PATH_CHARS = 1024;
 const KEYS = Object.freeze(['version', 'host', 'max_tier', 'roots', 'units', 'containers', 'approval_mode', 'denylist',
-  'rate_limits', 'frozen_file', 'audit_file', 'repositories', 'state_dir', 'run_env_allow', 'root_helper']);
+  'rate_limits', 'frozen_file', 'audit_file', 'repositories', 'state_dir', 'run_env_allow', 'root_helper', 'run_path']);
 const REQUIRED = Object.freeze(['version', 'host', 'max_tier', 'roots', 'frozen_file', 'audit_file']);
 // systemd unit names (systemd.unit(5)): name, optional instance, a known suffix.
 export const UNIT_RE = /^[A-Za-z0-9][A-Za-z0-9:_.@-]{0,120}\.(service|socket|timer|target|path|mount)$/;
@@ -143,6 +145,9 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
     rootHelper = Object.freeze({ socket: policyPath(raw.root_helper.socket, 'root_helper.socket', ctx) });
   }
   if (maxTier === TIERS.indexOf('root') && rootHelper === null) throw invalid('root_helper');
+  // PATH entries: absolute, no ":" (the PATH separator), at most 16.
+  const runPath = list(raw.run_path, 'run_path', item => { policyPath(item, 'run_path', ctx); return !item.includes(':'); }, { max: 16 })
+    .map(item => policyPath(item, 'run_path', ctx));
   const auditFile = policyPath(raw.audit_file, 'audit_file', ctx);
   const stateDir = raw.state_dir === undefined ? dirname(auditFile) : policyPath(raw.state_dir, 'state_dir', ctx);
   const read = canonicalRoots([...readPaths, ...writePaths], realpath);
@@ -168,6 +173,7 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
     runEnvAllow: Object.freeze([...DEFAULT_RUN_ENV, ...runEnvAllow.filter(n => !DEFAULT_RUN_ENV.includes(n))]),
     rootHelper,
     repositories,
+    runPath: Object.freeze(runPath),
     home
   });
 }
@@ -236,6 +242,7 @@ export function policySummary(policy) {
     rate_limits_per_minute: { ...policy.rateLimits },
     repository_guard: policy.repositories !== null,
     run_env_allow: [...policy.runEnvAllow],
-    root_helper: policy.rootHelper !== null
+    root_helper: policy.rootHelper !== null,
+    run_path: [...(policy.runPath ?? [])]
   };
 }

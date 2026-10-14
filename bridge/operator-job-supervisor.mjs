@@ -4,7 +4,7 @@
 // result.json atomically (write, fsync, rename) when the program ends. Nothing here reads a
 // caller string as code: argv[0] is the program, the rest are its arguments.
 import { spawn } from 'node:child_process';
-import { constants as fsConstants, openSync, writeSync, closeSync, fsyncSync, renameSync, readFileSync, writeFileSync } from 'node:fs';
+import { constants as fsConstants, openSync, writeSync, closeSync, fsyncSync, renameSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
@@ -24,8 +24,9 @@ const sink = (fd, key) => chunk => {
 };
 
 const started = Date.now();
-// process_group (the Mac root helper, DEV-P6-32): the program leads its own process group, and
-// the whole group is killed at the timeout and once the program exits.
+// process_group (the Mac root helper, DEV-P6-32; every user run since repatriation D-R7): the
+// program leads its own process group, and the whole group is killed at the timeout and once the
+// program exits.
 const group = job.process_group === true;
 const stop = () => {
   if (group && child?.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } return; }
@@ -36,6 +37,9 @@ let done = false;
 function finish(code, signal) {
   if (done) return;
   done = true;
+  // A user script (repatriation D-R6) is removed once it ends; only files in the job's own
+  // scripts directory, named by the agent (never a caller path).
+  for (const file of Array.isArray(job.cleanup) ? job.cleanup : []) { try { unlinkSync(file); } catch { /* gone */ } }
   closeSync(out); closeSync(err);
   const tmp = join(dir, 'result.json.tmp');
   const fd = openSync(tmp, flags, 0o600);
