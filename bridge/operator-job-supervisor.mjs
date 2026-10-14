@@ -24,6 +24,13 @@ const sink = (fd, key) => chunk => {
 };
 
 const started = Date.now();
+// process_group (the Mac root helper, DEV-P6-32): the program leads its own process group, and
+// the whole group is killed at the timeout and once the program exits.
+const group = job.process_group === true;
+const stop = () => {
+  if (group && child?.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } return; }
+  child.kill('SIGKILL');
+};
 let timedOut = false;
 let done = false;
 function finish(code, signal) {
@@ -40,13 +47,15 @@ function finish(code, signal) {
 
 let child;
 try {
-  child = spawn(job.argv[0], job.argv.slice(1), { shell: false, cwd: job.cwd || '/', env: job.env ?? {}, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(job.argv[0], job.argv.slice(1), { shell: false, cwd: job.cwd || '/', env: job.env ?? {}, stdio: ['ignore', 'pipe', 'pipe'],
+    detached: group });
 } catch {
   finish(null, null);
   process.exit(0);
 }
 child.stdout.on('data', sink(out, 'out'));
 child.stderr.on('data', sink(err, 'err'));
-const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, Math.max(1, job.timeout_s ?? 30) * 1000);
+const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(1, job.timeout_s ?? 30) * 1000);
+if (group) child.on('exit', () => { clearTimeout(timer); stop(); });
 child.on('error', () => { clearTimeout(timer); finish(null, null); process.exit(0); });
 child.on('close', (code, signal) => { clearTimeout(timer); finish(code, signal); });

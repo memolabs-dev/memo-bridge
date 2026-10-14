@@ -1,4 +1,11 @@
-// Root helper on lab (Phase 6, TODO-P6-10, spec D3, D4, D7).
+// Root helper (Phase 6, TODO-P6-10, spec D3, D4, D7): on lab, and on the Mac since the owner's
+// decision of 2026-10-14 (spec §13, Mac root follow-up, DEV-P6-32 to 39).
+//
+// The host comes from the helper's own policy (policy.host). On lab each call runs in a transient
+// systemd unit (below). On the Mac there is no systemd: each call is spawned in its own process
+// group (runArgvGroup), the whole group is killed at the timeout and once the program exits, and
+// the environment is a fixed system PATH (never /opt/homebrew or /usr/local, which the owner's
+// user can rewrite). The Mac entry point is bridge/operator-root-mac.mjs.
 //
 // A small root process (memo-operator-root.service, lab-infra) listening on a Unix socket in a
 // directory only root and the memo-operator group can reach (policy root_helper.socket, for
@@ -31,9 +38,11 @@
 //
 // Wire: one JSON object per connection, newline-terminated, answered by one JSON line. At most
 // 512 KiB per request.
+import { spawn } from 'node:child_process';
+import { lstatSync } from 'node:fs';
 import { createServer, connect } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { operatorCallTier } from '../server/coordinator/policy.mjs';
@@ -42,7 +51,7 @@ import { checkCwd, checkRun } from './operator-exec.mjs';
 import { createDenylist, catalogProjects } from './operator-paths.mjs';
 import { finalizeResult, untrusted } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
-import { runArgv, SAFE_ENV } from './operator-tools.mjs';
+import { LIMITS, runArgv, SAFE_ENV } from './operator-tools.mjs';
 
 export const ROOT_LIMITS = Object.freeze({ memoryMax: '2G', tasksMax: 512, requestBytes: 512 * 1024, marginS: 15 });
 const ROOT_OPS = new Set(['operator_run', 'operator_script', 'operator_job_status']);
@@ -51,6 +60,44 @@ const OUTCOMES = new Set(['ok', 'denied', 'error']);
 const INTERPRETERS = Object.freeze({ bash: { program: '/bin/bash', ext: 'sh' }, python3: { program: '/usr/bin/python3', ext: 'py' } });
 
 const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
+// The Mac root environment: system directories only, so a bare program name never resolves into
+// a directory the owner's user can write (/opt/homebrew/bin, /usr/local/bin).
+export const MAC_ROOT_ENV = Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'en_US.UTF-8', HOME: '/var/root' });
+
+// One argv in its own process group (Mac root calls, DEV-P6-32). spawn with detached: true calls
+// setsid(2), so the child leads a new group; at the timeout, and again when the program exits,
+// the whole group gets SIGKILL: a grandchild cannot outlive the call by staying in the group.
+// Same result shape as runArgv. A program that leaves its group on purpose (setsid, launchctl)
+// is out of reach: macOS has no cgroup.
+export function runArgvGroup(argv, { timeoutMs = LIMITS.commandTimeoutMs, maxBytes = LIMITS.commandMaxBytes, env = MAC_ROOT_ENV, cwd,
+  kill = (pid, signal) => process.kill(pid, signal) } = {}) {
+  return new Promise(resolve => {
+    let child;
+    try {
+      child = spawn(argv[0], argv.slice(1), { shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...env },
+        ...(cwd ? { cwd } : {}) });
+    } catch { resolve({ code: null, error: 'spawn_failed', stdout: '', stderr: '', timedOut: false, truncated: false }); return; }
+    const out = []; const err = []; let size = 0; let truncated = false; let timedOut = false;
+    const take = (chunks, chunk) => {
+      if (size >= maxBytes) { truncated = true; return; }
+      const room = maxBytes - size;
+      chunks.push(chunk.length > room ? chunk.subarray(0, room) : chunk);
+      if (chunk.length > room) truncated = true;
+      size += Math.min(chunk.length, room);
+    };
+    const killGroup = () => { if (child.pid) { try { kill(-child.pid, 'SIGKILL'); } catch { /* group already gone */ } } };
+    child.stdout.on('data', c => take(out, c));
+    child.stderr.on('data', c => take(err, c));
+    const timer = setTimeout(() => { timedOut = true; killGroup(); }, timeoutMs);
+    // The leader exited: whatever it left in its group goes too, so the pipes close.
+    child.on('exit', () => { clearTimeout(timer); killGroup(); });
+    child.on('error', () => { clearTimeout(timer); resolve({ code: null, error: 'spawn_failed', stdout: '', stderr: '', timedOut, truncated }); });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut, truncated });
+    });
+  });
+}
 
 // The systemd-run argv of one root call. Pure; every caller value fills one argv slot.
 export function systemdRunArgv({ unit, description, argv, cwd = '/', env = {}, timeoutS, memoryMax = ROOT_LIMITS.memoryMax,
@@ -62,10 +109,15 @@ export function systemdRunArgv({ unit, description, argv, cwd = '/', env = {}, t
 
 // policy, verifier (createOperatorVerifier with the hub key), guard (createOperatorGuard with
 // the helper's own marker), chain (createAuditChain over the root-owned file), jobs
-// (createJobStore prefix 'rj'), executor (argv runner: runArgv; tests inject a recorder).
-export function createRootHelper({ policy, verifier, guard, chain, jobs = null, executor = runArgv, scriptDir,
+// (createJobStore prefix 'rj'), executor (argv runner: runArgv on lab through systemd-run,
+// runArgvGroup on the Mac; tests inject a recorder).
+export function createRootHelper({ policy, verifier, guard, chain, jobs = null, executor, scriptDir,
   projects = catalogProjects(policy.repositories), now = Date.now, random = randomBytes, log = () => {} }) {
   if (!policy || !verifier || !guard || !chain || !scriptDir) throw new Error('root helper needs policy, verifier, guard, chain, scriptDir');
+  if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('root helper needs a policy with max_tier root and root_helper');
+  const host = policy.host;
+  const systemd = host === 'vps';
+  const run = executor ?? (systemd ? runArgv : runArgvGroup);
   const denylist = createDenylist(policy);
 
   const journal = (fields, out) => chain.append({ ...fields, source: 'root-helper', output: out });
@@ -94,7 +146,7 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     if (admitted) return refuse(admitted);
     if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
     const parsed = OPERATOR_SCHEMAS[op].safeParse(args);
-    if (!parsed.success || parsed.data.host !== 'vps') return refuse('invalid_arguments');
+    if (!parsed.success || parsed.data.host !== host) return refuse('invalid_arguments');
     const a = parsed.data;
 
     let data;
@@ -111,7 +163,7 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
       const s = await jobs.status(a.job_id);
       if (!s.ok) return s;
       const { stdout, stderr, ...rest } = s;
-      return { ...rest, host: 'vps', as_root: true, ...(s.status === 'done' ? untrusted({ stdout, stderr }) : {}) };
+      return { ...rest, host, as_root: true, ...(s.status === 'done' ? untrusted({ stdout, stderr }) : {}) };
     }
     let program;
     let script = null;
@@ -123,24 +175,42 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
       program = [interp.program, script, ...(a.args ?? [])];
     }
     const checked = checkRun(op === 'operator_script' ? { argv: program, timeout_s: a.timeout_s, background: a.background } : a, policy,
-      { baseEnv: {} });
+      { baseEnv: systemd ? {} : MAC_ROOT_ENV });
     if (!checked.ok) { if (script) await unlink(script).catch(() => {}); return checked; }
     const cwd = await checkCwd(policy, a.cwd, { denylist, projects });
     if (!cwd.ok) { if (script) await unlink(script).catch(() => {}); return cwd; }
+    if (!systemd) return executeDirect(op, checked, cwd.path, script);
     const unit = `memo-op-${random(6).toString('hex')}`;
     const argv = systemdRunArgv({ unit, description: `memo-operator ${op} for ${principal ?? 'unknown'}`, argv: checked.argv, cwd: cwd.path,
       env: checked.env, timeoutS: checked.timeoutS });
     if (checked.background) {
       if (!jobs) return fail('background_unavailable');
       const { job_id: jobId } = await jobs.start({ op, argv, cwd: '/', env: { ...SAFE_ENV }, timeout_s: checked.timeoutS + ROOT_LIMITS.marginS });
-      return { ok: true, host: 'vps', as_root: true, status: 'running', job_id: jobId, unit };
+      return { ok: true, host, as_root: true, status: 'running', job_id: jobId, unit };
     }
     const started = now();
     try {
-      const r = await executor(argv, { env: { ...SAFE_ENV }, timeoutMs: (checked.timeoutS + ROOT_LIMITS.marginS) * 1000 });
+      const r = await run(argv, { env: { ...SAFE_ENV }, timeoutMs: (checked.timeoutS + ROOT_LIMITS.marginS) * 1000 });
       if (r.code === null && !r.timedOut) return fail('systemd_run_unavailable');
-      return { ok: true, host: 'vps', as_root: true, unit, exit_code: r.code, timed_out: r.timedOut === true, output_capped: r.truncated === true,
+      return { ok: true, host, as_root: true, unit, exit_code: r.code, timed_out: r.timedOut === true, output_capped: r.truncated === true,
         duration_ms: now() - started, ...untrusted({ stdout: r.stdout, stderr: r.stderr }) };
+    } finally { if (script) await unlink(script).catch(() => {}); }
+  }
+
+  // The Mac: the argv itself, in its own process group, with the fixed root environment.
+  async function executeDirect(op, checked, cwd, script) {
+    if (checked.background) {
+      if (!jobs) { if (script) await unlink(script).catch(() => {}); return fail('background_unavailable'); }
+      // The script stays until a cleanup (as on lab, DEV-P6-22); the supervisor kills the group.
+      const { job_id: jobId } = await jobs.start({ op, argv: checked.argv, cwd, env: checked.env, timeout_s: checked.timeoutS, process_group: true });
+      return { ok: true, host, as_root: true, status: 'running', job_id: jobId };
+    }
+    const started = now();
+    try {
+      const r = await run(checked.argv, { cwd, env: checked.env, timeoutMs: checked.timeoutS * 1000 });
+      if (r.code === null && !r.timedOut && r.error === 'spawn_failed') return fail('program_not_found');
+      return { ok: true, host, as_root: true, exit_code: r.code, signal: r.signal ?? null, timed_out: r.timedOut === true,
+        output_capped: r.truncated === true, duration_ms: now() - started, ...untrusted({ stdout: r.stdout, stderr: r.stderr }) };
     } finally { if (script) await unlink(script).catch(() => {}); }
   }
 
@@ -183,9 +253,11 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
   });
 }
 
-// The socket server. The socket file is created 0660; the directory's owner and mode
-// (root:memo-operator 0750, lab-infra RuntimeDirectory=) decide who can connect at all.
-export function createRootHelperServer({ helper, socketPath, log = () => {} }) {
+// The socket server. On lab the socket file is created 0660 and the directory's owner and mode
+// (root:memo-operator 0750, lab-infra RuntimeDirectory=) decide who can connect at all. On the
+// Mac (DEV-P6-34) the socket is handed to the agent user (owner {uid, gid}) with mode 0600: macOS
+// checks the socket file's write permission on connect(2), so only that user and root connect.
+export function createRootHelperServer({ helper, socketPath, mode = 0o660, owner = null, log = () => {} }) {
   const server = createServer(socket => {
     let buf = Buffer.alloc(0);
     socket.setTimeout(30_000, () => socket.destroy());
@@ -205,7 +277,8 @@ export function createRootHelperServer({ helper, socketPath, log = () => {} }) {
     async start() {
       await unlink(socketPath).catch(() => {});
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
-      await chmod(socketPath, 0o660);
+      if (owner) await chown(socketPath, owner.uid, owner.gid);
+      await chmod(socketPath, mode);
       log('root_helper_listening', {});
     },
     stop: () => new Promise(resolve => server.close(() => resolve()))
@@ -213,9 +286,12 @@ export function createRootHelperServer({ helper, socketPath, log = () => {} }) {
 }
 
 // The agent's client: one request per connection. Resolves with the answer or
-// {ok:false, error:'root_helper_unavailable'}.
-export function createRootHelperClient({ socketPath, timeoutMs = 700_000 }) {
+// {ok:false, error:'root_helper_unavailable'}. With checkSocket (the Mac, where the helper is
+// optional), available() says whether the socket exists right now; the agent forwards root calls
+// only then and answers root_unavailable_on_host otherwise.
+export function createRootHelperClient({ socketPath, timeoutMs = 700_000, checkSocket = false }) {
   return Object.freeze({
+    ...(checkSocket ? { available() { try { return lstatSync(socketPath).isSocket(); } catch { return false; } } } : {}),
     request(msg) {
       return new Promise(resolve => {
         const socket = connect(socketPath);

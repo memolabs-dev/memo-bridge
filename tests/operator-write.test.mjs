@@ -126,7 +126,10 @@ test('policy: a write tier needs the repositories section (no write tool without
   const { repositories, ...raw } = h.raw;
   assert.throws(() => parseOperatorPolicy({ ...raw, max_tier: 'write' }), /invalid_operator_policy:repositories/);
   assert.throws(() => parseOperatorPolicy({ ...raw, max_tier: 'root', repositories }), /invalid_operator_policy:root_helper/);
-  assert.throws(() => parseOperatorPolicy({ ...raw, host: 'mac', max_tier: 'read', root_helper: { socket: '/run/x.sock' } }), /root_helper/);
+  // The Mac: root only with a root helper (spec §13, Mac root follow-up).
+  assert.throws(() => parseOperatorPolicy({ ...raw, host: 'mac', max_tier: 'root', repositories }), /invalid_operator_policy:root_helper/);
+  const macRoot = parseOperatorPolicy({ ...raw, host: 'mac', max_tier: 'root', repositories, root_helper: { socket: '/var/run/memo-operator/root.sock' } });
+  assert.deepEqual([macRoot.maxTierName, macRoot.rootHelper.socket], ['root', '/var/run/memo-operator/root.sock']);
   assert.throws(() => parseOperatorPolicy({ ...raw, run_env_allow: ['LD_PRELOAD'] }), /run_env_allow/);
   assert.throws(() => parseOperatorPolicy({ ...raw, run_env_allow: ['PATH'] }), /run_env_allow/);
   assert.equal(parseOperatorPolicy({ ...raw, max_tier: 'read' }).repositories, null, 'read only: no guard needed');
