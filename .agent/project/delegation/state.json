@@ -1,0 +1,16 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "#47 workspace_delegate: child chats working under a parent's task (branch feat/workspace-delegation)",
+  "started": "2026-10-14T22:04:09+02:00",
+  "baseline": { "commit": "5dc1c7d", "pnpm_test": "577/577" },
+  "requirements": { "total": 11, "covered": 11 },
+  "acceptance": { "total": 11, "verified": ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC9", "AC10", "AC11"], "failed": [],
+    "pending_manual": ["two real ChatGPT chats joining one parent after deploy (owner)"] },
+  "verification": { "pnpm_test": "592/592", "build": "pass", "smoke": "pass (61 tools)", "smoke_remote": "7/7",
+    "mutations": "29/30 caught, 1 equivalent (M3, documented)" },
+  "todos": { "done": ["DL-01", "DL-02", "DL-03", "DL-04", "DL-05", "DL-06", "DL-07", "DL-08"], "open": ["DL-09 push and PR (main session)", "DL-10 live acceptance (owner)"] },
+  "risks": { "critical_open": 0, "high_open": 1, "high_ids": ["U-P5-05: remote delegation_join needs the openai/session hint"],
+    "medium_open": ["parent fence moved by child renewals (fence chain accepted)"] },
+  "lab_infra": "none required: no new scope, file or secret; the release must be deployed (schema v7 migrates in place)",
+  "ready_for_manual_acceptance": true
+}

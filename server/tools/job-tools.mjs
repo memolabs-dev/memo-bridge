@@ -41,7 +41,8 @@ export function registerJobTools(server, getRuntime, options = {}) {
       'priority and without a shell, inside the job sandbox: writes only to the worktree, loopback network only, no access ' +
       'to private data or credentials, an allow-listed environment (refused with sandbox_unavailable where there is none; ' +
       'with MEMO_BRIDGE_JOB_SANDBOX=off the owner runs jobs unsandboxed, owner-equivalent). Requires an active workspace you ' +
-      'own, an active worktree of that workspace and a live claim on the worktree\'s Issue, which the ledger confirms. The ' +
+      'own, an active worktree of that workspace and a live claim on the worktree\'s Issue, which the ledger confirms (a ' +
+      'delegated child passes its own workspace and its delegation\'s worktree: the job runs under the parent\'s claim). The ' +
       'job keeps running after this session ends, and stops when the claim is released or expires or the workspace closes. ' +
       `Timeout default ${TIMEOUT_SECONDS.default / 60} min, max ${TIMEOUT_SECONDS.max / 60} min. ` +
       'On the Mac at most MEMO_BRIDGE_MAX_JOBS (default 2) jobs run at once; beyond that the call fails with host_busy. ' +
