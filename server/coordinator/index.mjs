@@ -10,13 +10,14 @@
 //   journal, all in the private local store.
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { join } from 'node:path';
 import { projectInfo, readProjectRegistry } from '../catalog.mjs';
 import { CLIENT_TYPES, authorize, isRemotePrincipal, ownsWorkspace, workerFor } from './policy.mjs';
 import { CAPABILITIES } from './policy.mjs';
 import { runOnce } from './store.mjs';
+import { ghChildEnv, privateConfigDir } from './credentials.mjs';
 import { remotePolicyFromEnv, remoteProjectRefusal, requestMeta, sessionBindingDecision } from '../../bridge/write-gate.mjs';
 import { ACTIVE_JOB_STATUSES } from '../runners/executor.mjs';
 import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
@@ -78,7 +79,9 @@ const REQUESTS_SHOWN = 10;
 // recent held claims are reconciled.
 const RECOVER = Object.freeze({ claims: 10, checkpoints: 10, jobs: 10, worktrees: 50, actions: 20 });
 // tasks_list bounds: projects scanned, repositories per search query, search calls per listing.
-const TASKS_SCAN = Object.freeze({ projects: 200, reposPerQuery: 10, queries: 5, perPage: 100 });
+// With App tokens (the VPS runner) a token covers one repository, so the search runs once per
+// repository, at most `repoQueries` of them.
+const TASKS_SCAN = Object.freeze({ projects: 200, reposPerQuery: 10, queries: 5, repoQueries: 20, perPage: 100 });
 
 const newId = prefix => `${prefix}_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -273,8 +276,8 @@ export { workerFor };
 export function createCoordinator({ store, principal, ledger, now = Date.now, catalogOptions = {},
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
-  readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = query => ghSearchIssues(query),
-  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null }) {
+  readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
+  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
   // Where the call came from and which client made it, as the server set them on the principal
@@ -462,13 +465,32 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
 
   // GitHub for batches: injected in tests, else the shared integration (server/integrations/
   // github.mjs, loaded lazily: it imports this module).
+  // `credentials`: the runtime's GitHub credentials provider (server/integrations/github-app.mjs),
+  // so batch labels and Issues get App tokens on the VPS runner, whose gh has no login.
   let gitHubClient = github;
   async function gitHub() {
     if (!gitHubClient) {
       const { createGitHub } = await import('../integrations/github.mjs');
-      gitHubClient = createGitHub({ catalogOptions });
+      gitHubClient = createGitHub({ catalogOptions, credentials, scratchDir });
     }
     return gitHubClient;
+  }
+
+  // tasks_list search. With a credentials provider, one query per repository with that
+  // repository's read token (fails closed on a provider error); otherwise gh's own login.
+  const perRepoSearch = Boolean(credentials);
+  async function search(query, repos) {
+    if (!perRepoSearch) return searchIssues(query, {});
+    const got = await credentials.token('read', repos[0]);
+    if (got.error) return fail('credential_unavailable', `${got.credential} ${got.error}`);
+    if (!got.token) return searchIssues(query, {});
+    let dir;
+    try { dir = await privateConfigDir(scratchDir); } catch { return fail('credential_unavailable', 'gh config dir unavailable'); }
+    try {
+      return await searchIssues(query, { env: ghChildEnv(process.env, got.token, dir) });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   // The batch repository of a project: its GitHub origin, which must be in the ledger
@@ -651,14 +673,17 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         if (notAllowed.length) return fail('repo_not_allowed');
       }
       const repos = [...repoProjects.values()].map(p => p.repo).sort();
+      const perQuery = perRepoSearch ? 1 : TASKS_SCAN.reposPerQuery;
+      const queries = perRepoSearch ? TASKS_SCAN.repoQueries : TASKS_SCAN.queries;
       const chunks = [];
-      for (let i = 0; i < repos.length && chunks.length < TASKS_SCAN.queries; i += TASKS_SCAN.reposPerQuery) {
-        chunks.push(repos.slice(i, i + TASKS_SCAN.reposPerQuery));
+      for (let i = 0; i < repos.length && chunks.length < queries; i += perQuery) {
+        chunks.push(repos.slice(i, i + perQuery));
       }
-      let truncated = repos.length > TASKS_SCAN.queries * TASKS_SCAN.reposPerQuery;
+      let truncated = repos.length > queries * perQuery;
       const items = [];
       for (const chunk of chunks) {
-        const page = await searchIssues(tasksQuery(chunk));
+        const page = await search(tasksQuery(chunk), chunk);
+        if (page.error === 'credential_unavailable') return page;
         if (!page.ok) return fail('github_unavailable', page.detail);
         if (page.incomplete || page.total_count > page.items.length) truncated = true;
         items.push(...page.items.slice(0, TASKS_SCAN.perPage));
