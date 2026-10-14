@@ -293,3 +293,77 @@ Manual acceptance (owner, ChatGPT Chat, about 15 min):
 4. "En root sur le VPS, affiche l'espace disque de /var/lib/docker." (runs directly)
 5. "Supprime /tmp/operator-test sur le VPS." (Telegram asks, if `dangerous`)
 6. Send `/freeze` to the bot; ask any write; it is refused; `/unfreeze`.
+
+## 13. Deviations (Lot 1, 2026-10-14)
+
+Recorded while implementing TODO-P6-01 to 07 against the code as it runs. The code wins where
+it disagrees with the text above; each entry says what changed and why.
+
+- DEV-P6-01 (D2). Operator agents have their own identities, `operator-mac` and `operator-vps`,
+  with their own keys (`operator-mac.pub`, `operator-vps.pub` in the hub secrets). The hub keeps
+  one connection per identity, so an operator agent named `mac` or `vps` would replace the probe
+  agent or the runtime. Tools still take `host: mac|vps`; the hub maps it (`bridge/ops.mjs`
+  `OPERATOR_AGENT_IDS`). An operator identity serves operator ops and `host_status` only, and
+  no other identity may serve an operator op (`servableBy`).
+- DEV-P6-02 (§4). Operator ops live in their own table, `OPERATOR_OPERATION_CAPABILITY`
+  (`server/coordinator/policy.mjs`), not in `OPERATION_CAPABILITY`: the runtime never serves
+  them, and `bridge/ops.mjs` builds them as `kind: 'operator'` with a `tier`. `authorize()`
+  reads both tables. Their definitions are collected apart (`collectOperatorDefinitions`).
+- DEV-P6-03 (D1, U-P6-04). Operator scopes are opt-in. `REMOTE_DEFAULT_CEILING` leaves
+  `operator:*` out, so a listener deployed before Phase 6 neither advertises nor grants them,
+  even when a token carries the scope. The owner enables them by listing them in remote.json
+  `oidc.ceiling`; `operator:read` is then advertised in `scopes_supported`, the write tiers
+  only while `remote_writes` is enabled. The runtime strips every operator capability from a
+  remote principal (it serves none).
+- DEV-P6-04 (D4). The signed statement also carries `principal` (the forwarded principal id)
+  and the envelope a `key_id` (first 16 hex of the SHA-256 of the SPKI key), so a key rotation
+  can list two keys. The hub asks for a 30 s life; the agent refuses anything over 60 s ahead.
+  The nonce cache holds at most 4096 live entries and refuses when full (`nonce_cache_full`).
+- DEV-P6-05 (TODO-P6-01). The policy file is JSON (no YAML dependency in the project), with
+  `max_tier` (read, write, exec, root) instead of a list of tiers. On the Mac the owner is the
+  agent user: the file must then be read-only (0400 or 0444), which stops the agent's own
+  tools, not the owner (R-P6-02). The policy directory must not be group or other writable.
+- DEV-P6-06 (D7). Lot 1 has no root helper, so the agent appends to its own journal through
+  an injectable store; on lab the agent user could rewrite it until Lot 2 (TODO-P6-10) moves
+  the append to the helper. The hub journal is the hub's JSON line journal (journald), event
+  `operator_call` with tier, args hash, redacted args, outcome, code, duration and output hash;
+  it is not SQLite. The 15 min anchoring of the chain head in the hub moves to Lot 2 with the
+  helper: anchoring a head the agent can rewrite adds little.
+- DEV-P6-07 (D6). Auto-freeze counts signature refusals (except a full nonce cache, which is
+  load), `tier_not_allowed`, `tier_mismatch` and `path_secret`; it does not count `not_found`
+  or `path_not_allowed`, which a model exploring a host hits honestly. The freeze is kept in
+  memory and in a marker file `AUTO-FROZEN` in the agent's state directory, so a restart keeps
+  it; the owner clears it by removing the marker. Telegram `/unfreeze` arrives in Lot 2.
+- DEV-P6-08 (D6 a). The hub freeze flag has an in-memory owner setter (`setOperatorFrozen`,
+  for the Lot 2 bot) and a file, `/etc/memo-bridge/operator-FROZEN`
+  (`MEMO_BRIDGE_OPERATOR_FREEZE_FILE`), checked on every operator call. Lot 1 serves T0 only,
+  so the hub refusal above T0 is exercised by its decision function; Lot 2's T1 to T3 ops go
+  through the same check.
+- DEV-P6-09 (D10). On the remote surface the operator tools use a budget of 128 KiB plus
+  1 KiB instead of the 24 KiB of the development tools: their results are already bounded on
+  the host with `_truncation` pointers.
+- DEV-P6-10 (§4 "remote and stdio"). The stdio server does not register operator tools in
+  Lot 1; the smoke tool list is unchanged (51). The Mac side arrives with the Mac agent in
+  Lot 3. The 9443 hub lists the T0 tools for `hub:owner` when the operator key is configured.
+- DEV-P6-11 (D8). The built-in denylist adds SSH host keys, systemd credential stores,
+  `*.token`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, Docker and gh configs, AWS and
+  kube credentials, and sudoers. Matching is case-insensitive (APFS is by default).
+- DEV-P6-12 (D11, AC-P6-02). Any path inside a `.git` directory is refused for writes
+  (`git_internal`) whatever the branch: git config and hooks are code. A detached HEAD in a
+  registered checkout counts as the default branch (fails towards `use_dev_flow`). The guard
+  reads `.git/HEAD` and `refs/remotes/origin/HEAD` without running Git. Without a
+  `repositories` section in the policy there is no guard: Lot 2 must require it before any
+  write tool ships.
+- DEV-P6-13 (§4). On the Mac, `operator_logs` and `operator_service_status` answer
+  `logs_unavailable_on_host` and `systemd_unavailable_on_host` (no journald, no systemd).
+  Docker logs accept `--since` forms Docker understands; `today` and `yesterday` fail there.
+- DEV-P6-14 (§4 search). A regular expression with nested quantifiers is refused
+  (`regex_too_complex`): a JavaScript regex cannot be interrupted, so the 20 s budget only
+  holds between lines. Lines are matched on their first 4096 characters.
+- F-P6-01 (U-P6-01, finding). A Mac to hub transport already exists and is live: the hub
+  journal at 2026-10-14T13:44Z shows agent `mac` (fingerprint 4a4276dcd078b6ab) connected next
+  to `vps`. `docs/HUB_SECURITY.md` describes it: launchd jobs `dev.memolabs.memo-bridge-tunnel`
+  (SSH local forward 127.0.0.1:9444 to lab 127.0.0.1:9443) and `dev.memolabs.memo-bridge-agent`.
+  Lot 3 reuses that tunnel for `operator-mac` (`MEMO_BRIDGE_AGENT_URL=wss://localhost:9444/agent`)
+  instead of a new one. U-P6-01 is answered for the transport; the second launchd job for the
+  operator agent remains Lot 3 work. The live setup was not touched.

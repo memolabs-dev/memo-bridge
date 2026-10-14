@@ -1,5 +1,5 @@
 {
-  "phase": "SPECIFICATION",
+  "phase": "IMPLEMENTING",
   "scope": "Phase 6 operator access on the Mac (user memo) and the VPS lab (root through a helper), branch feat/phase-6-operator",
   "updated": "2026-10-14",
   "estimate_hours": 56,
@@ -14,12 +14,32 @@
   },
   "acceptance": {
     "total": 13,
-    "verified": 0,
+    "verified": 4,
+    "partially_verified": 4,
     "failed": 0,
-    "pending": 13
+    "pending": 5,
+    "verified_ids": [
+      "AC-P6-03",
+      "AC-P6-06",
+      "AC-P6-11",
+      "AC-P6-13"
+    ],
+    "partial_ids": {
+      "AC-P6-04": "FROZEN file and hub flag done; Telegram /freeze Lot 2",
+      "AC-P6-07": "chain and hub journal done; log not writable by memo-operator Lot 2",
+      "AC-P6-12": "bounding done; background run after restart Lot 2",
+      "AC-P6-02": "no caller string executed by any Lot 1 tool, .git/config refused; validator presets arrive with operator_edit in Lot 2"
+    },
+    "pending_ids": [
+      "AC-P6-01",
+      "AC-P6-05",
+      "AC-P6-08",
+      "AC-P6-09",
+      "AC-P6-10"
+    ]
   },
   "todos": {
-    "p0_open": 13,
+    "p0_open": 6,
     "p1_open": 2,
     "p2_open": 0
   },
@@ -37,7 +57,6 @@
     "high_open": 3
   },
   "unknowns_blocking": [
-    "U-P6-01",
     "U-P6-02",
     "U-P6-03"
   ],
@@ -45,5 +64,122 @@
   "owner_decisions_closed": {
     "O-P6-1": "approval_mode dangerous on lab (2026-10-14)",
     "dev_flow_writes": "open now on memo-bridge (2026-10-14)"
-  }
+  },
+  "lot_1": {
+    "status": "automated verification passed; one bounded self-review done",
+    "branch_commits": [
+      "46b8bc0",
+      "db80a14",
+      "2a9cd7e",
+      "83f3184",
+      "dab1899"
+    ],
+    "tests": {
+      "before": 379,
+      "after": 412,
+      "new_operator_tests": 33,
+      "smoke_tools": 51,
+      "mutations_killed": "27/27"
+    },
+    "deviations": "spec.md section 13 (DEV-P6-01 to 14, F-P6-01)",
+    "evidence": "evidence.md EV-P6-01 to EV-P6-22"
+  },
+  "todos_detail": {
+    "TODO-P6-01": {
+      "status": "DONE",
+      "evidence": [
+        "EV-P6-06",
+        "EV-P6-19",
+        "EV-P6-20"
+      ]
+    },
+    "TODO-P6-02": {
+      "status": "DONE",
+      "evidence": [
+        "EV-P6-07",
+        "EV-P6-08",
+        "EV-P6-09",
+        "EV-P6-20"
+      ]
+    },
+    "TODO-P6-03": {
+      "status": "DONE",
+      "evidence": [
+        "EV-P6-09",
+        "EV-P6-12",
+        "EV-P6-15",
+        "EV-P6-20"
+      ]
+    },
+    "TODO-P6-04": {
+      "status": "DONE",
+      "evidence": [
+        "EV-P6-10",
+        "EV-P6-20"
+      ]
+    },
+    "TODO-P6-05": {
+      "status": "DONE",
+      "evidence": [
+        "EV-P6-17",
+        "EV-P6-18",
+        "EV-P6-19",
+        "EV-P6-21"
+      ]
+    },
+    "TODO-P6-06": {
+      "status": "DONE",
+      "note": "chain head anchoring in the hub moved to Lot 2 with the root helper (DEV-P6-06)",
+      "evidence": [
+        "EV-P6-13",
+        "EV-P6-20"
+      ]
+    },
+    "TODO-P6-07": {
+      "status": "DONE",
+      "note": "Telegram freeze and unfreeze are TODO-P6-11",
+      "evidence": [
+        "EV-P6-11",
+        "EV-P6-14",
+        "EV-P6-16",
+        "EV-P6-20"
+      ]
+    },
+    "TODO-P6-08": {
+      "status": "TODO"
+    },
+    "TODO-P6-09": {
+      "status": "TODO"
+    },
+    "TODO-P6-10": {
+      "status": "TODO"
+    },
+    "TODO-P6-11": {
+      "status": "TODO"
+    },
+    "TODO-P6-12": {
+      "status": "TODO"
+    },
+    "TODO-P6-13": {
+      "status": "TODO"
+    },
+    "TODO-P6-14": {
+      "status": "TODO"
+    },
+    "TODO-P6-15": {
+      "status": "TODO"
+    }
+  },
+  "unknowns_resolved": {
+    "U-P6-01": "transport exists: launchd SSH tunnel 127.0.0.1:9444 to lab 9443 (F-P6-01); reuse in Lot 3"
+  },
+  "later": [
+    "Lot 2 must require a repositories section in the policy before any write tool ships (DEV-P6-12)",
+    "stdio registration of operator tools (Lot 3, DEV-P6-10)",
+    "docs/HUB_SECURITY.md and SECURITY.md: operator identities, operator key, freeze file (TODO-P6-14)",
+    "lab-infra: operator-signing.key, operator-*.pub, remote.json oidc.ceiling with operator:read (TODO-P6-12)",
+    "regex search runs on the agent event loop; a pathological pattern that passes the nested-quantifier check can still stall one agent (consider a worker with a timeout)",
+    "hub freeze flag set in memory is lost on hub restart; the freeze file is the durable switch",
+    "hub journal operator_call keeps redacted args: confirm journald retention is acceptable for the owner"
+  ]
 }
