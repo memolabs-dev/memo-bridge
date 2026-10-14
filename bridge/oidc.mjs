@@ -168,7 +168,11 @@ function mapJoseError(error) {
 //   resource          canonical resource = expected `aud`             (default CANONICAL_RESOURCE)
 //   ownerSub          the only accepted `sub`                          (required)
 //   allowedClientIds  accepted `client_id` values, list or {id: type}  (required, 1..16)
-//   maxTokenAgeSec    max age from `iat`, >= the issuer token lifetime (default 3600, 60..86400)
+//   maxTokenAgeSec    max REMAINING validity (`exp` - now), >= the issuer token lifetime
+//                     (default 3600, 60..86400). Not the age since `iat`: a refreshed token
+//                     may keep the `iat` of the first login (Pocket ID, 2026-10-14: ChatGPT's
+//                     refreshed token was refused as too_old one hour after login, forcing a
+//                     re-authorization every hour). A token valid further ahead is refused.
 //   clockToleranceSec skew for exp/nbf/iat                             (default 30, 0..120)
 //   jwksUri           HTTPS on the issuer origin, or plain HTTP on a loopback address (the
 //                     identity provider's own port on the same host, lab-infra remote.json)
@@ -215,9 +219,12 @@ export function createOidcVerifier(config) {
     try {
       ({ payload } = await jwtVerify(token, keys, {
         issuer, audience: resource, typ: ACCESS_TOKEN_TYP, algorithms: [...ALGORITHMS],
-        requiredClaims: ['sub', 'exp', 'iat', 'client_id'], maxTokenAge, clockTolerance
+        requiredClaims: ['sub', 'exp', 'iat', 'client_id'], clockTolerance
       }));
     } catch (error) { throw mapJoseError(error); }
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (typeof payload.iat !== 'number' || payload.iat > nowSec + clockTolerance) throw rejected('issued_at');
+    if (payload.exp - nowSec > maxTokenAge + clockTolerance) throw rejected('lifetime_too_long');
     if (payload.sub !== ownerSub) throw rejected('owner_mismatch');
     if (typeof payload.client_id !== 'string' || !allowed.has(payload.client_id)) throw rejected('client_not_allowed');
     const scopes = tokenScopes(payload);

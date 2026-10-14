@@ -85,7 +85,7 @@ test('every claim and header defect is refused as invalid_token with a distinct 
     client_missing: await mint({ clientId: null }),
     client_unlisted: await mint({ clientId: 'https://chatgpt.com/oauth/other/client.json' }),
     expired: await mint({ iat: now() - 600, exp: now() - 120 }),
-    too_old: await mint({ iat: now() - 7200, exp: now() + 600 }),
+    too_long: await mint({ iat: now(), exp: now() + 7200 }),
     iat_future: await mint({ iat: now() + 600, exp: now() + 3600 }),
     nbf_future: await mint({ claims: { nbf: now() + 600 } }),
     no_exp: await mint({ exp: null }),
@@ -97,7 +97,7 @@ test('every claim and header defect is refused as invalid_token with a distinct 
   const expected = {
     issuer: 'issuer', issuer_slash: 'issuer', audience: 'audience', audience_slash: 'audience', id_token_audience: 'audience',
     owner_mismatch: 'owner_mismatch', typ_jwt: 'typ', typ_missing: 'typ', client_missing: 'missing_client_id',
-    client_unlisted: 'client_not_allowed', expired: 'expired', too_old: 'too_old', iat_future: 'issued_at',
+    client_unlisted: 'client_not_allowed', expired: 'expired', too_long: 'lifetime_too_long', iat_future: 'issued_at',
     nbf_future: 'not_yet_valid', no_exp: 'missing_exp', no_iat: 'missing_iat', no_sub: 'missing_sub', other_key: 'signature', unknown_kid: 'unknown_key'
   };
   for (const [name, token] of Object.entries(cases)) {
@@ -117,7 +117,13 @@ test('every claim and header defect is refused as invalid_token with a distinct 
   }
 });
 
-test('clock skew is bounded by clockToleranceSec and token age by maxTokenAgeSec', async () => {
+test('a refreshed token keeping the first login iat is accepted while exp is near (2026-10-14)', async () => {
+  const v = verifier();
+  const refreshed = await mint({ iat: now() - 7200, exp: now() + 3000 });
+  assert.ok(await v.verifyAccessToken(refreshed), 'iat two hours old, valid 50 more minutes');
+});
+
+test('clock skew is bounded by clockToleranceSec and token lifetime by maxTokenAgeSec', async () => {
   const lenient = verifier();                      // 30 s tolerance, 3600 s age
   const strict = verifier({ clockToleranceSec: 0, maxTokenAgeSec: 900 });
   const justExpired = await mint({ iat: now() - 300, exp: now() - 10 });
@@ -125,9 +131,9 @@ test('clock skew is bounded by clockToleranceSec and token age by maxTokenAgeSec
   assert.equal((await reason(strict, justExpired)).reason, 'expired');
   const longExpired = await mint({ iat: now() - 300, exp: now() - 90 });
   assert.equal((await reason(lenient, longExpired)).reason, 'expired', 'beyond the skew');
-  const halfHour = await mint({ iat: now() - 1800, exp: now() + 600 });
-  assert.ok(await lenient.verifyAccessToken(halfHour), '30 min old under a 1 h maximum');
-  assert.equal((await reason(strict, halfHour)).reason, 'too_old', '30 min old over a 15 min maximum');
+  const halfHour = await mint({ iat: now(), exp: now() + 1800 });
+  assert.ok(await lenient.verifyAccessToken(halfHour), 'valid 30 more minutes under a 1 h maximum');
+  assert.equal((await reason(strict, halfHour)).reason, 'lifetime_too_long', 'valid 30 more minutes over a 15 min maximum');
   const slightFuture = await mint({ iat: now() + 10 });
   assert.ok(await lenient.verifyAccessToken(slightFuture), 'issuer clock 10 s ahead');
   assert.equal((await reason(strict, slightFuture)).reason, 'issued_at');
