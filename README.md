@@ -37,6 +37,7 @@ No new tool: the runtime tools above run on the VPS as `memo-bridge-runner.servi
 - each job runs as `memo-job@<id>.service` (user `memo-job`, `memo-dev.slice`, no credentials, no loopback or private network, only its worktree and output writable), started by a root dispatcher that re-validates every request (`deploy/`);
 - the final status comes from systemd (`succeeded`, `failed`, `timed_out`, `oom`, `budget_exceeded`, `cancelled`, `interrupted`), never from the job's own output;
 - the runner keeps the claim's lease alive while its job waits or runs, and stops the job when the lease is lost.
+- GitHub writes (ledger, push, pull request) use short-lived installation tokens of the GitHub App `memo-labs-automation`, minted on demand from the `app-key` credential, each narrowed to one repository and the minimal permissions; fine-grained PATs (`ledger-gh`, `push-gh`) remain an optional fallback (`docs/RUNNER_VPS.md`, "GitHub App installation tokens").
 
 Write tools stay off the hub until the root CI runners on the VPS are isolated (the write gate in `docs/HUB_SECURITY.md`).
 

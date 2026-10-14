@@ -3,11 +3,19 @@
 // argv (no shell) under the operator's gh login. The `gh` runner is injectable so tests never
 // reach the real GitHub.
 //
+// Pull request creation on the VPS runner (GitHub App tokens): createPull, and the reads of the
+// same flow called with {auth: 'pull_request'}, get the runtime credentials provider's
+// pull_request token for that one repository (an App installation token with contents:write and
+// pull_requests:write). It reaches only that gh child, as GH_TOKEN with a private GH_CONFIG_DIR
+// created for the call and removed after it; process.env is never modified. Without systemd
+// credentials (the Mac), or on the VPS without the App, gh runs as before.
+//
 // Scope: only repositories that are the GitHub origin of a project registered in PROJECTS.md,
 // plus memolabs-dev/.github (governance). Nothing here merges a pull request or enables
 // auto-merge: the landing contract of memolabs-dev/.github lands pull requests.
 import { spawn, execFile } from 'node:child_process';
-import { realpath, stat } from 'node:fs/promises';
+import { realpath, rm, stat } from 'node:fs/promises';
+import { ghChildEnv, privateConfigDir } from '../coordinator/credentials.mjs';
 import { projectInfo, readProjectRegistry } from '../catalog.mjs';
 import { gitHubRemote } from '../coordinator/index.mjs';
 import { validBranch } from '../coordinator/checkpoints.mjs';
@@ -182,17 +190,38 @@ function compactRun(r) {
     created_at: r.created_at ?? null, updated_at: r.updated_at ?? null, url: cleanText(r.html_url, 300) };
 }
 
+// `credentials`: the runtime's GitHub credentials provider (server/integrations/github-app.mjs),
+// or null (gh's own login, as before). `scratchDir`: parent of the per-call gh configuration
+// directories (the runtime's <stateDir>/gh-pr; /tmp may be read-only on the VPS).
 export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, registeredRepos, projectRepo,
-  now = Date.now, timeoutMs = 30_000, writeTimeoutMs = 60_000 } = {}) {
+  now = Date.now, timeoutMs = 30_000, writeTimeoutMs = 60_000, credentials = null, scratchDir = null, baseEnv = process.env } = {}) {
   const listRepos = registeredRepos ?? (() => catalogRepos(catalogOptions));
   const repoOfProject = projectRepo ?? (name => catalogProjectRepo(name, catalogOptions));
   let cache = null;
 
+  // fn(env) with the pull_request token of `repo` in env, or fn(undefined) when there is none
+  // to use (gh's own environment, as before). A provider error fails closed.
+  async function withPullRequestAuth(repo, fn) {
+    if (!credentials) return fn(undefined);
+    const got = await credentials.token('pull_request', repo.full);
+    if (got.error) return fail('credential_unavailable', `${got.credential} ${got.error}`);
+    if (!got.token) return fn(undefined);
+    let dir;
+    try { dir = await privateConfigDir(scratchDir); } catch { return fail('credential_unavailable', 'gh config dir unavailable'); }
+    try {
+      return await fn(ghChildEnv(baseEnv, got.token, dir));
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  const authed = (repo, auth, fn) => (auth === 'pull_request' ? withPullRequestAuth(repo, fn) : fn(undefined));
+  const ghOpts = (opts, env) => (env ? { ...opts, env } : opts);
+
   // Reads always use GET explicitly, so a stray parameter can never turn into a write.
-  async function getJson(path, params = {}) {
+  async function getJson(path, params = {}, env = undefined) {
     const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null).map(([k, v]) => [k, String(v)]));
     const endpoint = query.size ? `${path}?${query}` : path;
-    const out = await gh(['api', '-X', 'GET', '-H', 'Accept: application/vnd.github+json', endpoint], { timeoutMs });
+    const out = await gh(['api', '-X', 'GET', '-H', 'Accept: application/vnd.github+json', endpoint], ghOpts({ timeoutMs }, env));
     if (out.code !== 0 || out.overflow) return ghFailure(out);
     try { return { ok: true, data: JSON.parse(out.stdout) }; } catch { return fail('github_unavailable', 'invalid JSON'); }
   }
@@ -273,16 +302,17 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
         check_runs: checkRuns, statuses };
     },
 
-    async defaultBranch(repo) {
-      const res = await getJson(`repos/${repo.full}`);
+    async defaultBranch(repo, { auth } = {}) {
+      const res = await authed(repo, auth, env => getJson(`repos/${repo.full}`, {}, env));
       if (!res.ok) return res;
       const branch = res.data?.default_branch;
       return validBranch(branch) ? { ok: true, branch } : fail('github_unavailable', 'default branch unknown');
     },
 
     // The open pull request whose head is owner:branch, or null.
-    async openPullFor(repo, branch) {
-      const res = await getJson(`repos/${repo.full}/pulls`, { state: 'open', head: `${repo.owner}:${branch}`, per_page: 5, page: 1 });
+    async openPullFor(repo, branch, { auth } = {}) {
+      const res = await authed(repo, auth, env => getJson(`repos/${repo.full}/pulls`,
+        { state: 'open', head: `${repo.owner}:${branch}`, per_page: 5, page: 1 }, env));
       if (!res.ok) return res;
       const match = Array.isArray(res.data) ? res.data.find(p => p.head?.ref === branch) : null;
       return { ok: true, pull: match ? compactPull(match) : null };
@@ -365,8 +395,9 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     // POST only: title/head/base/body/draft. Never merge, never auto-merge.
     async createPull(repo, { title, head, base, body, draft }) {
       const payload = JSON.stringify({ title, head, base, body, draft: Boolean(draft), maintainer_can_modify: false });
-      const out = await gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json', `repos/${repo.full}/pulls`, '--input', '-'],
-        { input: payload, timeoutMs: writeTimeoutMs });
+      const out = await withPullRequestAuth(repo, env => gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json',
+        `repos/${repo.full}/pulls`, '--input', '-'], ghOpts({ input: payload, timeoutMs: writeTimeoutMs }, env)));
+      if (out.ok === false) return out;
       if (out.code === 0 && !out.overflow) {
         try { return { ok: true, pull: compactPull(JSON.parse(out.stdout)) }; } catch { /* fall through */ }
         return fail('github_outcome_unknown');

@@ -11,6 +11,7 @@
 //   never main, master or the default branch (compared without case), and for a remote
 //   principal the branch head on GitHub must be a commit worktree_push sent from this worktree;
 // - writes check the D8 session binding; github_create_pr takes client_request_id.
+import { join } from 'node:path';
 import { z } from 'zod/v4';
 import { workerFor } from '../coordinator/index.mjs';
 import { ownsWorkspace } from '../coordinator/policy.mjs';
@@ -60,7 +61,8 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     if (options.github) return options.github;
     let github = built.get(rt);
     if (!github) {
-      github = createGitHub({ catalogOptions: rt.catalogOptions, now: rt.now, ...options });
+      github = createGitHub({ catalogOptions: rt.catalogOptions, now: rt.now, credentials: rt.githubCredentials ?? null,
+        scratchDir: typeof rt.stateDir === 'string' ? join(rt.stateDir, 'gh-pr') : null, ...options });
       built.set(rt, github);
     }
     return github;
@@ -262,7 +264,9 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
 
   const branch = worktree.branch;
   if (!validBranch(branch)) return fail('invalid_input', 'branch');
-  const base = await github.defaultBranch(repo);
+  // The reads of this flow use the same pull_request credential as the POST (VPS runner with
+  // the GitHub App); elsewhere gh's own login, as before.
+  const base = await github.defaultBranch(repo, { auth: 'pull_request' });
   if (!base.ok) return base;
   if (isProtectedBranch(branch, [base.branch])) return fail('default_branch_refused');
   const head = await github.remoteBranchHead(worktree.path, branch);
@@ -280,7 +284,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   }
 
   // Idempotent: an already open pull request for this branch is returned as is.
-  const existing = await github.openPullFor(repo, branch);
+  const existing = await github.openPullFor(repo, branch, { auth: 'pull_request' });
   if (!existing.ok) return existing;
   if (existing.pull) return { ok: true, existing: true, repo: repo.full, number: existing.pull.number, url: existing.pull.url,
     head: branch, base: existing.pull.base };
@@ -303,7 +307,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   }
   // A lost response or a concurrent creation: adopt the pull request if it now exists.
   if (created.uncertain || created.error === 'github_validation_failed' || created.error === 'github_outcome_unknown') {
-    const after = await github.openPullFor(repo, branch);
+    const after = await github.openPullFor(repo, branch, { auth: 'pull_request' });
     if (after.ok && after.pull) {
       return { ok: true, existing: true, recovered: true, repo: repo.full, number: after.pull.number, url: after.pull.url,
         head: branch, base: after.pull.base };
