@@ -10,6 +10,7 @@
 //   node deploy/mac/operator-mac.mjs plist   --home <abs> --node <abs> --out <dir>
 // Mac root helper (spec §13 Mac root follow-up; deploy/mac/install-operator-root.sh, run as the
 // owner's user, never as root):
+//   node deploy/mac/operator-mac.mjs hub-key-id  --from <pem>
 //   node deploy/mac/operator-mac.mjs root-plan   --home <abs> --node <abs> --uid <n> --gid <n>
 //   node deploy/mac/operator-mac.mjs root-policy --home <abs> --out <file>
 //   node deploy/mac/operator-mac.mjs root-plist  --home <abs> --uid <n> --gid <n> --out <file>
@@ -416,6 +417,15 @@ async function main() {
     case 'policy': result = await writePolicy(home); break;
     case 'runtime': result = installRuntime(home, from, { commit: arg('commit') ?? null }); break;
     case 'plist': result = writePlist(home, { node: arg('node'), out: arg('out') }); break;
+    case 'hub-key-id': {
+      // The hub key the root helper will trust, by key id (bridge/operator-signing.mjs operatorKeyId),
+      // so the owner can compare it with lab's before installing. Read only.
+      const blocks = pemBlocks(readFileSync(from, 'utf8'));
+      if (blocks.length === 0 || blocks.length > 4) throw new Error('hub_pub_invalid');
+      for (const pem of blocks) if (createPublicKey(pem).asymmetricKeyType !== 'ed25519') throw new Error('hub_pub_not_ed25519');
+      result = { step: 'hub-pub', path: from, key_ids: blocks.map(keyId) };
+      break;
+    }
     case 'root-plan': {
       const plan = rootPlan({ home, node: arg('node'), uid: Number(arg('uid')), gid: Number(arg('gid')) });
       for (const line of plan) console.log(JSON.stringify(line));

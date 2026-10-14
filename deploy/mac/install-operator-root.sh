@@ -123,12 +123,15 @@ if command -v otool >/dev/null 2>&1; then
 fi
 say "{\"step\":\"node\",\"path\":\"$NODE_REAL\",\"libraries\":\"$LIBS\"}"
 
-# Key id as bridge/operator-signing.mjs computes it: SHA-256 of the SPKI DER, first 16 hex.
-KEY_ID=missing
-if [ -f "$HUB_PUB" ] && [ ! -L "$HUB_PUB" ] && SUM="$(openssl pkey -pubin -in "$HUB_PUB" -outform DER 2>/dev/null | shasum -a 256)"; then
-  KEY_ID="${SUM:0:16}"
+# The hub key the helper will trust, by key id (SHA-256 of the SPKI DER, first 16 hex, as
+# bridge/operator-signing.mjs computes it), to compare with lab before installing.
+HUB_OK=0
+if [ -f "$HUB_PUB" ] && [ ! -L "$HUB_PUB" ] && as_user "$NODE" "$HELPER" hub-key-id --from "$HUB_PUB"; then
+  HUB_OK=1
+  say "{\"step\":\"hub-pub-compare\",\"run\":\"ssh lab cat /etc/memo-operator/operator-hub.pub > /tmp/lab-hub.pub; node deploy/mac/operator-mac.mjs hub-key-id --from /tmp/lab-hub.pub\"}"
+else
+  say "{\"step\":\"hub-pub\",\"path\":\"$HUB_PUB\",\"state\":\"missing\"}"
 fi
-say "{\"step\":\"hub-pub\",\"path\":\"$HUB_PUB\",\"key_id\":\"$KEY_ID\",\"compare_with\":\"ssh lab cat /etc/memo-operator/operator-hub.pub | openssl pkey -pubin -outform DER | shasum -a 256 | cut -c1-16\"}"
 
 # The plan, then the rendered policy and plist (one JSON line each).
 as_user "$NODE" "$HELPER" root-plan --home "$AGENT_HOME" --node "$NODE_REAL" --uid "$AGENT_UID" --gid "$AGENT_GID"
@@ -143,7 +146,7 @@ fi
 # --install, as root from here on.
 [ "$(/usr/bin/uname -s)" = Darwin ] || die "--install runs on macOS only"
 [ "$LIBS" = system_only ] || die "$NODE_REAL links libraries outside /usr/lib and /System (libraries: $LIBS); pass --node with an official node build (nvm)"
-[ "$KEY_ID" != missing ] || die "missing or invalid $HUB_PUB; install the operator agent first (deploy/mac/install-operator-agent.sh --hub-pub ...)"
+[ "$HUB_OK" = 1 ] || die "missing or invalid $HUB_PUB; install the operator agent first (deploy/mac/install-operator-agent.sh --hub-pub ...)"
 [ "$(/usr/bin/stat -f '%u' "$HUB_PUB")" = "$AGENT_UID" ] || die "$HUB_PUB is not owned by $AGENT_USER"
 [ -d "$REPO/node_modules/esbuild" ] || die "run pnpm install in $REPO first"
 AS="/Library/Application Support"
