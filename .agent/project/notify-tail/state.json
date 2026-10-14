@@ -1,0 +1,10 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "Issue #35 job notifications (notify on background operator runs and hub jobs_submit, Telegram to the owner chat, inbox tools, sessions_overview) and issue #44 operator_read tail_lines",
+  "branch": "feat/notifications-and-read-tail",
+  "requirements": { "total": 13, "covered": 13 },
+  "acceptance": { "total": 13, "verified_automated": 13, "pending_manual": ["real Telegram message on lab after deploy", "notify from a ChatGPT conversation through the public listener"] },
+  "todos": { "p0_open": 0, "p1_open": 1, "open": ["deploy hub and operator agents (owner, lab-infra unchanged)"] },
+  "risks": { "critical_open": 0, "high_open": 0, "medium_open": ["inbox and watches in hub memory: a restart drops them (results stay on hosts)", "each poll of an operator job is a T0 line in both journals (backoff to 2 min)", "Telegram message carries up to 5 redacted output lines (issue text said none; brief asked for a tail)"] },
+  "verification": { "pnpm_test": "556/556", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "24/24 caught (17 notify, 7 tail)" }
+}

@@ -130,7 +130,11 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   operator_read_media: CAPABILITIES.OPERATOR_READ,
   operator_help: CAPABILITIES.OPERATOR_READ,
   operator_transfer_status: CAPABILITIES.OPERATOR_READ,
-  operator_transfer: CAPABILITIES.OPERATOR_WRITE
+  operator_transfer: CAPABILITIES.OPERATOR_WRITE,
+  // Issue #35: the caller's job notification inbox, answered by the hub (T0).
+  notifications_check: CAPABILITIES.OPERATOR_READ,
+  notifications_get: CAPABILITIES.OPERATOR_READ,
+  notifications_ack: CAPABILITIES.OPERATOR_READ
 });
 export const isOperatorOperation = operation => typeof operation === 'string' && Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation);
 // The tier (0..3) of an operator op, or null.

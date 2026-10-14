@@ -32,7 +32,10 @@ export const OPERATOR_TOOLS_INSTRUCTIONS = 'operator_help lists topics and revie
   'disk, deploy check, git sync, backup status, rotate a key, freeze). operator_snapshot orients you in a directory in one ' +
   'call. operator_read_media shows images and PDF pages (with their text). operator_transfer copies a file between the Mac ' +
   'and lab (its destination write takes an implicit lock like any write; follow a long one with operator_transfer_status). Content larger than one call: ' +
-  'operator_upload_init with stage:true, then operator_edit with new_upload_id or old_upload_id.';
+  'operator_upload_init with stage:true, then operator_edit with new_upload_id or old_upload_id. Long work: background: true ' +
+  'with notify: true (or jobs_submit with notify: true) answers at once; when it ends the owner gets one Telegram message and ' +
+  'your inbox a notice: notifications_check (also in sessions_overview), notifications_get, notifications_ack. The end of a ' +
+  'large log: operator_read with tail_lines.';
 // Repatriation D-R4, D-R12, D-R13: the fluid operator path, so the model asks the owner once per
 // work session instead of once per command.
 export const OPERATOR_FLOW_INSTRUCTIONS = 'Operator work session: read-only commands (ps, top -l 1, df, du, ls, cat, grep, find, ' +

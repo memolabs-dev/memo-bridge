@@ -58,7 +58,9 @@ export function registerJobTools(server, getRuntime, options = {}) {
       client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
         .describe('Your own id for this request (8 to 128 letters, digits, - or _). A retry with the same id returns the job the first call created and starts nothing.'),
       release_on_finish: z.boolean().optional()
-        .describe('VPS runner only: release the claim when the job ends (completed on success, otherwise cancelled or failed).')
+        .describe('VPS runner only: release the claim when the job ends (completed on success, otherwise cancelled or failed).'),
+      notify: z.boolean().optional()
+        .describe('Through the hub (remote chats): when the job ends, one Telegram message to the owner and a notification in your inbox (notifications_check). Ignored elsewhere.')
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, call('submit'));

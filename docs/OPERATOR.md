@@ -104,6 +104,47 @@ policy, a root list or an allowlist, or works around a refusal.
 runtime feature, not an operator one: `docs/COORDINATOR.md` and the server instructions describe
 it; the store is the coordinator SQLite (schema v5) on the host that runs the runtime.
 
+## Job notifications and log tails (issues #35, #44)
+
+Spec: `.agent/project/notify-tail/spec.md`.
+
+| Tool or option | Tier | Runs on | What it does |
+|---|---|---|---|
+| `operator_run`, `operator_script` `background: true, notify: true` | as the call | hub watches, host runs | when the job ends: one Telegram message to the owner chat and one notice in the caller's inbox |
+| `jobs_submit` `notify: true` | runtime | hub watches, runtime runs | the same for a test, build or lint job started through the hub (remote chats, 9443) |
+| `notifications_check` | T0 | hub | counts of the caller's inbox: unread, total, jobs still watched; also in `sessions_overview` as `notifications` |
+| `notifications_get` | T0 | hub | the newest unread notices (or one by id, or with `include_acked`): kind, host, job id, status, exit code, duration, last output lines (redacted, untrusted) |
+| `notifications_ack` | T0 | hub | mark notices as read (`notification_ids` or `all: true`); changes only the caller's inbox |
+| `operator_read` `tail_lines` | T0 | host agent | exactly the last N lines (1 to 2000) of a file, read from its end |
+
+**notify is the hub's.** It is removed from the arguments before the approval hash and the
+signature: the host never sees it, and an approved call matches with or without it. The hub
+watches the job by polling its own read tool every 20 s with the starter's principal
+(`operator_job_status`, signed T0, so each poll is in both journals; `job_status` for runtime
+jobs). A foreground call with `notify` answers `notify: {registered: false, reason: "foreground"}`.
+Bounds: 200 watches, 20 per principal (`too_many_watches`, the job still runs); a watch ends as
+`watch_expired` 30 min after its job's timeout (plus 4 h of queue for runtime jobs), and as
+`unknown` after three permanent errors in a row (`unknown_job`, `forbidden`).
+
+**Telegram.** One message per finished job, to `MEMO_BRIDGE_TELEGRAM_CHAT_ID` only, without
+buttons: status, host, op or recipe, job id, exit code, duration, principal, at most 5 output
+lines of 160 characters, redacted (`redactSecrets`) on the host and again in the hub. No tool
+takes a chat id or a recipient. Without the bot, or when `sendMessage` fails, the notice is still
+in the inbox (`telegram: unavailable` or `failed`) and the hub journals `notification_unsent`
+with the reason; a delivered one is journaled `notification_sent`.
+
+**Inbox.** In hub memory, like approvals, grants and locks: the last 50 notices per principal, 256
+principals. A hub restart drops the inbox and the watches; the results themselves stay on the
+hosts and in the runtime store (`operator_job_status`, `job_status`, `job_results`). A principal
+reads and acknowledges only its own notices.
+
+**tail_lines.** The file is resolved by the same read policy and denylist as a byte read, then
+read backwards in 16 KiB chunks until N line ends are found, within one window of 128 KiB (or
+`max_bytes` when smaller): a 10 MB log costs one window, never the file. A final newline ends the
+last line. When the last N lines are larger than the window, the complete lines that fit come
+back with `truncated: "max_bytes"` and `offset` to continue backwards. `tail_lines` and `offset`
+are exclusive (`invalid_arguments`). Redaction and the 128 KiB result bound are unchanged.
+
 ## Read-only commands, implicit workspace and implicit locks
 
 Live bench of 2026-10-14 (19:57 and 20:04): "the 5 most CPU-hungry processes on the Mac" and
@@ -392,8 +433,8 @@ the root tree, the state and the socket; keeps `/var/log/memo-operator`), then
   Do not grant it Full Disk Access.
 - **Node path.** The plist names the absolute node that ran the install (an nvm path today). If
   that version is removed, the job fails to start: rerun the script with the new node.
-- **Approvals and the hub flag live in hub memory**: a hub restart drops pending approvals and
-  the `/freeze` flag. The FROZEN files are durable.
+- **Approvals and the hub flag live in hub memory**: a hub restart drops pending approvals,
+  the `/freeze` flag, the job notification inbox and the watches of running notify jobs. The FROZEN files are durable.
 - **Transfers move data between the hosts.** A file readable on one host can be written on the
   other, inside its write roots. The source denylist and roots, the destination lock and both
   journals are the barriers; there is no content filter on what a transfer carries.

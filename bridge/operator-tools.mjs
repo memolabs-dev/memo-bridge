@@ -112,6 +112,59 @@ export function createOperatorTools(policy, { run = runArgv, projects = catalogP
   const denylist = createDenylist(policy);
   const resolve = (raw, access = 'r') => resolveOperatorPath(policy, raw, { access, denylist, projects });
 
+  // Issue #44: the last `n` lines of a file already resolved by the read policy, read backwards
+  // in 16 KiB chunks, never more than min(cap, readMaxBytes) bytes: a 10 MB log costs one window.
+  // A final newline ends the last line; it does not start an empty one. When the last n lines are
+  // larger than the window, the complete lines that fit come back with truncated "max_bytes".
+  async function readTail(path, n, cap) {
+    let fh;
+    try { fh = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0)); } catch (error) {
+      return fail(error?.code === 'EACCES' ? 'permission_denied' : error?.code === 'ELOOP' ? 'path_changed' : 'unreadable');
+    }
+    try {
+      const info = await fh.stat();
+      if (!info.isFile()) return fail('not_a_file');
+      const size = info.size;
+      const window = Math.min(cap, LIMITS.readMaxBytes);
+      const chunks = [];
+      let held = 0; let start = size; let newlines = 0; let lastByte = null;
+      while (start > 0 && held < window && newlines < n) {
+        const len = Math.min(16 * 1024, start, window - held);
+        const buf = Buffer.alloc(len);
+        let got = 0;
+        while (got < len) { const { bytesRead } = await fh.read(buf, got, len - got, start - len + got); if (!bytesRead) break; got += bytesRead; }
+        if (got < len) return fail('unreadable', { detail: 'file changed while reading' });
+        start -= len; held += len; chunks.unshift(buf);
+        if (lastByte === null) lastByte = buf[len - 1];
+        // The file's final newline is not a separator.
+        for (let i = 0; i < len; i++) if (buf[i] === 0x0a && !(start + i === size - 1)) newlines++;
+      }
+      const all = Buffer.concat(chunks, held);
+      const end = all.length - (lastByte === 0x0a ? 1 : 0);
+      let cut = null; let seen = 0;
+      for (let i = end - 1; i >= 0; i--) if (all[i] === 0x0a && ++seen === n) { cut = i + 1; break; }
+      let truncated = null;
+      if (cut === null && start === 0) cut = 0;
+      else if (cut === null) {
+        // Window full before n lines: drop the partial first line, keep the complete ones.
+        const first = all.indexOf(0x0a);
+        truncated = 'max_bytes';
+        cut = first === -1 || first >= end ? 0 : first + 1;
+      }
+      const slice = all.subarray(cut);
+      let lines = 0;
+      const body = slice.length - (lastByte === 0x0a && slice.length ? 1 : 0);
+      for (let i = 0; i < body; i++) if (slice[i] === 0x0a) lines++;
+      if (body > 0 || (slice.length > 0 && lastByte === 0x0a)) lines++;
+      const decoded = decodeSlice(slice, { atStart: start + cut === 0 });
+      const base = { ok: true, host: policy.host, path, size, offset: start + cut, bytes: slice.length, next_offset: null, tail_lines: n, lines,
+        encoding: decoded.encoding, mtime: info.mtime.toISOString(),
+        ...(truncated ? { truncated, detail: `the last ${n} lines are over ${window} bytes; read earlier bytes with offset and max_bytes` } : {}) };
+      if (decoded.encoding === 'binary') return { ...base, binary: true };
+      return { ...base, ...untrusted({ content: decoded.text }) };
+    } finally { await fh.close(); }
+  }
+
   // Walk a directory without following symlinks. visit(entry) returns false to stop.
   async function walk(start, { depth, hidden, onEntry, deadline = Infinity }) {
     const stats = { denied: 0, unreadable: 0, stopped: null };
@@ -193,9 +246,14 @@ export function createOperatorTools(policy, { run = runArgv, projects = catalogP
         secret_entries_skipped: stats.denied, unreadable_dirs: stats.unreadable, ...untrusted({ entries }) };
     },
 
-    async operator_read({ path, offset = 0, max_bytes: maxBytes = LIMITS.readDefaultBytes }) {
+    async operator_read({ path, offset, max_bytes: maxBytes, tail_lines: tailLines }) {
+      // Issue #44: tail_lines reads the end of the file (offset is then meaningless).
+      if (tailLines !== undefined && offset !== undefined) return fail('invalid_arguments', { detail: 'tail_lines and offset are exclusive' });
       const at = await resolve(path);
       if (!at.ok) return at;
+      if (tailLines !== undefined) return readTail(at.path, tailLines, maxBytes ?? LIMITS.readMaxBytes);
+      offset ??= 0;
+      maxBytes ??= LIMITS.readDefaultBytes;
       let fh;
       // O_NOFOLLOW on the canonical path: a swap to a symlink after realpath fails here.
       try { fh = await open(at.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0)); } catch (error) {

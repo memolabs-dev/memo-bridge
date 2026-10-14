@@ -3,7 +3,8 @@
 // One purpose, one fixed owner: the bot sends approval requests to the owner's private chat and
 // takes commands from that chat only: /freeze, /unfreeze, /status, and for standing approvals
 // (repatriation D-R4) /grant <host> <prog,prog> <cwd>[,<cwd>] [<hours>h], /approvals, /revoke <id>|all. Every update from any
-// other chat or user is ignored (counted, never read further). No tool sends a message, no tool
+// other chat or user is ignored (counted, never read further). No tool sends a message (a job
+// started with notify: true makes the hub send one to the owner chat when it ends), no tool
 // names a recipient, and the model cannot freeze or unfreeze anything.
 //
 // Telegram Bot API (https://core.telegram.org/bots/api, read 2026-10-14):
@@ -27,6 +28,7 @@
 // never in an error message, never in an argument.
 import { credentialPath, readCredentialFile } from '../server/coordinator/credentials.mjs';
 import { redactSecrets } from './operator-output.mjs';
+import { telegramText } from './operator-notifications.mjs';
 
 export const TELEGRAM_CREDENTIAL = 'telegram-bot';
 export const BOT_TOKEN_RE = /^\d{5,16}:[A-Za-z0-9_-]{30,80}$/;
@@ -187,6 +189,11 @@ export function createOperatorBot({ client, ownerChatId, approvals, grants = nul
       await client.sendMessage({ chat_id: ownerChatId, text, reply_markup: { inline_keyboard: [
         [{ text: 'Approve', callback_data: `sg:a:${grant.grant_id}` }, { text: 'Deny', callback_data: `sg:d:${grant.grant_id}` }]
       ] } });
+    },
+    // Issue #35: one message per finished job started with notify: true, to the owner chat only,
+    // no buttons. notification: bridge/operator-notifications.mjs (output tail already redacted).
+    async notifyJob(notification) {
+      await client.sendMessage({ chat_id: ownerChatId, text: telegramText(notification).slice(0, MAX_TEXT) });
     },
     async pollOnce() {
       const updates = await client.getUpdates({ offset, timeout: pollTimeoutS, allowed_updates: ['message', 'callback_query'] });
