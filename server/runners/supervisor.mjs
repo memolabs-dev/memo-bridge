@@ -144,7 +144,9 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       if (!s.ok) continue; // cannot tell; a reading error never ends a job
       if (s.active) {
         inactiveSince.delete(job.id); stalled.delete(job.id);
-        if (job.status === 'running' && Number.isInteger(job.started_at) && at > job.started_at + job.timeout_ms + o.deadlineMarginMs) {
+        // started_at is when the first unit of the job (the install, on the VPS) became active.
+        const budget = job.timeout_ms + (executor.installBudgetMs ?? 0) + o.deadlineMarginMs;
+        if (job.status === 'running' && Number.isInteger(job.started_at) && at > job.started_at + budget) {
           await end(job, 'timed_out', 'deadline_exceeded', 'timeout', { timeout_seconds: Math.round(job.timeout_ms / 1000) });
           continue;
         }

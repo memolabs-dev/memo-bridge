@@ -42,6 +42,17 @@ export const DEFAULT_RUNNER_ROOT = '/var/lib/memo-runner';
 // Debian 13 path; an absolute path so PATH never chooses the binary.
 export const SYSTEMCTL = '/usr/bin/systemctl';
 export const UNIT_PREFIX = 'memo-job@';
+// Phase 1 of a job (dependency install, network on). memo-job@<id> Requires= and After= it,
+// so starting the recipe unit runs the install first, and a failed install never reaches the
+// recipe (lab-infra templates; deploy/memo-runner-dispatch writes both drop-ins).
+export const INSTALL_UNIT_PREFIX = 'memo-job-install@';
+// Bound of the install phase (the install unit's TimeoutStartSec=, written by the dispatcher
+// from its own INSTALL_TIMEOUT_SECONDS, which must stay equal). The supervisor's deadline
+// adds it to the job timeout, since the recipe's RuntimeMaxSec= starts after the install.
+export const INSTALL_TIMEOUT_SECONDS = 600;
+// status.json reasons written by record-result --phase=install: the install failed or ran
+// out of time, so the recipe never ran. Each is its own outcome code.
+export const INSTALL_REASONS = Object.freeze(['install_failed', 'install_timeout']);
 export const DISPATCH_ID_RE = /^[a-z0-9-]{8,64}$/;
 const UNIT_RE = /^memo-job@([a-z0-9-]{8,64})\.service$/;
 export const SPOOL_VERSION = 1;
@@ -78,6 +89,10 @@ export function dispatchIdFor(jobId) {
 export function unitFor(dispatchId) {
   if (!DISPATCH_ID_RE.test(dispatchId ?? '')) throw new Error('invalid_dispatch_id');
   return `${UNIT_PREFIX}${dispatchId}.service`;
+}
+export function installUnitFor(dispatchId) {
+  if (!DISPATCH_ID_RE.test(dispatchId ?? '')) throw new Error('invalid_dispatch_id');
+  return `${INSTALL_UNIT_PREFIX}${dispatchId}.service`;
 }
 export function dispatchIdOfUnit(unit) {
   const match = UNIT_RE.exec(unit ?? '');
@@ -231,6 +246,11 @@ export function statusFromResult({ service_result: result, exit_code: code, exit
       ? { status: 'budget_exceeded', exit_code: null, reason }
       : { status: 'cancelled', exit_code: null, reason };
   }
+  // Root's verdict on the install unit: the recipe never ran. The exit code is the install's.
+  if (result !== DISPATCH_REFUSED && INSTALL_REASONS.includes(reason)) {
+    const n = code === 'exited' ? Number.parseInt(status ?? '', 10) : Number.NaN;
+    return { status: 'failed', exit_code: Number.isInteger(n) ? n : null, reason };
+  }
   switch (result) {
     case 'success':
       if (code === 'exited' && status === '0') return { status: 'succeeded', exit_code: 0 };
@@ -254,6 +274,12 @@ export function statusFromResult({ service_result: result, exit_code: code, exit
         : { status: 'failed', exit_code: null, reason: DISPATCH_REFUSED };
     default: return { status: 'failed', exit_code: null, reason: `unit_${result}` };
   }
+}
+
+// `systemctl show` of several units: one block per unit, separated by an empty line, in the
+// order the units were named (systemctl(1) show).
+export function parseShowBlocks(text) {
+  return String(text ?? '').split(/\n\s*\n/).map(parseShowOutput).filter(p => Object.keys(p).length);
 }
 
 // `systemctl show` Key=Value lines -> object (first occurrence wins, values bounded).
@@ -306,6 +332,8 @@ export function createSystemdExecutor({ root = DEFAULT_RUNNER_ROOT, systemctl = 
     kind: 'systemd',
     queueing: true,
     paths,
+    // The install phase runs before the recipe's own RuntimeMaxSec= starts counting.
+    installBudgetMs: INSTALL_TIMEOUT_SECONDS * 1000,
     // Bound on queued plus running jobs per host (runner.json max_queue); jobs.mjs refuses beyond.
     ...(Number.isInteger(maxQueue) ? { maxQueue } : {}),
     // runner.json recipes and longest timeout (resources.mjs loadRunnerConfig); jobs.mjs refuses
@@ -351,15 +379,28 @@ export function createSystemdExecutor({ root = DEFAULT_RUNNER_ROOT, systemctl = 
       }
       return { ok: true, withdrawn };
     },
+    // Both units of the job: the recipe unit, and the install unit that runs before it. While
+    // the install runs, the recipe unit is inactive with a start job waiting; the job is
+    // active when either unit is. The Id= property names each block, so the order systemctl
+    // prints them in does not matter.
     async show(job) {
       const unit = job.unit ?? unitFor(didOf(job));
-      if (!UNIT_RE.test(unit)) return { ok: false, error: 'invalid_unit' };
-      const r = await run(systemctl, ['show', '--no-pager', '--property=LoadState,ActiveState,SubState,Result', unit]);
+      const match = UNIT_RE.exec(unit);
+      if (!match) return { ok: false, error: 'invalid_unit' };
+      const install = installUnitFor(match[1]);
+      const r = await run(systemctl, ['show', '--no-pager', '--property=Id,LoadState,ActiveState,SubState,Result', unit, install]);
       if (r.code !== 0) return { ok: false, error: r.missing ? 'systemctl_missing' : r.timedOut ? 'systemctl_timeout' : 'systemctl_failed' };
-      const p = parseShowOutput(r.stdout);
-      if (!p.ActiveState) return { ok: false, error: 'systemctl_unparsable' };
+      const blocks = parseShowBlocks(r.stdout);
+      // A block without Id= (an older systemctl, or a fake) is the recipe unit when it is the only one.
+      const p = blocks.find(b => b.Id === unit) ?? (blocks.length === 1 && !blocks[0].Id ? blocks[0] : null);
+      const i = blocks.find(b => b.Id === install) ?? null;
+      if (!p?.ActiveState) return { ok: false, error: 'systemctl_unparsable' };
+      const recipeActive = ACTIVE_STATES.has(p.ActiveState);
+      const installActive = Boolean(i?.ActiveState && ACTIVE_STATES.has(i.ActiveState));
       return { ok: true, unit, load: p.LoadState ?? null, active_state: p.ActiveState, sub_state: p.SubState ?? null,
-        result: p.Result ?? null, active: ACTIVE_STATES.has(p.ActiveState) };
+        result: p.Result ?? null, active: recipeActive || installActive,
+        phase: recipeActive ? 'recipe' : installActive ? 'install' : null,
+        install: i ? { unit: install, active_state: i.ActiveState ?? null, result: i.Result ?? null } : null };
     },
     async alive(job) {
       const s = await executor.show(job);

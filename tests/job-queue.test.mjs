@@ -15,7 +15,7 @@ import { createRuntime } from '../server/runtime.mjs';
 import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 import { SCHEMA_VERSION, openSqliteStore, requestKey } from '../server/coordinator/store.mjs';
 import { createJobService, maxJobsFromEnv } from '../server/runners/jobs.mjs';
-import { createSystemdExecutor, dispatchIdFor } from '../server/runners/executor-systemd.mjs';
+import { INSTALL_TIMEOUT_SECONDS, createSystemdExecutor, dispatchIdFor } from '../server/runners/executor-systemd.mjs';
 import { runnerStatus } from '../server/runners/executor.mjs';
 import { createSupervisor } from '../server/runners/supervisor.mjs';
 import { DEFAULT_RUNNER_CONFIG, admit, createResourceReader, loadRunnerConfig, parseDu, parseMeminfo, parsePressure }
@@ -47,8 +47,9 @@ async function fakeSystemctl(dir) {
 const fs = require('fs'); const path = require('path');
 const here = path.dirname(fs.realpathSync(process.argv[1]));
 const units = JSON.parse(fs.readFileSync(path.join(here, 'units.json'), 'utf8'));
-const u = units[process.argv[process.argv.length - 1]] || {};
-process.stdout.write('LoadState=loaded\\nActiveState=' + (u.ActiveState || 'inactive') + '\\nSubState=' + (u.SubState || 'dead') + '\\nResult=success\\n');
+const named = process.argv.slice(2).filter(a => a.endsWith('.service'));
+process.stdout.write(named.map(unit => { const u = units[unit] || {};
+  return 'Id=' + unit + '\\nLoadState=loaded\\nActiveState=' + (u.ActiveState || 'inactive') + '\\nSubState=' + (u.SubState || 'dead') + '\\nResult=success\\n'; }).join('\\n'));
 `);
   chmodSync(bin, 0o755);
   return {
@@ -535,9 +536,11 @@ test('safety net behind RuntimeMaxSec: a unit still active well past its timeout
   await v.supervisor.tick();
   v.startUnit(job.job_id);
   await v.supervisor.tick();
-  v.clock.t += 100_000;
+  // The deadline is timeout + install bound (the recipe's RuntimeMaxSec= starts after the
+  // install unit) + margin: 60 s + 600 s + 60 s.
+  v.clock.t += 100_000 + INSTALL_TIMEOUT_SECONDS * 1000;
   await v.supervisor.tick();
-  assert.equal((await v.row(job.job_id)).status, 'running', 'within timeout plus margin systemd is trusted to act');
+  assert.equal((await v.row(job.job_id)).status, 'running', 'within timeout plus install plus margin systemd is trusted to act');
   v.clock.t += 30_000;
   await v.supervisor.tick();
   const r = await v.row(job.job_id);
