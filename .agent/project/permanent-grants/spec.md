@@ -39,7 +39,7 @@ Non-goals: any way for the model to add, extend or revoke one; Telegram `/approv
 | PG-A8 | No tool adds or extends one | PG-R4 (operator_grant schema, store ids, single-use ids); PG-R5 (agent refuses an id its file lacks, a stale copy) |
 | PG-A9 | Tests and one mutation check per rule | table below |
 
-## Mutation checks (2026-10-14 21:45 to 21:50 CEST)
+## Mutation checks (2026-10-14 21:45 to 21:53 CEST)
 
 One source change, the rule's test file, expect a failure, file restored (scratch script).
 
@@ -83,6 +83,6 @@ Equivalent, not counted: `danger.hard` in `grantableCall` (classifyCall gives ev
 
 ## Evidence
 
-- memo-bridge: `pnpm test` 548/548 before the rebase (see state.json for the final run), `pnpm run build` ok, `pnpm run smoke` ok (56 tools).
+- memo-bridge, rebased on origin/main 1904b80 (notifications #35/#44, coordinator #50, instructions #51): `pnpm test` 577/577 (548/548 before the rebase), `pnpm run build` ok, `pnpm run smoke` ok (56 tools); mutations rerun after the rebase, 22/22 caught.
 - lab-infra: `bash scripts/tests.sh` 115 green, 0 red; `test_memo_operator.py` 36 tests OK with `MEMO_BRIDGE_SRC` on this branch (1 skip without it, the controller cache predates #48).
 - Runtime on the hosts: pending deploy (memo-bridge merge, lab `memo_bridge_version` bump, Mac reinstall).
