@@ -1,0 +1,10 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "#39 structured handoff on task_checkpoint, #38 learning_review block with per-workspace counters",
+  "branch": "feat/handoff-and-learning-review",
+  "requirements": { "total": 11, "covered": 11 },
+  "acceptance": { "total": 12, "verified_automated": 11, "pending_manual": ["AC12 one real ChatGPT resume after context loss"] },
+  "todos": { "p0_open": 0, "p1_open": 2, "open": ["push and PR (main session)", "AC12 manual acceptance after deploy (owner)"] },
+  "risks": { "critical_open": 0, "high_open": 0, "medium_open": ["R1 schema v6 may collide with a parallel schema bump at merge", "R2 user turns are estimated from a 90 s call gap"] },
+  "verification": { "pnpm_test": "557/557", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "18/18 caught", "learning_review_bytes": "1101/1536" }
+}

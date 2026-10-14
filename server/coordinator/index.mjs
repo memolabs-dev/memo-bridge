@@ -24,6 +24,7 @@ import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
 import { MEMORY_NOTE, createMemoryOperations } from './memory.mjs';
 import { parseHandoff, publicHandoff } from './handoff.mjs';
+import { createLearning, learningThresholds as thresholdsFromEnv } from './learning.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
 import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
   isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
@@ -320,7 +321,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
   readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
-  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null }) {
+  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
+  learningThresholds = thresholdsFromEnv() }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
   // Where the call came from and which client made it, as the server set them on the principal
@@ -354,6 +356,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   const write = fn => store.transaction(repo => fn(repo, now()));
   // Context memory across conversations (spec D4 of the repatriated tools): server/coordinator/memory.mjs.
   const memory = createMemoryOperations({ read, write, principal });
+  // Learning review counters (#38): server/coordinator/learning.mjs.
+  const learning = createLearning({ write, principal, thresholds: learningThresholds });
   const latestHandoff = async issueRef => {
     try { return publicHandoff(await read(repo => repo.latestHandoff(issueRef))); } catch { return null; }
   };
@@ -1293,5 +1297,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       return result;
     };
   }
+  // Learning review bookkeeping (#38), called by server/tools/learning-hook.mjs after a tool call:
+  // not a tool, never authorizes anything, never throws. Returns the block to add, or null.
+  api.learningTick = async (info = {}, rawMeta = null) => {
+    try { return await learning.tick(info ?? {}, requestMeta(rawMeta)); } catch { return null; }
+  };
   return Object.freeze(api);
 }

@@ -14,6 +14,7 @@
 // The modules are imported dynamically: importing this file loads nothing of the runtime stack,
 // so the Mac probe agent (which imports bridge/ops.mjs) stays light.
 import { CAPABILITIES, OPERATION_CAPABILITY, OPERATOR_OPERATION_CAPABILITY, authorize, operatorTier } from './coordinator/policy.mjs';
+import { withLearning } from './tools/learning-hook.mjs';
 
 // [module path relative to this file, register function]. Each register function takes
 // (server, getRuntime) and calls getRuntime() lazily, inside its handlers.
@@ -88,9 +89,11 @@ export async function collectTools(getRuntime) {
         annotations: config.annotations, handler }));
     }
   };
+  // Every handler is counted for the learning review (#38, server/tools/learning-hook.mjs).
+  const counted = withLearning(collector, getRuntime);
   for (const [path, fn] of TOOL_MODULES) {
     const mod = await import(path);
-    mod[fn](collector, getRuntime);
+    mod[fn](counted, getRuntime);
   }
   return tools;
 }

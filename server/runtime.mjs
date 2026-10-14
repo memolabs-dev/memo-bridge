@@ -11,6 +11,7 @@
 import { join } from 'node:path';
 import { platform } from 'node:os';
 import { createCoordinator } from './coordinator/index.mjs';
+import { learningThresholds } from './coordinator/learning.mjs';
 import { createIssueLeaseClient } from './coordinator/issue-lease.mjs';
 import { CAPABILITIES, CLIENT_TYPES, OPERATOR_TIER_CAPABILITIES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
   makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
@@ -76,6 +77,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
     if (!coordinators.has(p)) {
       coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host,
         remotePolicy: policy(), projectSync: projectSyncOf(), credentials, scratchDir: join(stateDir, 'gh-pr'),
+        learningThresholds: learningThresholds(env),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
     }
     return coordinators.get(p);
