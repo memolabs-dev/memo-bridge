@@ -148,6 +148,24 @@ export function operatorTargets(op, args, { homes = DEFAULT_HOMES, uploads = nul
   }
 }
 
+// Delegation (#47, spec D7): may a child of `delegation` (as workspace_status returns it: {scope:
+// {mode, paths}}) act on these targets of `host`? Only path targets under one of its absolute scope
+// paths; read_only and worktree scopes have none. null when allowed, else a refusal.
+export function delegationTargetRefusal(delegation, host, targets, homes = DEFAULT_HOMES) {
+  const scope = delegation?.scope ?? {};
+  const prefixes = scope.mode === 'paths' ? (Array.isArray(scope.paths) ? scope.paths : [])
+    .filter(p => typeof p === 'string' && (p.startsWith('/') || p.startsWith('~'))).map(p => normalizePath(host, p, homes))
+    .filter(p => p && !p.unresolved) : [];
+  for (const need of targets) {
+    const ok = need.kind === 'path' && !need.unresolved && prefixes.some(p => under(need.key, p.key));
+    if (!ok) {
+      return fail('outside_delegation_scope', { detail: need.kind === 'path' ? `${need.shown} is outside your delegation scope`
+        : `a delegated conversation takes path locks inside its scope only, never ${need.kind}` });
+    }
+  }
+  return null;
+}
+
 // createOperatorLocks({now, verifyWorkspace, homes, newId}). verifyWorkspace(principal,
 // workspaceId, clientSession) resolves with {ok:true, workspace:{workspace_id, status,
 // session_tag, project}} as the runtime's workspace_status answers it for that conversation, or
@@ -158,6 +176,16 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
   const locks = new Map();    // id -> lock
   const uploads = new Map();  // upload_id -> {host, path, workspaceId, at}
   const lastCall = new Map(); // session hash -> ms of the last operator or runtime call seen
+  // Delegation (#47): a child workspace -> its parent's workspace. A lock's family is the parent
+  // for a child's lock, else its own workspace: one family never blocks itself, and a child's
+  // lock blocks every other conversation as its parent's would.
+  const families = new Map();
+  const familyOf = workspaceId => families.get(workspaceId) ?? workspaceId;
+  const setFamily = (workspaceId, parentId) => {
+    families.delete(workspaceId);
+    families.set(workspaceId, parentId);
+    while (families.size > 1024) families.delete(families.keys().next().value);
+  };
   const startedAt = now();
 
   const sweep = () => {
@@ -168,7 +196,8 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
   const describe = (l, session = null) => ({ lock_id: l.id, host: l.host, kind: l.kind, target: l.shown, workspace_id: l.workspaceId,
     session_tag: sessionTag(l.session), project: l.project ?? null, reason: l.reason, expires_at: new Date(l.expires).toISOString(),
     taken_at: new Date(l.taken).toISOString(), ...(session !== undefined ? { you: Boolean(session) && l.session === session } : {}) });
-  const holderOf = l => ({ session_tag: sessionTag(l.session), workspace_id: l.workspaceId, kind: l.kind, target: l.shown,
+  const holderOf = l => ({ session_tag: sessionTag(l.session), workspace_id: l.workspaceId,
+    ...(familyOf(l.workspaceId) !== l.workspaceId ? { parent_workspace_id: familyOf(l.workspaceId) } : {}), kind: l.kind, target: l.shown,
     reason: l.reason, expires_at: new Date(l.expires).toISOString() });
   const session = value => (CLIENT_SESSION_RE.test(value ?? '') ? value : null);
   // Two conversations of one workspace never share its locks: a session recorded on the lock
@@ -227,8 +256,14 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     if (ws.status !== 'active') return fail('workspace_closed');
     const callerTag = sessionTag(caller);
     if (isRemotePrincipal(principal) && ws.session_tag && callerTag && ws.session_tag !== callerTag) return fail('workspace_other_session');
+    if (ws.delegation) {
+      const refusal = delegationTargetRefusal(ws.delegation, args.host, [target], homes);
+      if (refusal) return refusal;
+      if (typeof ws.delegation.parent_workspace_id === 'string') setFamily(args.workspace_id, ws.delegation.parent_workspace_id);
+    }
     sweep();
-    const conflict = [...locks.values()].find(l => l.host === args.host && l.workspaceId !== args.workspace_id && overlaps(l, target));
+    const conflict = [...locks.values()].find(l => l.host === args.host && familyOf(l.workspaceId) !== familyOf(args.workspace_id) &&
+      overlaps(l, target));
     if (conflict) return fail('locked_by_other_session', { holder: holderOf(conflict) });
     const t = now();
     // The runtime says this conversation owns the workspace: its earlier locks follow it.
@@ -267,7 +302,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     }
     const hostLocks = [...locks.values()].filter(l => l.host === args.host);
     for (const need of needs) {
-      const blocking = hostLocks.find(l => (l.workspaceId !== workspaceId || l.principal !== principal.id) && overlaps(l, need));
+      const blocking = hostLocks.find(l => (familyOf(l.workspaceId) !== familyOf(workspaceId) || l.principal !== principal.id) && overlaps(l, need));
       if (blocking) return fail('locked_by_other_session', { holder: holderOf(blocking) });
     }
     if (workspaceId !== undefined) {
@@ -295,7 +330,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     const hostLocks = [...locks.values()].filter(l => l.host === host);
     const mine = hostLocks.filter(l => l.workspaceId === workspaceId && l.principal === principal.id);
     for (const need of targets) {
-      const blocking = hostLocks.find(l => (l.workspaceId !== workspaceId || l.principal !== principal.id) && overlaps(l, need));
+      const blocking = hostLocks.find(l => (familyOf(l.workspaceId) !== familyOf(workspaceId) || l.principal !== principal.id) && overlaps(l, need));
       if (blocking) return fail('locked_by_other_session', { holder: holderOf(blocking),
         next_step: 'another conversation holds this target: tell the owner and wait, or work elsewhere' });
     }
@@ -332,7 +367,8 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
 
   // What one call touches, with the uploads this table knows (implicit locks, D-R14).
   const targetsOf = (op, args) => operatorTargets(op, args, { homes, uploads });
-  return Object.freeze({ handle, check, acquireImplicit, targetsOf, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
+  return Object.freeze({ handle, check, acquireImplicit, targetsOf, recordUpload, overview, seen, setFamily, familyOf,
+    get size() { sweep(); return locks.size; } });
 }
 
 // Merge the hub's view into a sessions_overview answer of the runtime.
@@ -340,13 +376,16 @@ export function mergeOverview(data, view) {
   if (!data || data.ok !== true || !Array.isArray(data.sessions)) return data;
   const byWorkspace = new Map();
   for (const l of view.locks) byWorkspace.set(l.workspace_id, [...(byWorkspace.get(l.workspace_id) ?? []), l]);
-  const sessions = data.sessions.map(s => ({ ...s, operator_locks: (byWorkspace.get(s.workspace_id) ?? [])
+  // Delegation (#47, spec D10): children sit under their parent and get their locks there too.
+  const withLocks = s => ({ ...s, operator_locks: (byWorkspace.get(s.workspace_id) ?? [])
     .map(({ lock_id, host, kind, target, reason, expires_at }) => ({ lock_id, host, kind, target, reason: reason ? reason.slice(0, 80) : null,
       expires_at })),
-  ...(s.session_tag && view.last_call_at[s.session_tag] ? { last_call_at: view.last_call_at[s.session_tag] } : {}) }));
+  ...(s.session_tag && view.last_call_at[s.session_tag] ? { last_call_at: view.last_call_at[s.session_tag] } : {}),
+  ...(Array.isArray(s.children) ? { children: s.children.map(withLocks) } : {}) });
+  const sessions = data.sessions.map(withLocks);
   // Bounded for the 24 KiB remote budget: the details sit on each workspace shown; the list
   // repeats them only for a workspace beyond the ones shown.
-  const shown = new Set(data.sessions.map(s => s.workspace_id));
+  const shown = new Set(data.sessions.flatMap(s => [s.workspace_id, ...(Array.isArray(s.children) ? s.children.map(c => c.workspace_id) : [])]));
   const list = view.locks.map(({ lock_id, host, kind, target, workspace_id, session_tag, you, reason, expires_at }) => ({ lock_id, workspace_id,
     session_tag, ...(you !== undefined ? { you } : {}), ...(shown.has(workspace_id) ? {} : { host, kind, target, reason, expires_at }) }));
   return { ...data, sessions, operator_locks: list, ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),

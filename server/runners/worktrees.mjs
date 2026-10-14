@@ -46,6 +46,7 @@ import { isProtectedRepoPath, isRemotePrincipal, protectedPaths, remotePolicyFro
   sessionBindingDecision } from '../../bridge/write-gate.mjs';
 import { ACTIVE_JOB_STATUSES } from './executor.mjs';
 import { reconcileJob } from './jobs.mjs';
+import { callerChild, childState, renewParentLease, worktreeWriteAllowed } from '../coordinator/delegation.mjs';
 
 export const LIMITS = Object.freeze({
   readBytes: 256 * 1024,
@@ -601,6 +602,40 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
   }
   const warned = (ctx, result) => (ctx.sessionWarning && result?.ok ? { ...result, session_warning: ctx.sessionWarning } : result);
 
+  // Delegation (#47, spec D6 and D7): the caller as a child on this worktree, or {child: null}.
+  // The child is the workspace named by `workspace_id` when it is one, else the conversation's most
+  // recent workspace when it is one, so a child never acts as its parent by leaving it out. A child
+  // reaches only the worktree of its live delegation, and its own session binding is what counts.
+  async function childOn(row, args, ctx) {
+    if (args.workspace_id !== undefined && !WS_RE.test(args.workspace_id ?? '')) return { error: fail('invalid_input', 'workspace_id') };
+    const session = requestMeta(ctx.meta).client_session;
+    const info = await read(repo => {
+      const raw = args.workspace_id !== undefined ? repo.getWorkspace(args.workspace_id) : null;
+      const named = raw && ownsWorkspace(rt.principal, raw) ? raw : null;
+      if (args.workspace_id !== undefined && !named) return { error: fail('unknown_workspace') };
+      const child = callerChild(repo, rt.principal.id, { workspace: named, session });
+      return child ? { named, ...childState(repo, child, now()) } : { named };
+    });
+    if (info.error) return info;
+    if (!info.child) {
+      if (info.named && info.named.id !== row.workspace_id) return { error: fail('invalid_input', 'workspace_id: not the workspace of this worktree') };
+      return { child: null };
+    }
+    if (info.named && info.named.id !== info.child.id) {
+      return { error: fail('outside_delegation_scope', `this conversation works for delegation ${info.child.delegation_id}: use workspace ${info.child.id}`) };
+    }
+    if (info.reason) return { error: { ok: false, error: 'delegation_ended', end_reason: info.reason } };
+    if (info.delegation.parent_workspace_id !== row.workspace_id || info.delegation.worktree_id !== row.id) {
+      return { error: fail('outside_delegation_scope', 'not the worktree of your delegation') };
+    }
+    const decision = sessionBindingDecision(info.child.client_session, session, remotePolicy.session_binding,
+      { remote: isRemotePrincipal(rt.principal) });
+    if (!decision.ok) return { error: decision };
+    if (decision.warning) ctx.sessionWarning = decision.warning;
+    return { child: info.child, delegation: info.delegation };
+  }
+  const parentOnly = what => fail('outside_delegation_scope', `${what} stays with the parent conversation: report with delegation_report`);
+
   // Local mirror check: the workspace holds an unexpired claim on the worktree's Issue.
   async function liveClaim(row, workspace) {
     if (!row.issue_ref) return { error: fail('no_live_claim', 'worktree has no issue; create it with issue') };
@@ -706,6 +741,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const ws = await ownedWorkspace(args.workspace_id, ctx);
       if (ws.error) return ws.error;
       const { workspace } = ws;
+      const asChild = await read(repo => callerChild(repo, rt.principal.id, { workspace, session: requestMeta(ctx.meta).client_session }));
+      if (asChild) return parentOnly('worktree_create');
       const notAllowed = remoteProjectRefusal(rt.principal, workspace.project_id, remotePolicy);
       if (notAllowed) return notAllowed;
       const bound = sessionCheck(workspace, ctx);
@@ -804,6 +841,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
     async status(args, ctx) {
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
+      const acting = await childOn(wt.row, args, ctx);
+      if (acting.error) return acting.error;
       const { row } = wt;
       const located = await locate(row);
       if (located.error) return located.error;
@@ -865,6 +904,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       if (!Number.isInteger(max) || max < 1 || max > LIMITS.listMax) return fail('invalid_input', 'limit');
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
+      const acting = await childOn(wt.row, args, ctx);
+      if (acting.error) return acting.error;
       const located = await locate(wt.row);
       if (located.error) return located.error;
       const { root } = located;
@@ -898,6 +939,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       if (!Number.isInteger(limit) || limit < 1 || limit > LIMITS.readBytes) return fail('invalid_input', 'limit');
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
+      const acting = await childOn(wt.row, args, ctx);
+      if (acting.error) return acting.error;
       const located = await locate(wt.row);
       if (located.error) return located.error;
       const target = await resolveExisting(located.root, rel);
@@ -946,10 +989,20 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
-      const bound = sessionCheck(workspace, ctx);
-      if (bound.error) return bound.error;
+      const acting = await childOn(row, args, ctx);
+      if (acting.error) return acting.error;
+      const delegation = acting.delegation ?? null;
+      if (delegation) {
+        // A child writes only inside its scope, under the parent's claim, which it renews when it runs low.
+        if (!worktreeWriteAllowed(delegation, rel)) return fail('outside_delegation_scope', `${rel} is outside your scope`);
+        await renewParentLease({ store: rt.store(), ledger: rt.ledger, parent: workspace, claimId: delegation.claim_id, now });
+      } else {
+        const bound = sessionCheck(workspace, ctx);
+        if (bound.error) return bound.error;
+      }
       const held = await liveClaim(row, workspace);
       if (held.error) return held.error;
+      if (delegation && held.claim.claim_id !== delegation.claim_id) return { ok: false, error: 'delegation_ended', end_reason: 'task_released' };
       const located = await locate(row);
       if (located.error) return located.error;
       const { root } = located;
@@ -974,6 +1027,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       // carry a write into a protected directory.
       const landing = [relative(root, dir).split(sep).filter(Boolean).join('/'), ...parts.slice(existing), name].filter(Boolean).join('/');
       if (isProtectedRepoPath(landing)) return protectedRefusal(protectedPaths([landing]));
+      if (delegation && !worktreeWriteAllowed(delegation, landing)) return fail('outside_delegation_scope', `${landing} is outside your scope`);
       for (const part of parts.slice(existing)) {
         dir = join(dir, part);
         try { await mkdir(dir, { mode: 0o755 }); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
@@ -1014,6 +1068,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       if (args.staged !== undefined && typeof args.staged !== 'boolean') return fail('invalid_input', 'staged');
       const wt = await ownedWorktree(args.worktree_id, ctx);
       if (wt.error) return wt.error;
+      const acting = await childOn(wt.row, args, ctx);
+      if (acting.error) return acting.error;
       const located = await locate(wt.row);
       if (located.error) return located.error;
       const { root } = located;
@@ -1041,6 +1097,9 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
+      const acting = await childOn(row, args, ctx);
+      if (acting.error) return acting.error;
+      if (acting.child) return parentOnly('worktree_commit');
       const bound = sessionCheck(workspace, ctx);
       if (bound.error) return bound.error;
       const busy = await unitJobActive(row);
@@ -1085,6 +1144,9 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const wt = await ownedWorktree(args.worktree_id, ctx, { write: true });
       if (wt.error) return wt.error;
       const { row, workspace } = wt;
+      const acting = await childOn(row, args, ctx);
+      if (acting.error) return acting.error;
+      if (acting.child) return parentOnly('worktree_push');
       const bound = sessionCheck(workspace, ctx);
       if (bound.error) return bound.error;
       // Idempotency (Phase 4 FU-5, REQ-P5-15): a retry with the same client_request_id returns
@@ -1193,6 +1255,9 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
     const wt = await ownedWorktree(args.worktree_id, ctx, { allowRemoved: true });
     if (wt.error) return wt.error;
     const { row } = wt;
+    const acting = await childOn(row, args, ctx);
+    if (acting.error) return acting.error;
+    if (acting.child) return parentOnly('worktree_remove');
     const bound = sessionCheck(wt.workspace, ctx);
     if (bound.error) return bound.error;
     if (row.status === 'removed') return { ok: true, worktree: publicWorktree(row), already_removed: true };

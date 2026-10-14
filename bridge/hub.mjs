@@ -38,7 +38,7 @@ import { classifyCall, dangerReason, isPermanentApproval, needsApproval, readOnl
 import { createGrantStore, grantableCall, permanentCovers } from './operator-grants.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
-import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
+import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, delegationTargetRefusal, mergeOverview } from './operator-locks.mjs';
 import { HUB_OPERATOR_TOOLS } from '../server/tools/operator-repatriated.mjs';
 import { operatorHelp } from './operator-help.mjs';
 import { createTransfers } from './operator-transfer.mjs';
@@ -106,7 +106,9 @@ export function createHub(options) {
   // operator.verifyWorkspace (tests).
   const verifyWorkspace = operator?.verifyWorkspace ?? (async (principal, workspaceId, clientSession) => {
     const out = await sendAgent(runtimeHost ?? 'vps', 'workspace_status', { args: { workspace_id: workspaceId }, principal, clientSession });
-    return out?.ok === true && out.workspace ? { ok: true, workspace: { ...out.workspace } } : { ok: false, error: out?.error ?? 'workspace_unverified' };
+    return out?.ok === true && out.workspace
+      ? { ok: true, workspace: { ...out.workspace, ...(out.delegation ? { delegation: out.delegation } : {}) } }
+      : { ok: false, error: out?.error ?? 'workspace_unverified' };
   });
   const locks = createOperatorLocks({ ...(operator?.now ? { now: operator.now } : {}), verifyWorkspace,
     homes: operator?.homes ?? DEFAULT_HOMES });
@@ -326,6 +328,12 @@ export function createHub(options) {
     let auto = null;
     let implicit = null;
     if (tier > 0 && !readOnly) {
+      // Delegation (#47): a child's call stays inside its scope, and stops once its delegation ended.
+      const scoped = await delegationGate(host, op, args, principal, clientSession, args.workspace_id);
+      if (!scoped.ok) {
+        record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: scoped.error});
+        return scoped;
+      }
       let gate = locks.check(op, args, { principal, clientSession });
       // Repatriation D-R14: a remote call without workspace or lock gets the conversation's
       // workspace and implicit locks for this call only.
@@ -471,6 +479,42 @@ export function createHub(options) {
   // what the call touches, the global one for root calls, scripts and commands without cwd,
   // released when the call returns (journaled lock_implicit). Without a session hint nothing can be
   // bound: one explicit next step.
+  // Delegation (#47, spec D7): the runtime says whether a workspace is a delegated child (its
+  // workspace_status carries the delegation, scope included) and refuses a child conversation that
+  // names another workspace (outside_delegation_scope) or whose delegation ended (delegation_ended),
+  // and, under session_binding enforce, a workspace of another conversation (workspace_other_session).
+  // Asked for each (workspace, conversation) pair; a plain workspace is remembered for 30 s, a
+  // child is asked again on every call so its end is seen at once. Other answers (an implicit
+  // coordination id, a runtime that does not answer) leave the call to the lock rules as before.
+  const plainWorkspaces = new Map(); // `${workspace}|${session}` -> ms when the runtime said "no delegation"
+  const homes = operator?.homes ?? DEFAULT_HOMES;
+  async function delegationGate(host, op, args, principal, clientSession, workspaceId) {
+    if (typeof workspaceId !== 'string') return { ok: true };
+    const key = `${workspaceId}|${clientSession ?? ''}`;
+    const seenAt = plainWorkspaces.get(key);
+    if (seenAt !== undefined && clock() - seenAt < 30_000) return { ok: true };
+    let verified;
+    try { verified = await verifyWorkspace(principal, workspaceId, clientSession); } catch { verified = null; }
+    if (verified?.ok !== true) {
+      // Under enforce the runtime also refuses a workspace bound to another conversation: a child
+      // naming its parent's workspace meets that before the delegation rule.
+      return ['delegation_ended', 'outside_delegation_scope', 'workspace_other_session', 'session_required'].includes(verified?.error)
+        ? fail(verified.error) : { ok: true };
+    }
+    const delegation = verified.workspace?.delegation;
+    if (!delegation) {
+      plainWorkspaces.delete(key);
+      plainWorkspaces.set(key, clock());
+      while (plainWorkspaces.size > 1024) plainWorkspaces.delete(plainWorkspaces.keys().next().value);
+      return { ok: true };
+    }
+    if (delegation.state === 'ended') return fail('delegation_ended');
+    if (typeof delegation.parent_workspace_id === 'string') locks.setFamily(workspaceId, delegation.parent_workspace_id);
+    const targets = locks.targetsOf(op, { ...args, host });
+    if (targets.error) return fail(targets.error);
+    return delegationTargetRefusal(delegation, host, targets.unknownUpload ? [] : targets, homes) ?? { ok: true };
+  }
+
   const sessionWorkspaces = new Map(); // session hash -> {workspaceId, opened}
   async function implicitGate(host, op, args, principal, clientSession) {
     let workspaceId = args.workspace_id;
@@ -499,6 +543,10 @@ export function createHub(options) {
     const targets = locks.targetsOf(op, { ...args, host });
     if (targets.error) return { ok: false, error: targets.error };
     if (targets.unknownUpload) return { ok: false, error: 'lock_required', next_step: 'start the upload again with operator_upload_init' };
+    if (args.workspace_id === undefined) {
+      const scoped = await delegationGate(host, op, args, principal, clientSession, workspaceId);
+      if (!scoped.ok) return scoped;
+    }
     const ttlMs = ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 120) * 1000;
     const held = locks.acquireImplicit(host, targets, { principal, clientSession, workspaceId, ttlMs });
     if (!held.ok) return held;
