@@ -184,5 +184,5 @@ test('RR-14: the instructions and the skill teach the work-session grant, the re
   }
   for (const word of ['operator_grant', 'operator_docker', 'read-only commands']) assert.ok(skill.includes(word), `skill: ${word}`);
   for (const word of ['Standing approvals', '/grant', '/revoke', 'operator_docker', 'Read-only commands', 'workspace_auto_open']) assert.ok(doc.includes(word), `doc: ${word}`);
-  for (const text of [OPERATOR_FLOW_INSTRUCTIONS, skill, doc]) assert.equal(/[–—]/.test(text), false, 'no dashes');
+  for (const text of [OPERATOR_FLOW_INSTRUCTIONS, skill, doc]) assert.equal(/[\u2013\u2014]/.test(text), false, 'no dashes');
 });
