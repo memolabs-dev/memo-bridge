@@ -10,6 +10,7 @@ import { CLIENT_TYPES, HOSTS, SUMMARY_MAX, TASKS_LIMIT } from '../coordinator/in
 import { LEASE_TTL, OUTCOMES } from '../coordinator/issue-lease.mjs';
 import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
 import { BATCH_MAX, BATCH_PRIORITIES, TASK_TEXT } from '../coordinator/batches.mjs';
+import { HANDOFF_LIMITS } from '../coordinator/handoff.mjs';
 
 export const COORDINATOR_TOOLS = Object.freeze(['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close',
   'workspace_recover', 'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete',
@@ -126,10 +127,25 @@ export function registerCoordinatorTools(server, getService) {
     annotations: write
   }, call('taskComplete'));
 
+  // Structured handoff (#39): bounded lists, checked for secrets and injection, read back by
+  // workspace_recover, task_status and the task_next brief of whichever conversation picks the task up.
+  const item = z.string().max(HANDOFF_LIMITS.item);
+  const items = z.array(item).max(HANDOFF_LIMITS.items);
+  const handoff = z.object({
+    goal: z.string().max(HANDOFF_LIMITS.goal).optional().describe('What the task is for, one line.'),
+    constraints: items.optional().describe('Constraints and owner preferences that hold for this task.'),
+    done: items.optional(), in_progress: items.optional(), blocked: items.optional().describe('What blocks, and on whom.'),
+    decisions: items.optional().describe('Decisions taken, with the reason.'),
+    files: z.array(z.string().max(HANDOFF_LIMITS.file)).max(HANDOFF_LIMITS.files).optional().describe('Paths that matter.'),
+    next_steps: items.optional().describe('What the next conversation does first.')
+  }).describe(`Where the task stands, for the conversation that picks it up: one line per item, ${HANDOFF_LIMITS.total} characters in all, no secrets.`);
+
   server.registerTool('task_checkpoint', {
-    description: 'Record a durable checkpoint (branch + full commit SHA) under a claim you hold. The ledger re-verifies the claim first; the commit is checked read-only in the project repository and reported as remote (resumable on another machine), local_only, or unverified. Uncommitted files are never transferred.',
+    description: 'Record a durable checkpoint (branch + full commit SHA) and/or a structured handoff (goal, constraints, done, in_progress, blocked, decisions, files, next_steps) under a claim you hold. The ledger re-verifies the claim first; the commit is checked read-only in the project repository and reported as remote (resumable on another machine), local_only, or unverified. With a handoff, branch and commit are optional. Record a handoff before you stop, lose context or hand the task over. Uncommitted files are never transferred.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence,
-      branch: z.string().max(200), commit: z.string().max(64), note: z.string().max(500).optional() }),
+      branch: z.string().max(200).optional().describe('Required with commit; optional when you only record a handoff.'),
+      commit: z.string().max(64).optional(), note: z.string().max(500).optional().describe('Free text, with a commit only.'),
+      handoff: handoff.optional() }),
     annotations: write
   }, call('taskCheckpoint'));
 
