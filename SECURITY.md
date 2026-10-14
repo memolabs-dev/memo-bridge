@@ -1,7 +1,7 @@
 # Security policy
 
 Memo Bridge is a local proof of concept. It is not designed for exposure to the public internet.
-- No merges, no deployment, no admin operations. Since v0.4 the runner writes files, commits and pushes through its tools, only inside its own worktrees and under a live task claim, and runs the repository's own test/build/lint scripts as jobs inside a macOS sandbox (see below: a job is code a model can write, and the sandbox is what bounds it).
+- No merges and no deployment. The development tools run no admin operations; the operator tools of Phase 6 do, by design and under their own rules (section "Operator access" below, `docs/OPERATOR.md`). Since v0.4 the runner writes files, commits and pushes through its tools, only inside its own worktrees and under a live task claim, and runs the repository's own test/build/lint scripts as jobs inside a macOS sandbox (see below: a job is code a model can write, and the sandbox is what bounds it).
 - Project metadata is read only from the local canonical register; project IDs and resolved paths are validated.
 - The local stdio plugin assumes a trusted OS user. These tools must not be exposed publicly until strong user authentication, per-tool authorization and audit logs are implemented. Since v0.5 they can be reached on the VPS through the loopback-only private hub (owner and read-only bearers, write tools gated, see below).
 - No credentials in the repository, logs, test fixtures, or plugin archive.
@@ -37,7 +37,7 @@ Phase 3 adds a Mac runner (`docs/RUNNER.md`). It runs over the local stdio trans
 The local owner principal (`local:<OS user>`) holds all of them. Reads of worktrees, files, jobs, hosts, GitHub and the journal need `coordinator:read`.
 
 What the file and Git tools never do (these guarantees hold for the tools themselves; jobs are covered below):
-- **No shell.** Every process Memo Bridge starts is started with `execFile`/`spawn` and a fixed argument array. The model chooses a recipe name, never a command; the command comes from the repository's manifests (`server/runners/recipes.mjs`).
+- **No shell.** (Development tools. The operator tools differ: `operator_run` takes an argv and never a shell line, and only `operator_script` at T3 on lab runs a shell, see below.) Every process Memo Bridge starts is started with `execFile`/`spawn` and a fixed argument array. The model chooses a recipe name, never a command; the command comes from the repository's manifests (`server/runners/recipes.mjs`).
 - **No merge, no deployment, no service change.** Pull requests are opened, never merged and never set to auto-merge; the landing contract of `memolabs-dev/.github` lands them.
 - **No write to a default branch, no force-push.** `main`, `master`, the local `origin/HEAD` and the remote's own default branch (read with `git ls-remote --symref` before creating and before pushing) are refused, all compared without case: on APFS `refs/heads/Main` is the file `refs/heads/main`. A new branch may not match any local or remote branch without case either. A push uses an explicit refspec without `+`, and only creates the remote branch or moves it from a commit this worktree pushed itself (`push_rejected` otherwise).
 - **No file access outside the worktrees.** Paths are relative, normalized and checked after `realpath`; `..`, absolute paths, `.git` and symlink escapes are refused, and reads never block on a FIFO. Before any Git command, the worktree's `.git` link must still point at the project's repository (`worktree_link_changed`). Filesystem paths are never returned to models.
@@ -107,3 +107,37 @@ Residual risks:
 - A prompt injection in an Issue or a file can steer a conversation within the write invariants above (for example a bad commit on the workspace branch). Pull requests still land only through the merge contract and human review for workflow and infrastructure changes.
 - The Pocket ID token claims, ChatGPT's client certificate, `Origin` and timeout behaviour are documented or inferred, not yet observed (`docs/REMOTE_CHATGPT.md`, "Not verified yet").
 
+## Operator access (Phase 6)
+
+Details: `docs/OPERATOR.md`, spec `.agent/project/phase-6/spec.md`. The owner asked to read,
+write and run commands on the Mac and the VPS from ChatGPT, root included on the VPS. These
+tools are the exception to "no admin operations" above, and these rules bound them:
+
+- **Separate tiers and scopes.** `operator:read` (T0), `operator:write` (T1), `operator:exec`
+  (T2), `operator:root` (T3, lab only). Opt-in: absent from the default remote ceiling, write
+  tiers listed only with remote writes enabled.
+- **Signed requests, local policy.** The hub signs every operator call (Ed25519 over op, host,
+  tier, arguments hash, expiry, nonce, principal, approval). Each host agent, and the root
+  helper on lab, checks the signature and then its own policy file (root-owned on lab,
+  read-only on the Mac); the hub never sends policy.
+- **No shell below T3.** `operator_run` spawns an argv. On lab, root runs only in transient
+  `systemd-run` units started by a root helper with time, memory and task limits.
+- **Secrets.** A denylist on read, list, search and write paths (keys, `.env`, credential
+  stores, keychains, browser profiles, the agents' own configuration) and a token redactor on
+  every output; content comes back marked untrusted.
+- **Owner approval** in `dangerous` mode for scripts, destructive commands, shells and wrappers,
+  sensitive paths and the agents' control files, bound to the exact arguments, through Telegram,
+  fail closed without the bot.
+- **Kill switch** from the phone (`/freeze`), FROZEN files on the hub and each host, key
+  removal, auto-freeze on refusal bursts, rate limits per tier.
+- **Journals.** The hub journals every call with redacted arguments and hashes; each host keeps
+  a hash-chained journal (on lab written by the root helper, which `memo-operator` cannot
+  rewrite), whose head the hub anchors every 15 minutes.
+
+Residual risks, accepted by the owner:
+- A root compromise of lab holds the hub signing key, hence everything the Mac policy allows,
+  as the user `memo` (no root on the Mac).
+- T2 on the Mac is the owner's user: a command can do what `memo` can do; the read-only policy
+  stops the agent's own write tools, not a command.
+- An argv classifier does not see everything a program does; a prompt injection can still run
+  a call that is not on the dangerous list.
