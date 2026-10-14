@@ -14,6 +14,8 @@
 // nonce cache (operator-signing.mjs), then checks its own copy of the policy (max_tier root,
 // FROZEN, rate limit, approval required by approval_mode), exactly like the agent does.
 //
+// Repatriation D-R11: operator_docker (lab only) runs here too, over the Engine API socket
+// (bridge/operator-docker.mjs), at T2 (operator:exec).
 // What it runs: operator_run with as_root and operator_script (bash or python3, at most 64 KiB),
 // each in a transient systemd service started by systemd-run(1), argv only:
 //   systemd-run --quiet --collect --wait --pipe --unit=memo-op-<id> --description=...
@@ -46,15 +48,16 @@ import { chmod, chown, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { operatorCallTier } from '../server/coordinator/policy.mjs';
-import { needsApproval } from './operator-dangerous.mjs';
+import { isStandingApproval, needsApproval } from './operator-dangerous.mjs';
 import { checkCwd, checkRun } from './operator-exec.mjs';
 import { createDenylist, catalogProjects } from './operator-paths.mjs';
 import { finalizeResult, untrusted } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
+import { createDockerActions } from './operator-docker.mjs';
 import { LIMITS, runArgv, SAFE_ENV } from './operator-tools.mjs';
 
 export const ROOT_LIMITS = Object.freeze({ memoryMax: '2G', tasksMax: 512, requestBytes: 512 * 1024, marginS: 15 });
-const ROOT_OPS = new Set(['operator_run', 'operator_script', 'operator_job_status']);
+const ROOT_OPS = new Set(['operator_run', 'operator_script', 'operator_job_status', 'operator_docker']);
 const OP_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const OUTCOMES = new Set(['ok', 'denied', 'error']);
 const INTERPRETERS = Object.freeze({ bash: { program: '/bin/bash', ext: 'sh' }, python3: { program: '/usr/bin/python3', ext: 'py' } });
@@ -112,7 +115,8 @@ export function systemdRunArgv({ unit, description, argv, cwd = '/', env = {}, t
 // (createJobStore prefix 'rj'), executor (argv runner: runArgv on lab through systemd-run,
 // runArgvGroup on the Mac; tests inject a recorder).
 export function createRootHelper({ policy, verifier, guard, chain, jobs = null, executor, scriptDir,
-  projects = catalogProjects(policy.repositories), now = Date.now, random = randomBytes, log = () => {} }) {
+  projects = catalogProjects(policy.repositories), now = Date.now, random = randomBytes, log = () => {},
+  docker = policy?.host === 'vps' ? createDockerActions({ now }) : null }) {
   if (!policy || !verifier || !guard || !chain || !scriptDir) throw new Error('root helper needs policy, verifier, guard, chain, scriptDir');
   if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('root helper needs a policy with max_tier root and root_helper');
   const host = policy.host;
@@ -140,11 +144,14 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const signed = verifier.verify(operator, { id, op, args, principal });
     if (!signed.ok) return refuse(signed.error);
     if (signed.tier !== tier) return refuse('tier_mismatch');
-    if (op !== 'operator_job_status' && tier !== 3) return refuse('tier_mismatch');
+    // T3 only, but for root job status and Docker (T2, repatriation D-R11).
+    if (!['operator_job_status', 'operator_docker'].includes(op) && tier !== 3) return refuse('tier_mismatch');
     if (tier > policy.maxTier) return refuse('tier_not_allowed');
     const admitted = guard.admit(tier);
     if (admitted) return refuse(admitted);
     if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
+    // Standing approvals cover user runs only, never what reaches the root helper (spec D-R5).
+    if (isStandingApproval(signed.approval)) return refuse('approval_scope');
     const parsed = OPERATOR_SCHEMAS[op].safeParse(args);
     if (!parsed.success || parsed.data.host !== host) return refuse('invalid_arguments');
     const a = parsed.data;
@@ -158,6 +165,10 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
   }
 
   async function execute(op, a, { principal }) {
+    if (op === 'operator_docker') {
+      if (!systemd || !docker) return fail('docker_unavailable_on_host');
+      return docker(a);
+    }
     if (op === 'operator_job_status') {
       if (!jobs) return fail('unknown_job');
       const s = await jobs.status(a.job_id);
@@ -169,6 +180,7 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     let script = null;
     if (op === 'operator_script') {
       const interp = INTERPRETERS[a.interpreter];
+      if (!interp) return fail('interpreter_unavailable_as_root', { detail: 'root scripts: bash or python3' });
       await mkdir(scriptDir, { recursive: true, mode: 0o700 });
       script = join(scriptDir, `${random(12).toString('hex')}.${interp.ext}`);
       await writeFile(script, a.content, { mode: 0o700, flag: 'wx' });
