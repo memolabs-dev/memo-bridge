@@ -128,19 +128,17 @@ export const PLAYBOOKS = Object.freeze({
   restart_stack: {
     title: 'Restart a stack on lab',
     when: 'A lab app is down or stuck and autodeploy did not bring it back.',
-    requires: 'T3 (root through the helper) with the owner\'s approval (docker is on the dangerous list); a lock on the container or global.',
+    requires: 'T2 (operator:exec): operator_docker, through the root helper, without the docker group. Each restart holds a lock on its container (yours, else an implicit one for that call); restarting traefik, memo-* or pocket-id asks the owner.',
     steps: [
-      { call: 'operator_state', args: { host: 'vps' }, why: 'containers and their status' },
-      { call: 'operator_logs', args: { host: 'vps', container: '<app>', lines: 200 }, why: 'why it stopped, before touching it' },
+      { call: 'operator_docker', args: { host: 'vps', action: 'compose_ps', project: '<app>' }, why: 'the containers of the stack and their state' },
+      { call: 'operator_docker', args: { host: 'vps', action: 'logs', container: '<container>', lines: 200 }, why: 'why it stopped, before touching it' },
       { call: 'operator_snapshot', args: { host: 'vps', path: '/opt/stacks/<app>' }, why: 'the stack directory: compose.yml and its files' },
-      { call: 'operator_lock', args: { host: 'vps', workspace_id: '<ws>', kind: 'global', reason: 'restart <app>' }, why: 'root commands need the global lock' },
-      { call: 'operator_run', args: { host: 'vps', workspace_id: '<ws>', as_root: true, argv: ['docker', 'compose', '--project-directory', '/opt/stacks/<app>', 'restart'] },
-        why: 'restart every service of the stack; answers pending_approval first' },
-      { call: 'approval_status', args: { host: 'vps', approval_id: '<id>' }, why: 'wait for the owner, then repeat the exact same operator_run' },
-      { call: 'operator_state', args: { host: 'vps' }, why: 'check the containers are up again' },
-      { call: 'operator_unlock', args: { host: 'vps', workspace_id: '<ws>' }, why: 'release the lock' }
+      { call: 'operator_docker', args: { host: 'vps', action: 'restart', container: '<container>' },
+        why: 'restart one container of the stack; repeat for each one that is down' },
+      { call: 'operator_docker', args: { host: 'vps', action: 'compose_ps', project: '<app>' }, why: 'check the containers are up again' }
     ],
-    notes: ['A stack held after a failed deploy has /var/lib/autodeploy/<app>.hold: removing it is the owner\'s decision (lab-infra README).',
+    notes: ['Recreating the stack (docker compose up, pull) is not an operator_docker action: operator_run as_root with docker compose, T3, asks the owner every time.',
+      'A stack held after a failed deploy has /var/lib/autodeploy/<app>.hold: removing it is the owner\'s decision (lab-infra README).',
       'Never restart docker.service itself: it stops every stack.']
   },
   free_disk: {
