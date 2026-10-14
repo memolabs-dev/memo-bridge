@@ -1,0 +1,69 @@
+{
+  "phase": "VERIFYING",
+  "scope": "Phase 4 VPS runner (memo-bridge v0.5.0, branch feat/phase-4-vps-runner; lab-infra branch feat/memo-bridge-role)",
+  "summary": "Code complete and green locally in both repositories. Nothing deployed. Runtime acceptance on the VPS is blocked on owner actions (O-1 to O-7) and on two lab-infra follow-ups (FU-1, FU-2).",
+  "updated": "2026-10-14",
+  "requirements": { "total": 22, "covered": 22 },
+  "acceptance": {
+    "total": 22,
+    "verified": 3,
+    "verified_ids": ["AC-P4-02", "AC-P4-07", "AC-P4-11"],
+    "automated_part_verified_runtime_pending": ["AC-P4-04", "AC-P4-05", "AC-P4-08", "AC-P4-10", "AC-P4-17", "AC-P4-18", "AC-P4-20", "AC-P4-22"],
+    "partial": ["AC-P4-01", "AC-P4-03", "AC-P4-06", "AC-P4-09", "AC-P4-13", "AC-P4-15", "AC-P4-16", "AC-P4-21"],
+    "not_started": ["AC-P4-12", "AC-P4-14", "AC-P4-19"],
+    "failed": 0
+  },
+  "todos": {
+    "done": {
+      "memo-bridge": ["TODO-P4-02", "TODO-P4-03", "TODO-P4-04", "TODO-P4-05", "TODO-P4-06", "TODO-P4-07", "TODO-P4-08", "TODO-P4-09",
+        "TODO-P4-10", "TODO-P4-11", "TODO-P4-12", "TODO-P4-13", "TODO-P4-14", "TODO-P4-15", "TODO-P4-16", "TODO-P4-17"],
+      "lab-infra_committed_pending_owner_review": ["TODO-P4-20", "TODO-P4-21", "TODO-P4-22", "TODO-P4-23", "TODO-P4-24", "TODO-P4-27", "TODO-P4-28"]
+    },
+    "open": {
+      "TODO-P4-01": { "p": "P0", "blocked_on": "O-7a (spike window) or a Debian 13 VM; man pages already read and cited" },
+      "TODO-P4-25": { "p": "P0", "blocked_on": "O-5, lab-infra #161" },
+      "TODO-P4-30": { "p": "P0", "blocked_on": "O-4, O-6" },
+      "TODO-P4-31": { "p": "P0", "blocked_on": "TODO-P4-01, 30, O-1, O-2, FU-1, FU-2" },
+      "TODO-P4-32": { "p": "P0", "blocked_on": "31, 25" },
+      "TODO-P4-33": { "p": "P0", "blocked_on": "31, O-7b" },
+      "TODO-P4-34": { "p": "P0", "blocked_on": "31, O-7d" },
+      "TODO-P4-35": { "p": "P1", "blocked_on": "31" },
+      "TODO-P4-40": { "p": "P1", "blocked_on": "25, 32 (write gate AC-P4-14)" },
+      "TODO-P4-41": { "p": "P1", "blocked_on": "31, 24 h baseline" },
+      "TODO-P4-42": { "p": "P1", "status": "in progress: evidence.md and this file; Vault update via vault-commit.sh at closure" },
+      "TODO-P4-26": { "p": "P2", "blocked_on": "24 (infrastructure-guardian upstream)" },
+      "FU-1": { "p": "P0", "repo": "lab-infra", "task": "memo-bridge-hub.service: MEMO_BRIDGE_HUB_RUNTIME_HOST=vps (and readonly.token once O-9 approves it); without it the hub lists no runtime tool and flow E cannot start (AC-P4-01)" },
+      "FU-2": { "p": "P0", "repo": "lab-infra", "task": "clone the pilot repositories into /var/lib/memo-runner/repos (memo-runner) and write repos/PROJECTS.md, which workspace_open needs" },
+      "FU-3": { "p": "P2", "repo": "lab-infra", "task": "record and check sums_sha256 of npm run release:manifest next to memo_bridge_version" },
+      "FU-4": { "p": "P2", "repo": "memo-bridge", "task": "forward projects_list (read) through the hub so a VPS client can discover project names" },
+      "FU-5": { "p": "P2", "repo": "memo-bridge", "task": "client_request_id on the other mutating ops (task_claim, worktree_push...)" }
+    },
+    "p0_open": 9,
+    "p1_open": 4,
+    "p2_open": 4
+  },
+  "risks": {
+    "critical_open": 1,
+    "critical_ids": ["R-P4-01"],
+    "high_open": 4,
+    "high_ids": ["R-P4-02 (needs AC-P4-19)", "R-P4-03 (mitigated in code and tested; VPS run pending)", "R-P4-04 (O-3 rulesets)", "R-P4-06 (mitigated in code; VPS run pending)"],
+    "reduced": ["R-P4-05 to medium: GIT_SAFETY on every runner Git call, hooks never run (worktrees and credentials tests)", "R-P4-16 closed: 16 KiB frames with parts (agent-protocol tests)"]
+  },
+  "unknowns": {
+    "closed": ["U-P4-02 (phase-3 merged, shapes read)", "U-P4-06 (lab-infra adopted the live units byte-identically)", "U-P4-12 (folded into U-P4-03)"],
+    "blocking_open": ["U-P4-03", "U-P4-04", "U-P4-05", "U-P4-07", "U-P4-08", "U-P4-09", "U-P4-10"],
+    "non_blocking_open": ["U-P4-01", "U-P4-11"]
+  },
+  "verification": {
+    "status": "local_green_runtime_pending",
+    "npm_test": "225/225 (Node 24.21.0, macOS)",
+    "test_runner": "114/114 node + 110 python",
+    "test_deploy": "110/110 (python3 -I -B unittest)",
+    "smoke": "pass (48 tools, round trip, bridge_info 0.5.0 runner block)",
+    "build": "pass (index.mjs + job-runner.mjs)",
+    "lab_infra": "test_memo_runner.py 48 OK; scripts/tests.sh 111 green; commits d218173, 117ff83",
+    "integration_mutations": "7/7 caught",
+    "ci": "not run (branch not pushed); Node 22 and the Python helpers on Linux unverified"
+  },
+  "ready_for_manual_acceptance": false
+}

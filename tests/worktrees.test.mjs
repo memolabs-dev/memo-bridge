@@ -630,6 +630,10 @@ test('finding 7: worktree_remove is refused while a job is queued or running in 
   const refused = await f.call('worktree_remove', { worktree_id: id });
   assert.equal(refused.error, 'job_active', JSON.stringify(refused));
   assert.ok(existsSync(path));
+  // Phase 4 waiting states (VPS queue) block the removal too.
+  await f.rt.store().transaction(r => r.updateJob(jobId, { status: 'deferred', status_reason: 'deferred_disk' }, 'queued'));
+  assert.equal((await f.call('worktree_remove', { worktree_id: id })).error, 'job_active');
+  await f.rt.store().transaction(r => r.updateJob(jobId, { status: 'queued', status_reason: null }, 'deferred'));
   await f.rt.store().transaction(r => r.updateJob(jobId, { status: 'cancelled', ended_at: Date.now() }, 'queued'));
   assert.equal((await f.call('worktree_remove', { worktree_id: id })).ok, true);
   assert.ok((await f.events()).includes('worktree_remove:denied:job_active'));

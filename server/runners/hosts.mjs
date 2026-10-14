@@ -12,7 +12,8 @@ import { statfs } from 'node:fs/promises';
 import { arch, cpus, freemem, homedir, hostname, loadavg, platform, release, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { collectHost } from '../probe.mjs';
-import { maxJobsFromEnv } from './jobs.mjs';
+import { ACTIVE_JOB_STATUSES, JOB_STATUSES, executorKindFromEnv, runnerStatus } from './executor.mjs';
+import { createResourceReader, summarizeSnapshot } from './resources.mjs';
 
 export const HOST_IDS = Object.freeze(['mac', 'vps']);
 export const PROBE_CACHE_MS = 5 * 60 * 1000;
@@ -21,10 +22,38 @@ const PROBE_TIMEOUT_MS = 6000;
 const PROBE_MAX_BUFFER = 16 * 1024;
 const MAX_TEXT = 160;
 
-// The job concurrency limit is the one the job runner enforces (server/runners/jobs.mjs,
-// MEMO_BRIDGE_MAX_JOBS), so host_resources never reports a number nobody applies.
+// The job concurrency limit, single source (Phase 4, TODO-P4-02/16). jobs.mjs enforces this
+// number and host_resources reports it, so nobody reads a limit nobody applies. The Phase 4
+// discovery found two names in circulation, MEMO_BRIDGE_MAX_JOBS (enforced) and
+// MEMO_BRIDGE_JOB_CONCURRENCY (never read by any code); only the first exists:
+// - local executor (Mac): MEMO_BRIDGE_MAX_JOBS, 1 to 16, default 2;
+// - systemd executor (VPS): always 1 (D4). The supervisor and the root dispatcher enforce it.
+export const DEFAULT_MAX_JOBS = 2;
 export function jobConcurrencyLimit(env = process.env) {
-  return maxJobsFromEnv(env);
+  const kind = executorKindFromEnv(env);
+  if (kind.ok && kind.kind === 'systemd') return 1;
+  const n = Number.parseInt(env.MEMO_BRIDGE_MAX_JOBS ?? '', 10);
+  return Number.isInteger(n) && n >= 1 && n <= 16 ? n : DEFAULT_MAX_JOBS;
+}
+
+// The runner part of bridge_info, generated from what is in effect here rather than from
+// prose: the executor, the enforced limit, the job statuses, and the runner operations of the
+// op registry when the caller passes one (bridge/ops.mjs, TODO-P4-03): any registry entry
+// whose name starts with job or worktree, or that is host_resources.
+export function runnerInfo({ env = process.env, ops = null, sandbox = null } = {}) {
+  const kind = executorKindFromEnv(env);
+  const executor = kind.ok ? kind.kind : null;
+  const names = ops ? (Array.isArray(ops) ? ops : Object.keys(ops)) : null;
+  return {
+    executor,
+    ...(kind.ok ? {} : { executor_error: kind.error }),
+    queueing: executor === 'systemd',
+    job_concurrency_limit: jobConcurrencyLimit(env),
+    job_statuses: [...JOB_STATUSES],
+    active_job_statuses: [...ACTIVE_JOB_STATUSES],
+    ...(sandbox ? { job_sandbox: sandbox } : {}),
+    ...(names ? { ops: names.filter(n => /^(jobs?_|worktrees?_)/.test(n) || n === 'host_resources').sort() } : {})
+  };
 }
 
 // Declared roles. They describe intent and policy, not what the probes found.
@@ -145,8 +174,12 @@ function versionOf(output) {
  * - now() -> epoch ms; os -> { platform, arch, release, hostname, loadavg, cpus, freemem, totalmem }
  */
 export function createHostService({ run = execProbe, collect = collectHost, now = Date.now, cacheMs = PROBE_CACHE_MS,
-  os = { platform, arch, release, hostname, loadavg, cpus, freemem, totalmem }, env = process.env } = {}) {
+  os = { platform, arch, release, hostname, loadavg, cpus, freemem, totalmem }, env = process.env,
+  resourceReader = null, runner = runnerStatus } = {}) {
   let cache = null; // { at, value: Promise<observed> }
+  // PSI and MemAvailable exist on Linux only; the reader is created on first use there.
+  let reader = resourceReader;
+  const linuxReader = () => (os.platform() === 'linux' ? (reader ??= createResourceReader()) : resourceReader);
 
   async function probeTool(spec, isDarwin) {
     if (spec.darwinOnly && !isDarwin) return { present: false, version: null, reason: 'not_macos' };
@@ -232,7 +265,7 @@ export function createHostService({ run = execProbe, collect = collectHost, now 
       };
     },
 
-    // jobs: { running, queued } from the local store (only jobs this machine launched).
+    // jobs: { running, queued, deferred?, dispatched? } from the local store (only jobs this machine launched).
     async resources(host, { localHost, stateDir, projectsRoot, jobs }) {
       if (!HOST_IDS.includes(host)) return { ok: false, error: 'invalid_input', detail: 'host' };
       // Only the local runner's limit is known; a remote runner enforces its own.
@@ -259,15 +292,33 @@ export function createHostService({ run = execProbe, collect = collectHost, now 
       }
       const [stateDisk, projectsDisk] = await Promise.all([diskOf(stateDir), diskOf(projectsRoot)]);
       const cpuList = os.cpus();
+      // Phase 4 additions appear only where they exist, so a Mac answer reads as in Phase 3:
+      // pressure and MemAvailable on Linux, the supervisor's view (queue depth, active job,
+      // last admission, ledger reachability) when a runner supervisor runs in this process.
+      const r = linuxReader();
+      let pressure = null; let meminfo = null;
+      if (r) {
+        try { pressure = summarizeSnapshot({ pressure: r.pressure(), memory: null, disk: null }).psi_avg10; } catch { pressure = null; }
+        try { meminfo = r.meminfo(); } catch { meminfo = null; }
+      }
+      let supervisor = null;
+      try { supervisor = typeof runner === 'function' ? runner() : null; } catch { supervisor = null; }
       return {
         ok: true, host, local: true, source: 'observed', at: new Date(now()).toISOString(),
         load_average: os.loadavg().map(v => Math.round(v * 100) / 100),
         cpu_count: Array.isArray(cpuList) ? cpuList.length : null,
         memory: { free_bytes: os.freemem(), total_bytes: os.totalmem(),
+          ...(meminfo ? { available_bytes: meminfo.available_bytes, swap_total_bytes: meminfo.swap_total_bytes,
+            swap_free_bytes: meminfo.swap_free_bytes } : {}),
           ...(os.platform() === 'darwin' ? { note: 'free excludes reclaimable cache on macOS' } : {}) },
+        ...(pressure ? { pressure: { source: '/proc/pressure', avg10_percent: pressure } } : {}),
         disk: { state_dir: stateDisk, projects: projectsDisk },
-        jobs: jobs ? { running: jobs.running, queued: jobs.queued, source: 'local store' } : null,
+        jobs: jobs ? { running: jobs.running, queued: jobs.queued,
+          // Only a queueing host has them; a Mac answer keeps its Phase 3 shape.
+          ...(jobs.deferred || jobs.dispatched ? { deferred: jobs.deferred ?? 0, dispatched: jobs.dispatched ?? 0 } : {}),
+          source: 'local store' } : null,
         job_concurrency_limit: limit,
+        ...(supervisor ? { runner: supervisor } : {}),
         notes
       };
     },

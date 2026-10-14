@@ -1,0 +1,10 @@
+{
+  "name": "memo-runner-isolation-probe",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TEST-ONLY fixture: isolation probe for memo-job units (memo-bridge Phase 4, AC-P4-12). Never a pilot repository.",
+  "type": "module",
+  "scripts": {
+    "test": "node probe.mjs"
+  }
+}

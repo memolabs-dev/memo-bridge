@@ -26,8 +26,13 @@
 // dist/job-runner.mjs (a second esbuild entry for server/runners/job-runner.mjs). Callers
 // can also inject `runnerPath`.
 //
-// Queueing is a later phase: when the host already runs its maximum number of jobs,
-// jobs_submit refuses with host_busy instead of waiting.
+// Executors (Phase 4, executor.mjs): the steps above are the local executor
+// (executor-local.mjs), the Mac behaviour of Phase 3, unchanged: at its maximum number of
+// jobs, jobs_submit refuses with host_busy. On the VPS the systemd executor
+// (executor-systemd.mjs, MEMO_BRIDGE_JOB_EXECUTOR=systemd) queues instead: jobs_submit records
+// the job 'queued' and returns; the supervisor (supervisor.mjs) admits it, hands it to the
+// root dispatcher through the spool, follows the unit, and records the status root wrote
+// from systemd's own result. The job's code never writes the store there.
 //
 // Version skew: `npm run install:local` replaces job-runner.mjs under servers that are still
 // running. The runner protocol is passed first on the runner's command line; a runner refuses
@@ -35,15 +40,25 @@
 // it as its state directory and refuses too (not absolute). Bump it on any change to the job
 // rows, the job events or the runner's arguments.
 import { randomBytes } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, unlinkSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync, statSync, unlinkSync } from 'node:fs';
+import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { CLIENT_REQUEST_ID_RE, requestKey } from '../coordinator/store.mjs';
+import { ACTIVE_JOB_STATUSES, JOB_STATUSES as ALL_JOB_STATUSES, STARTED_JOB_STATUSES, executorKindFromEnv, nudgeSupervisor,
+  unavailableExecutor } from './executor.mjs';
+import { KILL_GRACE_MS, createLocalExecutor, jobsDir, leaderStartOf, logPathFor, reconcileLocalJob } from './executor-local.mjs';
+import { RESULTS_MAX_BYTES, createSystemdExecutor, runnerRootFromEnv } from './executor-systemd.mjs';
+import { jobConcurrencyLimit } from './hosts.mjs';
 import { signalJobGroup } from './processes.mjs';
 import { RECIPE_NAMES, detectRecipes } from './recipes.mjs';
-import { sandboxMode } from './sandbox.mjs';
+import { loadRunnerConfig } from './resources.mjs';
+
+// Moved to executor-local.mjs (the local executor); re-exported for job-runner.mjs, the
+// Coordinator, worktrees.mjs and the Phase 3 tests.
+export { DEADLINE_GRACE_MS, KILL_GRACE_MS, groupAlive, jobsDir, leaderStartOf, logPathFor, processAlive, signalGroup }
+  from './executor-local.mjs';
 
 export const RUNNER_PROTOCOL = 2;
 
@@ -52,25 +67,23 @@ const WS_RE = /^ws_[A-Za-z0-9_-]{16}$/;
 // Worktree ids are minted by the worktree module; only their shape is bounded here.
 const WORKTREE_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-export const JOB_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted']);
-const ACTIVE = new Set(['queued', 'running']);
+// Phase 4 adds deferred, dispatched, oom and budget_exceeded (store SCHEMA_V3). The local
+// executor never produces them, so a Mac job moves through the Phase 3 statuses only.
+export const JOB_STATUSES = ALL_JOB_STATUSES;
+const ACTIVE = new Set(ACTIVE_JOB_STATUSES);
 export const TIMEOUT_SECONDS = Object.freeze({ default: 15 * 60, min: 1, max: 60 * 60 });
-export const KILL_GRACE_MS = 5000;
-// A running job past timeout + this grace is killed by the next read, in case its runner died
-// (or was killed) and can no longer enforce the timeout itself.
-export const DEADLINE_GRACE_MS = KILL_GRACE_MS + 30_000;
 export const LOG_CAP_BYTES = 5 * 1024 * 1024;
 export const RESULTS = Object.freeze({ defaultLines: 100, maxLines: 400, maxBytes: 64 * 1024 });
 const MAX_LIST = 200;
 const MAX_EVENTS = 200;
-// A queued job whose runner pid was never recorded is only declared interrupted after this.
-const QUEUED_GRACE_MS = 60_000;
+// Queueing executors (VPS): jobs waiting or running per host beyond which jobs_submit refuses.
+export const MAX_QUEUE = 20;
 
 export const DEFAULT_RUNNER_PATH = fileURLToPath(new URL('./job-runner.mjs', import.meta.url));
 
 // Results the model sees as refusals rather than faults; both are journaled.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_removed', 'wrong_host', 'no_live_claim', 'host_busy',
-  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied']);
+  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'queue_full']);
 
 const newJobId = () => `job_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -118,33 +131,23 @@ export function readTail(path, maxBytes) {
   }
 }
 
-// ---------------------------------------------------------------------------------------
-// Process liveness. A job is identified by its process group (the runner spawns the recipe
-// as a group leader); the runner itself is a separate, detached process.
-
-export function processAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
-}
-export function groupAlive(pgid) {
-  if (!Number.isInteger(pgid) || pgid <= 1) return false;
-  try { process.kill(-pgid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
-}
-export function signalGroup(pgid, signal) {
-  if (!Number.isInteger(pgid) || pgid <= 1) return false;
-  try { process.kill(-pgid, signal); return true; } catch { return false; }
-}
-
+// The concurrency limit has one source, hosts.mjs (MEMO_BRIDGE_MAX_JOBS for the local
+// executor, 1 for the systemd executor); host_resources reports the same number.
 export function maxJobsFromEnv(env = process.env) {
-  const n = Number.parseInt(env.MEMO_BRIDGE_MAX_JOBS ?? '', 10);
-  return Number.isInteger(n) && n >= 1 && n <= 16 ? n : 2;
+  return jobConcurrencyLimit(env);
 }
 
-export function jobsDir(stateDir) {
-  return join(stateDir, 'jobs');
-}
-export function logPathFor(stateDir, jobId) {
-  return join(jobsDir(stateDir), `${jobId}.log`);
+// The executor this host uses, from MEMO_BRIDGE_JOB_EXECUTOR. The systemd executor reads the
+// runner tree from MEMO_BRIDGE_RUNNER_ROOT and the recorded limits from runner.json.
+export function defaultExecutor(env = process.env, { runnerPath = DEFAULT_RUNNER_PATH, nodePath = process.execPath, spawnRunner } = {}) {
+  const kind = executorKindFromEnv(env);
+  if (!kind.ok) return unavailableExecutor(kind.error, kind.detail);
+  if (kind.kind === 'local') return createLocalExecutor({ runnerPath, nodePath, env, spawnRunner });
+  const root = runnerRootFromEnv(env);
+  if (!root.ok) return unavailableExecutor(root.error, root.detail);
+  const config = loadRunnerConfig(env.MEMO_BRIDGE_RUNNER_CONFIG);
+  return createSystemdExecutor({ root: root.root, maxQueue: config.max_queue,
+    limits: { slice: 'memo-dev.slice', disk_budget_gib: config.disk_budget_gib } });
 }
 
 function parseDetail(detail) {
@@ -152,39 +155,25 @@ function parseDetail(detail) {
   try { return JSON.parse(detail); } catch { return cleanLine(detail).slice(0, 500); }
 }
 
-function publicJob(j) {
+// Phase 4 fields appear only when set, so a Mac job reads exactly as in Phase 3.
+export function publicJob(j) {
   let argv = [];
   try { argv = JSON.parse(j.argv_json); } catch { /* recorded by this module, always JSON */ }
+  let limits = null;
+  try { limits = j.limits_json ? JSON.parse(j.limits_json) : null; } catch { limits = null; }
   return {
     job_id: j.id, workspace_id: j.workspace_id, worktree_id: j.worktree_id, project: j.project_id, host: j.host,
     recipe: j.recipe, argv, status: j.status, exit_code: j.exit_code,
     timeout_seconds: Math.round(j.timeout_ms / 1000), created_at: iso(j.created_at), started_at: iso(j.started_at),
-    ended_at: iso(j.ended_at), summary: j.summary === null ? null : lastLines(j.summary, 40).join('\n')
+    ended_at: iso(j.ended_at), summary: j.summary === null || j.summary === undefined ? null : lastLines(j.summary, 40).join('\n'),
+    ...(j.status_reason ? { status_reason: cleanLine(j.status_reason).slice(0, 80) } : {}),
+    ...(j.unit ? { unit: j.unit } : {}),
+    ...(limits ? { limits } : {}),
+    ...(j.release_on_finish ? { release_on_finish: true } : {})
   };
 }
 function publicEvent(e) {
   return { seq: e.seq, at: iso(e.at), kind: e.kind, detail: parseDetail(e.detail) };
-}
-
-// The runner pid recorded by jobs_submit ('submitted') or by the runner ('started').
-function runnerPidOf(repo, jobId) {
-  let pid = null;
-  for (const e of repo.listJobEvents(jobId, 0, 20)) {
-    if (e.kind !== 'submitted' && e.kind !== 'started') continue;
-    const d = parseDetail(e.detail);
-    if (Number.isInteger(d?.runner_pid)) pid = d.runner_pid;
-  }
-  return pid;
-}
-
-// Start time of the job's group leader, recorded by the runner in its 'started' event.
-export function leaderStartOf(repo, jobId) {
-  for (const e of repo.listJobEvents(jobId, 0, 20)) {
-    if (e.kind !== 'started') continue;
-    const d = parseDetail(e.detail);
-    if (typeof d?.pid_start === 'string') return d.pid_start;
-  }
-  return null;
 }
 
 // Signal a job's process group, only if it is still that job's group.
@@ -192,31 +181,15 @@ function signalJob(repo, job, signal, signalFn = signalJobGroup) {
   return Number.isInteger(job.pid) ? signalFn(job.pid, leaderStartOf(repo, job.id), signal) : false;
 }
 
-// Report a job whose processes are all gone as interrupted, and stop a running job past its
-// deadline (timeout + grace) as timed_out. Runs inside a write transaction; the CAS on status
-// means a runner that finishes at the same moment wins.
-export function reconcileJob(repo, job, at, { alive = processAlive, aliveGroup = groupAlive, signal = signalJobGroup } = {}) {
-  if (!ACTIVE.has(job.status)) return job;
-  const runnerPid = runnerPidOf(repo, job.id);
-  if (job.status === 'running' && Number.isInteger(job.started_at) && at > job.started_at + job.timeout_ms + DEADLINE_GRACE_MS) {
-    // The runner should have stopped it long ago: it is gone or stuck. Kill the group; a live
-    // runner sees the status change and also kills every process it tracks.
-    signalJob(repo, job, 'SIGKILL', signal);
-    const patch = { status: 'timed_out', ended_at: at, summary: job.summary ?? 'deadline_exceeded' };
-    if (!repo.updateJob(job.id, patch, 'running')) return repo.getJob(job.id);
-    repo.appendJobEvent({ job_id: job.id, at, kind: 'timeout', detail: JSON.stringify({ by: 'deadline', timeout_seconds: Math.round(job.timeout_ms / 1000) }) });
-    return { ...job, ...patch };
-  }
-  if (job.status === 'running') {
-    if (aliveGroup(job.pid) || (runnerPid !== null && alive(runnerPid))) return job;
-  } else {
-    // queued: the runner has not taken it yet.
-    if (runnerPid === null ? at - job.created_at < QUEUED_GRACE_MS : alive(runnerPid)) return job;
-  }
-  const patch = { status: 'interrupted', ended_at: at, summary: job.summary ?? 'runner_gone' };
-  if (!repo.updateJob(job.id, patch, job.status)) return repo.getJob(job.id);
-  repo.appendJobEvent({ job_id: job.id, at, kind: 'interrupted', detail: JSON.stringify({ from: job.status }) });
-  return { ...job, ...patch };
+// Bring a job row up to date with its executor, inside a write transaction. A local job
+// (no unit) is checked against its processes (executor-local.mjs, Phase 3). A systemd job
+// (unit set from submission on) is never judged by process liveness: this process cannot see
+// memo-job's processes. It only takes the final status root recorded, when an executor is
+// given; otherwise the supervisor brings it up to date.
+export function reconcileJob(repo, job, at, options = {}) {
+  if (!ACTIVE.has(job.status) && !job.unit) return job;
+  if (job.unit) return options.executor?.kind === 'systemd' ? options.executor.reconcile(repo, job, at) : job;
+  return reconcileLocalJob(repo, job, at, options);
 }
 
 // A live claim in the local mirror: claimed, on this Issue, not expired.
@@ -230,6 +203,8 @@ export function liveClaim(repo, workspaceId, issueRef, at) {
 // the workspace closes or the claim is released. Runs inside a write transaction; returns what
 // stopCancelledJobs needs to signal them once the transaction is committed. The runner also
 // notices the status change within a second and stops every process of the job.
+// A systemd job (unit set) has no pid here: the supervisor sees it cancelled and asks the
+// dispatcher to stop its unit (supervisor.mjs, stop sweep).
 export function cancelActiveJobs(repo, { workspaceId, issueRef = null }, at, by) {
   const stopped = [];
   for (const status of ACTIVE) {
@@ -237,16 +212,17 @@ export function cancelActiveJobs(repo, { workspaceId, issueRef = null }, at, by)
       if (issueRef && repo.getWorktree(job.worktree_id)?.issue_ref !== issueRef) continue;
       if (!repo.updateJob(job.id, { status: 'cancelled', ended_at: at }, status)) continue;
       repo.appendJobEvent({ job_id: job.id, at, kind: 'cancelled', detail: JSON.stringify({ from: status, by, reason: issueRef ? 'claim_released' : 'workspace_closed' }) });
-      stopped.push({ job_id: job.id, pid: job.pid ?? null, pid_start: leaderStartOf(repo, job.id) });
+      stopped.push({ job_id: job.id, pid: job.pid ?? null, pid_start: leaderStartOf(repo, job.id), unit: job.unit ?? null });
     }
   }
+  if (stopped.some(j => j.unit)) nudgeSupervisor();
   return stopped;
 }
 
 // SIGTERM now and SIGKILL after the grace, each only while the group is still the job's.
 export function stopCancelledJobs(stopped, { killGraceMs = KILL_GRACE_MS, signal = signalJobGroup } = {}) {
   for (const job of stopped) {
-    if (!Number.isInteger(job.pid)) continue;
+    if (!Number.isInteger(job.pid) || job.unit) continue;
     signal(job.pid, job.pid_start, 'SIGTERM');
     setTimeout(() => signal(job.pid, job.pid_start, 'SIGKILL'), killGraceMs).unref();
   }
@@ -255,21 +231,13 @@ export function stopCancelledJobs(stopped, { killGraceMs = KILL_GRACE_MS, signal
 // ---------------------------------------------------------------------------------------
 
 export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePath = process.execPath,
-  maxJobs = maxJobsFromEnv(), killGraceMs = KILL_GRACE_MS, spawnRunner, env = process.env } = {}) {
+  maxJobs, killGraceMs = KILL_GRACE_MS, spawnRunner, env = process.env, executor, maxQueue } = {}) {
   const read = fn => rt.store().transaction(repo => fn(repo, rt.now()), { write: false });
   const write = fn => rt.store().transaction(repo => fn(repo, rt.now()));
-
-  const launch = spawnRunner ?? ((stateDir, jobId) => new Promise(resolve => {
-    let child;
-    try {
-      child = spawn(nodePath, [runnerPath, `--protocol=${RUNNER_PROTOCOL}`, stateDir, jobId],
-        { detached: true, stdio: 'ignore', cwd: stateDir, env });
-    } catch (error) {
-      return resolve({ ok: false, error: String(error?.code ?? 'spawn_failed') });
-    }
-    child.once('error', error => resolve({ ok: false, error: String(error?.code ?? 'spawn_failed') }));
-    child.once('spawn', () => { child.unref(); resolve({ ok: true, pid: child.pid }); });
-  }));
+  const exec = executor ?? defaultExecutor(env, { runnerPath, nodePath, spawnRunner });
+  const queueCap = maxQueue ?? exec.maxQueue ?? MAX_QUEUE;
+  const limit = maxJobs ?? (exec.queueing ? 1 : maxJobsFromEnv(env));
+  const reconcile = (repo, job, at) => reconcileJob(repo, job, at, { executor: exec });
 
   async function denied(op, ids = {}) {
     await rt.audit(op, 'denied', 'forbidden', ids);
@@ -283,13 +251,13 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
   }
 
   // Load a job and check that the caller's principal owns its workspace.
-  async function ownedJob(op, jobId, { reconcile = true } = {}) {
+  async function ownedJob(op, jobId, { reconcile: refresh = true } = {}) {
     if (!JOB_ID_RE.test(jobId ?? '')) return { error: fail('invalid_input', 'job_id') };
-    const found = await (reconcile ? write : read)((repo, at) => {
+    const found = await (refresh ? write : read)((repo, at) => {
       const job = repo.getJob(jobId);
       if (!job) return null;
       const workspace = repo.getWorkspace(job.workspace_id);
-      return { job: reconcile ? reconcileJob(repo, job, at) : job, workspace };
+      return { job: refresh ? reconcile(repo, job, at) : job, workspace };
     });
     if (!found) return { error: fail('unknown_job') };
     if (!ownsWorkspace(rt.principal, found.workspace)) {
@@ -298,7 +266,21 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
     return found;
   }
 
+  // The context record of a VPS job: where its code came from and what bounded it. The lease
+  // is the mirror's current view: the supervisor renews it while the job waits or runs, which
+  // moves the fence, so a client resumes with this fence rather than the one it claimed with.
+  async function contextOf(job) {
+    if (!job.unit) return null;
+    const { worktree, claim } = await read(repo => ({ worktree: repo.getWorktree(job.worktree_id),
+      claim: job.claim_id ? repo.getClaim(job.claim_id) : null }));
+    return { project: job.project_id, issue: worktree?.issue_ref ?? null, branch: worktree?.branch ?? null,
+      base_commit: worktree?.base_commit ?? null, host: job.host, unit: job.unit, claim_id: job.claim_id ?? null,
+      ...(claim ? { lease: { state: claim.state, fence: claim.fence_sha, expires_at: claim.expires_at } } : {}) };
+  }
+
   const service = {
+    executor: exec,
+
     async submit(args = {}) {
       const op = 'jobs_submit';
       if (!rt.authorize(op)) return denied(op);
@@ -310,6 +292,31 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       const timeoutSeconds = args.timeout_seconds ?? TIMEOUT_SECONDS.default;
       if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < TIMEOUT_SECONDS.min || timeoutSeconds > TIMEOUT_SECONDS.max) {
         return journal(op, fail('invalid_input', 'timeout_seconds'), ids);
+      }
+      if (args.client_request_id !== undefined && !CLIENT_REQUEST_ID_RE.test(String(args.client_request_id))) {
+        return journal(op, fail('invalid_input', 'client_request_id'), ids);
+      }
+      if (args.release_on_finish !== undefined && typeof args.release_on_finish !== 'boolean') {
+        return journal(op, fail('invalid_input', 'release_on_finish'), ids);
+      }
+      // Only the VPS supervisor releases claims; on the Mac the flag would be silently ignored.
+      if (args.release_on_finish === true && !exec.queueing) {
+        return journal(op, fail('invalid_input', 'release_on_finish needs the VPS runner'), ids);
+      }
+      // Idempotency (REQ-P4-07): a retry with the same client_request_id returns the job the
+      // first call created, whatever happened to it since, and starts nothing.
+      const key = args.client_request_id === undefined ? null : requestKey(rt.principal.id, op, args.client_request_id);
+      const replay = async jobId => {
+        const job = await write((repo, at) => { const j = repo.getJob(jobId); return j ? reconcile(repo, j, at) : null; });
+        return job ? journal(op, { ok: true, job: publicJob(job), replayed: true }, ids) : journal(op, fail('store_unavailable'), ids);
+      };
+      if (key) {
+        const first = await read(repo => repo.getRequest(key));
+        if (first) {
+          let stored = null;
+          try { stored = JSON.parse(first.result_json); } catch { stored = null; }
+          return stored?.job_id ? replay(stored.job_id) : journal(op, fail('store_unavailable'), ids);
+        }
       }
 
       const context = await read((repo, at) => {
@@ -328,8 +335,9 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       if (worktree.status !== 'active') return journal(op, fail('worktree_removed'), issueIds);
       if (worktree.host !== rt.host) return journal(op, fail('wrong_host', worktree.host), issueIds);
       if (!context.claim) return journal(op, fail('no_live_claim', worktree.issue_ref ? 'claim expired or released' : 'worktree has no issue'), issueIds);
-      // Jobs run only inside the job sandbox, unless the owner switched it off.
-      const sandbox = sandboxMode(env);
+      // Jobs run only inside the job sandbox (macOS) or a memo-job unit (VPS), unless the owner
+      // switched the Mac sandbox off.
+      const sandbox = exec.sandbox();
       if (!sandbox.ok) return journal(op, fail(sandbox.error, sandbox.detail), issueIds);
       // Running code is a write boundary like a commit: the ledger confirms the lease is still
       // this workspace's (the local mirror only knows about expiry).
@@ -355,49 +363,70 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
         return journal(op, fail('unknown_recipe', available.length ? `available: ${available.join(', ')}` : 'no recipe detected'), issueIds);
       }
 
-      // The log file exists before the job row, so the runner never has to create it.
+      // Local: the log file exists before the job row, so the runner never has to create it.
+      // systemd: only the names (log under the runner tree, unit) are chosen here.
       const jobId = newJobId();
-      const logPath = logPathFor(rt.stateDir, jobId);
-      try {
-        rt.store(); // opens (and creates) the private state directory first
-        mkdirSync(jobsDir(rt.stateDir), { recursive: true, mode: 0o700 });
-        chmodSync(jobsDir(rt.stateDir), 0o700);
-        closeSync(openSync(logPath, 'wx', 0o600));
-        chmodSync(logPath, 0o600);
-      } catch {
-        return journal(op, fail('store_unavailable', 'job_log'), issueIds);
-      }
+      try { rt.store(); } catch { return journal(op, fail('store_unavailable', 'job_log'), issueIds); } // opens (and creates) the private state directory first
+      const prepared = exec.prepare({ stateDir: rt.stateDir, jobId });
+      if (!prepared.ok) return journal(op, fail(prepared.error, prepared.detail), issueIds);
+      const logPath = prepared.logPath;
+      const dropLog = () => { if (!exec.queueing) { try { unlinkSync(logPath); } catch { /* best effort */ } } };
+      const limits = prepared.limits ? { ...prepared.limits, timeout_seconds: timeoutSeconds } : null;
 
       // Count and insert in one write transaction so two sessions cannot both take the last slot.
       let inserted;
       try {
         inserted = await write((repo, at) => {
-          const active = repo.listJobs({ host: rt.host, status: 'running', limit: 1000 })
-            .concat(repo.listJobs({ host: rt.host, status: 'queued', limit: 1000 }))
-            .map(job => reconcileJob(repo, job, at))
-            .filter(job => ACTIVE.has(job.status));
-          if (active.length >= maxJobs) return { busy: active.length };
+          if (key) {
+            const first = repo.getRequest(key);
+            if (first) return { replayOf: JSON.parse(first.result_json).job_id };
+          }
+          if (exec.queueing) {
+            // The VPS queues (REQ-P4-04): only a bound on the queue itself refuses.
+            const depth = repo.countJobs({ host: rt.host, statuses: [...ACTIVE] });
+            if (depth >= queueCap) return { full: depth };
+          } else {
+            const active = [...ACTIVE].flatMap(status => repo.listJobs({ host: rt.host, status, limit: 1000 }))
+              .map(job => reconcile(repo, job, at))
+              .filter(job => ACTIVE.has(job.status));
+            if (active.length >= limit) return { busy: active.length };
+          }
           // Re-check the claim under the write lock: it may have been released meanwhile.
-          if (!liveClaim(repo, workspace.id, worktree.issue_ref, at)) return { noClaim: true };
+          const claim = liveClaim(repo, workspace.id, worktree.issue_ref, at);
+          if (!claim) return { noClaim: true };
           const row = { id: jobId, workspace_id: workspace.id, worktree_id: worktree.id, project_id: worktree.project_id,
             host: rt.host, recipe, argv_json: JSON.stringify(argv), timeout_ms: timeoutSeconds * 1000, log_path: logPath,
-            created_at: at };
+            created_at: at, claim_id: claim.claim_id, unit: prepared.unit ?? null, limits_json: limits ? JSON.stringify(limits) : null,
+            release_on_finish: args.release_on_finish === true, principal: rt.principal.id };
           repo.insertJob(row);
+          if (key) repo.insertRequest({ key, principal: rt.principal.id, op, result_json: JSON.stringify({ job_id: jobId }), created_at: at });
+          if (exec.queueing) {
+            repo.appendJobEvent({ job_id: jobId, at, kind: 'submitted', detail: JSON.stringify({ recipe, queued: true }) });
+          }
           return { job: repo.getJob(jobId) };
         });
       } catch {
         inserted = { storeError: true };
       }
       if (!inserted.job) {
-        try { unlinkSync(logPath); } catch { /* best effort */ }
+        dropLog();
+        if (inserted.replayOf) return replay(inserted.replayOf);
         if (inserted.busy !== undefined) {
-          return journal(op, fail('host_busy', `${inserted.busy}/${maxJobs} jobs active on this host; queueing is not available yet, retry later`), issueIds);
+          return journal(op, fail('host_busy', `${inserted.busy}/${limit} jobs active on this host; queueing is not available yet, retry later`), issueIds);
+        }
+        if (inserted.full !== undefined) {
+          return journal(op, fail('queue_full', `${inserted.full}/${queueCap} jobs queued or running on this host; retry later`), issueIds);
         }
         if (inserted.noClaim) return journal(op, fail('no_live_claim', 'claim expired or released'), issueIds);
         return journal(op, fail('store_unavailable'), issueIds);
       }
 
-      const launched = await launch(rt.stateDir, jobId);
+      if (exec.queueing) {
+        // The supervisor admits and dispatches it; the job outlives this connection.
+        nudgeSupervisor();
+        return journal(op, { ok: true, job: publicJob(inserted.job) }, issueIds);
+      }
+      const launched = await exec.launch({ stateDir: rt.stateDir, job: inserted.job, protocol: RUNNER_PROTOCOL });
       const final = await write((repo, at) => {
         if (launched.ok) {
           repo.appendJobEvent({ job_id: jobId, at, kind: 'submitted', detail: JSON.stringify({ runner_pid: launched.pid, recipe }) });
@@ -414,8 +443,8 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
     async list(args = {}) {
       const op = 'jobs_list';
       if (!rt.authorize(op)) return denied(op);
-      const limit = args.limit ?? 50;
-      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST) return fail('invalid_input', 'limit');
+      const max = args.limit ?? 50;
+      if (!Number.isInteger(max) || max < 1 || max > MAX_LIST) return fail('invalid_input', 'limit');
       if (args.status !== undefined && !JOB_STATUSES.includes(args.status)) return fail('invalid_input', 'status');
       let workspaceIds;
       if (args.workspace_id !== undefined) {
@@ -429,10 +458,10 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
         workspaceIds ??= repo.listWorkspaces({ principal: rt.principal.id, limit: MAX_LIST }).map(w => w.id);
         // Reconcile first, then filter: a job read as running may in fact be interrupted.
         return workspaceIds.flatMap(id => repo.listJobs({ workspace_id: id, limit: MAX_LIST }))
-          .map(job => reconcileJob(repo, job, at))
+          .map(job => reconcile(repo, job, at))
           .filter(job => !args.status || job.status === args.status)
           .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1))
-          .slice(0, limit);
+          .slice(0, max);
       });
       return { ok: true, jobs: jobs.map(publicJob) };
     },
@@ -442,7 +471,8 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       if (!rt.authorize(op)) return denied(op);
       const found = await ownedJob(op, args.job_id);
       if (found.error) return found.error;
-      return { ok: true, job: publicJob(found.job) };
+      const context = await contextOf(found.job);
+      return { ok: true, job: publicJob(found.job), ...(context ? { context } : {}) };
     },
 
     async events(args = {}) {
@@ -465,20 +495,26 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       const found = await ownedJob(op, args.job_id);
       if (found.error) return found.error;
       const { job } = found;
-      // Only ever read the log this module named; the path in the row is double-checked.
-      const expected = logPathFor(rt.stateDir, job.id);
       let lines = []; let size = 0; let cut = false;
-      if (job.log_path === expected && existsSync(expected)) {
-        const real = realpathSync(expected);
-        if (real.startsWith(realpathSync(jobsDir(rt.stateDir)) + sep)) {
-          const t = readTail(real, RESULTS.maxBytes);
-          if (t) {
-            lines = lastLines(t.text, tail); size = t.size;
-            cut = t.cut || t.text.replace(/\n$/, '').split('\n').length > tail;
-          }
+      let t = null;
+      if (job.unit) {
+        // VPS: the log is written by memo-job; it is opened without following symlinks and
+        // only at the path the executor names, never the one in the row.
+        if (exec.kind === 'systemd' && job.log_path === exec.logPath(job)) t = exec.readLog(job, RESULTS_MAX_BYTES);
+      } else {
+        // Only ever read the log this module named; the path in the row is double-checked.
+        const expected = logPathFor(rt.stateDir, job.id);
+        if (job.log_path === expected && existsSync(expected)) {
+          const real = realpathSync(expected);
+          if (real.startsWith(realpathSync(jobsDir(rt.stateDir)) + sep)) t = readTail(real, RESULTS.maxBytes);
         }
       }
-      return { ok: true, job: publicJob(job), log: { lines, bytes: size, truncated_to_tail: cut } };
+      if (t) {
+        lines = lastLines(t.text, tail); size = t.size;
+        cut = t.cut || t.text.replace(/\n$/, '').split('\n').length > tail;
+      }
+      const context = await contextOf(job);
+      return { ok: true, job: publicJob(job), log: { lines, bytes: size, truncated_to_tail: cut }, ...(context ? { context } : {}) };
     },
 
     async cancel(args = {}) {
@@ -492,16 +528,25 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
         const job = repo.getJob(found.job.id);
         if (!ACTIVE.has(job.status)) return { finished: job };
         // Signal first, then record: the runner sees 'cancelled' and escalates to SIGKILL too.
-        if (job.status === 'running') signalJob(repo, job, 'SIGTERM');
+        if (job.status === 'running' && !job.unit) signalJob(repo, job, 'SIGTERM');
         if (!repo.updateJob(job.id, { status: 'cancelled', ended_at: at }, job.status)) return { finished: repo.getJob(job.id) };
         repo.appendJobEvent({ job_id: job.id, at, kind: 'cancelled', detail: JSON.stringify({ from: job.status, by: rt.principal.id }) });
-        return { cancelled: { ...job, status: 'cancelled', ended_at: at }, pidStart: leaderStartOf(repo, job.id) };
+        return { cancelled: { ...job, status: 'cancelled', ended_at: at }, pidStart: leaderStartOf(repo, job.id), from: job.status };
       });
       if (outcome.finished) {
         return journal(op, fail('job_finished', outcome.finished.status), ids);
       }
       const job = outcome.cancelled;
-      if (job.pid) {
+      if (job.unit) {
+        // A queued or deferred job never started: nothing to stop (REQ-P4-20). A dispatched or
+        // running one is stopped through the dispatcher; the supervisor retries if this fails.
+        if (STARTED_JOB_STATUSES.includes(outcome.from) && exec.kind === 'systemd') {
+          const stopped = exec.stop(job);
+          await write((repo, at) => repo.appendJobEvent({ job_id: job.id, at, kind: 'stop_requested',
+            detail: JSON.stringify({ by: 'job_cancel', ok: stopped.ok, withdrawn: Boolean(stopped.withdrawn) }) })).catch(() => {});
+        }
+        nudgeSupervisor();
+      } else if (job.pid) {
         // Escalation from this process too, in case the runner itself is gone; never to a
         // group id that has been reused since.
         setTimeout(() => signalJobGroup(job.pid, outcome.pidStart, 'SIGKILL'), killGraceMs).unref();

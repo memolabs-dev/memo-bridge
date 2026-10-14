@@ -2,12 +2,13 @@
 // Callers use `transaction(fn)` and the repository methods passed to `fn`; they never
 // write SQL. A future Postgres adapter must provide the same contract and pass
 // tests/coordinator-store-contract.test.mjs.
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -157,10 +158,76 @@ CREATE TABLE IF NOT EXISTS job_events (
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
 `;
 
+// v3: VPS runner (Phase 4). SQLite cannot change a CHECK constraint in place, so the jobs
+// table is rebuilt with the new statuses and columns, keeping every row
+// (https://www.sqlite.org/lang_altertable.html, "Making Other Kinds Of Table Schema Changes").
+//   deferred         admission said no (pressure, disk); retried by the supervisor
+//   dispatched       handed to the root dispatcher (spool file written), unit not seen yet
+//   oom, budget_exceeded  final statuses from systemd (OOM killer) and the disk budget
+//   claim_id         the claim the job was submitted under; the supervisor renews it
+//   unit             memo-job@<id>.service for jobs run by the systemd executor, NULL on the Mac
+//   limits_json      the budgets recorded for the job (context record)
+//   release_on_finish  release the claim once the job ends (0/1)
+//   principal        who submitted it; the supervisor acts for that principal
+//   status_reason    why a job is deferred, or why it ended (stale_lease, dispatch_refused...)
+// requests: idempotency of mutating operations by client_request_id; the first result wins.
+export const JOB_STATUS_VALUES = Object.freeze(['queued', 'deferred', 'dispatched', 'running', 'succeeded', 'failed',
+  'cancelled', 'timed_out', 'oom', 'budget_exceeded', 'interrupted']);
+const JOBS_V2_COLUMNS = ['id', 'workspace_id', 'worktree_id', 'project_id', 'host', 'recipe', 'argv_json', 'status', 'exit_code',
+  'pid', 'timeout_ms', 'log_path', 'created_at', 'started_at', 'ended_at', 'summary'];
+const SCHEMA_V3 = `
+CREATE TABLE IF NOT EXISTS requests (
+  key TEXT PRIMARY KEY,
+  principal TEXT NOT NULL,
+  op TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS requests_created ON requests(created_at);
+CREATE TABLE jobs_v3 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  project_id TEXT NOT NULL,
+  host TEXT NOT NULL,
+  recipe TEXT NOT NULL,
+  argv_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (${JOB_STATUS_VALUES.map(s => `'${s}'`).join(',')})),
+  exit_code INTEGER,
+  pid INTEGER,
+  timeout_ms INTEGER NOT NULL,
+  log_path TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  summary TEXT,
+  claim_id TEXT,
+  unit TEXT,
+  limits_json TEXT,
+  release_on_finish INTEGER NOT NULL DEFAULT 0 CHECK (release_on_finish IN (0,1)),
+  principal TEXT,
+  status_reason TEXT
+);
+INSERT INTO jobs_v3 (${JOBS_V2_COLUMNS.join(', ')}) SELECT ${JOBS_V2_COLUMNS.join(', ')} FROM jobs ORDER BY rowid;
+DROP TABLE jobs;
+ALTER TABLE jobs_v3 RENAME TO jobs;
+CREATE INDEX IF NOT EXISTS jobs_workspace ON jobs(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(host, status);
+CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(host, status, created_at, id);
+CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(claim_id, status);
+`;
+
+// The idempotency key of a mutating call: sha256(principal|op|client_request_id), the same
+// derivation the hub uses, so a retry through either path finds the first result.
+export const CLIENT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+export function requestKey(principalId, op, clientRequestId) {
+  return createHash('sha256').update(`${principalId}|${op}|${clientRequestId}`).digest('hex');
+}
+
 const WORKSPACE_COLUMNS = ['status', 'branch', 'updated_at', 'closed_at'];
 const CLAIM_COLUMNS = ['fence_sha', 'expires_at', 'state', 'outcome', 'updated_at'];
 const WORKTREE_COLUMNS = ['status', 'issue_ref', 'updated_at', 'removed_at'];
-const JOB_COLUMNS = ['status', 'exit_code', 'pid', 'started_at', 'ended_at', 'summary'];
+const JOB_COLUMNS = ['status', 'exit_code', 'pid', 'started_at', 'ended_at', 'summary', 'unit', 'status_reason'];
 
 function setClause(patch, allowed) {
   const keys = Object.keys(patch);
@@ -233,17 +300,43 @@ function repository(db) {
     },
     insertJob(j) {
       db.prepare(`INSERT INTO jobs (id, workspace_id, worktree_id, project_id, host, recipe, argv_json, status, timeout_ms,
-        log_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`)
-        .run(j.id, j.workspace_id, j.worktree_id, j.project_id, j.host, j.recipe, j.argv_json, j.timeout_ms, j.log_path, j.created_at);
+        log_path, created_at, claim_id, unit, limits_json, release_on_finish, principal)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(j.id, j.workspace_id, j.worktree_id, j.project_id, j.host, j.recipe, j.argv_json, j.timeout_ms, j.log_path, j.created_at,
+          j.claim_id ?? null, j.unit ?? null, j.limits_json ?? null, j.release_on_finish ? 1 : 0, j.principal ?? null);
     },
     getJob(id) { return plain(db.prepare('SELECT * FROM jobs WHERE id = ?').get(id)); },
-    listJobs({ workspace_id, host, status, limit = 50 } = {}) {
+    listJobs({ workspace_id, host, status, claim_id, limit = 50 } = {}) {
       const where = []; const values = [];
       if (workspace_id) { where.push('workspace_id = ?'); values.push(workspace_id); }
       if (host) { where.push('host = ?'); values.push(host); }
       if (status) { where.push('status = ?'); values.push(status); }
+      if (claim_id) { where.push('claim_id = ?'); values.push(claim_id); }
       const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
       return db.prepare(`SELECT * FROM jobs ${clause} ORDER BY created_at DESC, id LIMIT ?`).all(...values, limit).map(plain);
+    },
+    // The FIFO queue of one host: jobs in the given statuses, oldest first (insertion order
+    // breaks ties within the same millisecond).
+    listQueue({ host, statuses, limit = 100 }) {
+      const list = statuses.filter(s => JOB_STATUS_VALUES.includes(s));
+      if (!list.length) return [];
+      return db.prepare(`SELECT * FROM jobs WHERE host = ? AND status IN (${list.map(() => '?').join(',')})
+        ORDER BY created_at, rowid LIMIT ?`).all(host, ...list, limit).map(plain);
+    },
+    countJobs({ host, statuses }) {
+      const list = statuses.filter(s => JOB_STATUS_VALUES.includes(s));
+      if (!list.length) return 0;
+      return Number(db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE host = ? AND status IN (${list.map(() => '?').join(',')})`)
+        .get(host, ...list).n);
+    },
+    getRequest(key) { return plain(db.prepare('SELECT * FROM requests WHERE key = ?').get(key)); },
+    // INSERT OR IGNORE: under the write lock the first insert wins; callers read back with getRequest.
+    insertRequest(r) {
+      return Number(db.prepare('INSERT OR IGNORE INTO requests (key, principal, op, result_json, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(r.key, r.principal, r.op, r.result_json, r.created_at).changes);
+    },
+    pruneRequests(before) {
+      return Number(db.prepare('DELETE FROM requests WHERE created_at < ?').run(before).changes);
     },
     // Compare-and-set on status so two processes never both move a job forward.
     updateJob(id, patch, expectedStatus) {
@@ -279,16 +372,28 @@ function migrate(db) {
   const version = Number(db.prepare('PRAGMA user_version').get().user_version);
   if (version > SCHEMA_VERSION) throw new Error('state_schema_newer_than_code');
   if (version === SCHEMA_VERSION) return;
-  db.exec('BEGIN IMMEDIATE');
+  // The v3 rebuild drops and renames the jobs table that job_events references. Foreign keys
+  // are switched off for that (the pragma is a no-op inside a transaction, so before BEGIN),
+  // checked with foreign_key_check before COMMIT, and switched back on whatever happens.
+  db.exec('PRAGMA foreign_keys = OFF');
   try {
-    const current = Number(db.prepare('PRAGMA user_version').get().user_version);
-    if (current < 1) db.exec(SCHEMA);
-    if (current < 2) db.exec(SCHEMA_V2);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // Another process may have migrated while this one waited for the lock.
+      const current = Number(db.prepare('PRAGMA user_version').get().user_version);
+      if (current > SCHEMA_VERSION) throw new Error('state_schema_newer_than_code');
+      if (current < 1) db.exec(SCHEMA);
+      if (current < 2) db.exec(SCHEMA_V2);
+      if (current < 3) db.exec(SCHEMA_V3);
+      if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
   }
 }
 

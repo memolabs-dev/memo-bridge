@@ -3,7 +3,7 @@
 Memo Bridge is a local proof of concept. It is not designed for exposure to the public internet.
 - No merges, no deployment, no admin operations. Since v0.4 the runner writes files, commits and pushes through its tools, only inside its own worktrees and under a live task claim, and runs the repository's own test/build/lint scripts as jobs inside a macOS sandbox (see below: a job is code a model can write, and the sandbox is what bounds it).
 - Project metadata is read only from the local canonical register; project IDs and resolved paths are validated.
-- The local stdio plugin assumes a trusted OS user. These tools must not be exposed remotely until strong user authentication, per-tool authorization and audit logs are implemented.
+- The local stdio plugin assumes a trusted OS user. These tools must not be exposed publicly until strong user authentication, per-tool authorization and audit logs are implemented. Since v0.5 they can be reached on the VPS through the loopback-only private hub (owner and read-only bearers, write tools gated, see below).
 - No credentials in the repository, logs, test fixtures, or plugin archive.
 - VPS access uses the operator's existing SSH alias and host-key trust; do not distribute SSH keys.
 - Report vulnerabilities privately to the maintainers before publishing exploit details.
@@ -70,4 +70,21 @@ Residual risks, with the sandbox on:
 - Seatbelt (`sandbox-exec`) is deprecated by Apple, though present and working on macOS 27.
 - File writes check the claim in the local mirror only (the mirror expires with the lease); commit, push, pull request creation and job submission ask the ledger.
 
-Before any remote exposure, jobs need stronger isolation (a dedicated user or a VM), and the root CI runners on the VPS must be isolated first.
+Before any remote exposure, jobs need stronger isolation (a dedicated user or a VM), and the root CI runners on the VPS must be isolated first. Phase 4 provides the dedicated user on the VPS (below); the Mac keeps the Seatbelt sandbox and the local stdio transport.
+
+## VPS runner (v0.5, Phase 4)
+
+Details: `docs/RUNNER_VPS.md`, `docs/HUB_SECURITY.md`, `deploy/README.md`. Not deployed yet.
+
+- **Three identities.** `memo-bridge` runs only the hub and holds no GitHub token. `memo-runner` runs the runtime (store, ledger, Git network calls) and holds the agent key and the two GitHub tokens, through systemd `LoadCredential=` only. `memo-job` runs recipe code and holds nothing. None is in `docker` or `sudo`.
+- **Two fine-grained tokens**, never in an environment file, a log or `/etc/github.env`. `ledger-gh` (Contents RW on `memolabs-dev/.github`) is read on each ledger call and handed only to the `issue_lease.py` child as `GH_TOKEN`, with a fresh private `GH_CONFIG_DIR`; other credential variables are stripped from that child. `push-gh` (Contents RW on the pilot repositories) reaches Git only through `GIT_ASKPASS`, which reads the credential file and answers GitHub HTTPS prompts only, with every other credential helper switched off. No Git call sees `CREDENTIALS_DIRECTORY` or a token variable. A missing credential fails closed (`ledger_unavailable`, `credential_unavailable`): there is no fallback to an ambient login.
+- **Jobs as a systemd unit.** Only a root dispatcher starts or stops `memo-job@<id>.service`, after re-validating the spool request (dispatch id, strict schema, recipe allow-list, worktree path without symlink, at most one active job); unit properties come only from root-owned files. The unit runs as `memo-job` in `memo-dev.slice` with hard CPU, memory, task and duration caps, no credentials, no capability, the docker sockets, production data, runner state and credential stores inaccessible, loopback and private ranges denied, and only its worktree and output folder writable. Inside it the runner re-checks the instance, the working directory and the recipe, and runs only an allow-listed argv shape.
+- **Status from systemd.** The final status is written by root from systemd's own result (`ExecStopPost=+`); job output can never set it.
+- **Authorization in depth.** Hub bearer to principal, hub capability check, runtime grant ceiling and `authorize()` again, dispatcher validation. A read-only principal can read status but not submit, cancel, claim or push. Every refusal is journaled with principal, op and reason, never arguments.
+- **Write gate.** Mutating ops are not forwarded by the hub until the root CI runners on the VPS are isolated (AC-P4-14). The runner is ready for them and authorizes every op again.
+
+Residual risks on the VPS:
+- A job can read other jobs' worktrees (shared group), but write only its own.
+- A job has outbound internet (registries, GitHub) and could send out source code of an owner-controlled pilot repository; it holds no secret to send.
+- Root agents on the VPS (opencode, claude remote control) can read `/etc/credstore`; token scope and expiry bound the damage (owner decision O-D7).
+- The systemd semantics this relies on are read from the systemd 257 man pages and still to be exercised on the VPS (`docs/RUNNER_VPS.md`, "Still to verify").

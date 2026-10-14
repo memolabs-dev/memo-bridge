@@ -1,0 +1,382 @@
+#!/usr/bin/python3 -I
+"""record-result: write the final status of a memo-job unit, from systemd, not from the job.
+
+Phase 4, design decision D5 of .agent/project/phase-4/spec.md. The job unit runs it as
+
+    ExecStopPost=+/usr/local/lib/memo-runner/record-result %i
+
+where %i is the dispatch id (`^[a-z0-9-]{8,64}$`), and it writes
+/var/lib/memo-runner/jobs/<id>/status.json (root:memo-runner 0640). The job runs as memo-job and
+cannot write that folder, so it cannot forge its own result; memo-runner reads the file
+(server/runners/executor-systemd.mjs, readStatusFile) and records the job's final state. The
+executor relies on version, id, service_result, exit_code, exit_status and ended_at; status,
+reason and cancel_reason are this script's own reading, for operators and `dispatch --status`.
+
+Inputs, all set by the service manager:
+  - $SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS: systemd.exec(5), "Environment Variables Set or
+    Propagated by the Service Manager" (systemd 257, read on the VPS on 2026-10-14). They are
+    passed to every ExecStopPost= process. $EXIT_CODE is "exited", "killed" or "dumped";
+    $EXIT_STATUS is the numeric exit status when "exited", the signal name otherwise ("TERM",
+    without "SIG"). They are only set when the main process was started.
+  - $INVOCATION_ID: systemd.exec(5), same section.
+  - The "+" prefix runs this command with full privileges and without the unit's filesystem
+    namespacing: systemd.service(5), "Table 1. Special executable prefixes". Options that apply
+    to the whole control group (IPAddressDeny=, DevicePolicy=...) still apply; this script needs
+    no network.
+  - jobs/<id>/cancel.json, written by memo-runner-dispatch (root) before it stops the unit. A
+    stop by SIGTERM is a clean exit for systemd ("success"/"killed"/"TERM": SuccessExitStatus=
+    in systemd.service(5)), so without this marker a cancelled job would look like a job stopped
+    by someone else.
+
+Mapping (first match wins):
+  SERVICE_RESULT=oom-kill                         -> oom
+  cancel marker present                           -> budget_exceeded (marker reason
+                                                     budget_exceeded) or cancelled (any other)
+  SERVICE_RESULT=timeout                          -> timed_out (RuntimeMaxSec= overrun)
+  success, exited, 0                              -> succeeded
+  success, killed (HUP, INT, TERM, PIPE)          -> interrupted (stopped outside the dispatcher:
+                                                     an operator, a shutdown or a reboot)
+  exit-code                                       -> failed (reason exit_status)
+  signal, core-dump                               -> failed (reason signal)
+  anything else (resources, protocol, watchdog,
+  exec-condition, start-limit-hit)                -> failed (reason = the result)
+  an unknown $SERVICE_RESULT                      -> failed (unknown_service_result), written as
+                                                     service_result "resources", the catch-all
+
+The cancel marker wins over "timeout" because a stop that outlasts TimeoutStopSec= is also
+reported as "timeout" (inferred from "One of the steps timed out"; to verify in the TODO-P4-01
+spike). "oom-kill" wins over everything: memory is the budget that was exceeded.
+
+It also removes the runtime drop-in the dispatcher wrote for this job
+(/run/systemd/system/memo-job@<id>.service.d/50-dispatch.conf); the loaded unit keeps its
+settings until it is unloaded.
+
+Exit status: 0 when status.json was written, 1 otherwise (the reason is journaled).
+"""
+
+import argparse
+import json
+import os
+import pwd
+import re
+import secrets
+import stat
+import sys
+from datetime import datetime, timezone
+
+PROG = 'record-result'
+VERSION = 1
+# Same as memo-runner-dispatch (REQ-P4-11, executor-systemd.mjs DISPATCH_ID_RE, no leading '-').
+DISPATCH_ID_RE = re.compile(r'[a-z0-9][a-z0-9-]{7,63}')
+# Phase-3 job ids (server/runners/jobs.mjs), as recorded by the dispatcher in dispatch.json.
+JOB_ID_RE = re.compile(r'job_[A-Za-z0-9_-]{16}')
+UNIT_PREFIX = 'memo-job@'
+DROPIN_NAME = '50-dispatch.conf'
+DEFAULT_CONFIG = '/etc/memo-bridge/runner.json'
+DEFAULTS = {'root': '/var/lib/memo-runner', 'runner_user': 'memo-runner', 'dropin_dir': '/run/systemd/system'}
+MAX_CONFIG_BYTES = 256 * 1024
+MAX_MARKER_BYTES = 16 * 1024
+
+SERVICE_RESULTS = frozenset({
+    'success', 'protocol', 'timeout', 'exit-code', 'signal', 'core-dump', 'watchdog',
+    'exec-condition', 'oom-kill', 'start-limit-hit', 'resources',
+})
+EXIT_CODES = frozenset({'exited', 'killed', 'dumped'})
+SIGNAL_RE = re.compile(r'[A-Z][A-Z0-9+]{0,15}')
+INVOCATION_RE = re.compile(r'[0-9a-f]{32}')
+# Must match CANCEL_REASONS of memo-runner-dispatch.
+CANCEL_REASONS = frozenset({
+    'cancelled', 'stale_lease', 'budget_exceeded', 'no_live_claim',
+    'workspace_closed', 'worktree_removed', 'runtime_shutdown',
+})
+PATH_RE = re.compile(r'[A-Za-z0-9._/@-]{1,1024}')
+
+O_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+O_ENTRY = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+
+
+class Failure(Exception):
+    pass
+
+
+def log(level, event, **fields):
+    priority = {'err': 3, 'warning': 4, 'notice': 5, 'info': 6}[level]
+    parts = [f'event={event}'] + [f'{key}={value}' for key, value in fields.items() if value is not None]
+    try:
+        sys.stderr.write(f'<{priority}>{PROG}: {" ".join(parts)}\n')
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+
+def strict_json(data):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate key')
+            result[key] = value
+        return result
+
+    def no_constant(_name):
+        raise ValueError('non-finite number')
+
+    return json.loads(data.decode('utf-8'), object_pairs_hook=pairs, parse_constant=no_constant)
+
+
+def read_owned(name, dir_fd, limit):
+    """Read a regular file owned by the effective uid, without following a symlink."""
+    try:
+        fd = os.open(name, O_ENTRY, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022 \
+                or st.st_size > limit:
+            return None
+        data = os.read(fd, limit + 1)
+        if len(data) > limit:
+            return None
+        return data
+    finally:
+        os.close(fd)
+
+
+def load_config(path):
+    data = read_owned(path, None, MAX_CONFIG_BYTES)
+    if data is None:
+        raise Failure('config_untrusted')
+    try:
+        document = strict_json(data)
+    except (ValueError, UnicodeDecodeError):
+        raise Failure('config_malformed')
+    section = document.get('dispatch', {}) if isinstance(document, dict) else None
+    if not isinstance(section, dict):
+        raise Failure('config_malformed')
+    values = {key: section.get(key, default) for key, default in DEFAULTS.items()}
+    for key in ('root', 'dropin_dir'):
+        value = values[key]
+        if not isinstance(value, str) or not value.startswith('/') or os.path.normpath(value) != value \
+                or not PATH_RE.fullmatch(value) or value == '/':
+            raise Failure(f'{key}_invalid')
+    try:
+        runner = pwd.getpwnam(values['runner_user'])
+    except (KeyError, TypeError):
+        raise Failure('runner_user_unknown')
+    return values['root'], values['dropin_dir'], runner.pw_gid
+
+
+def service_facts(env):
+    """The systemd variables, each reduced to a value the executor accepts: an unknown
+    $SERVICE_RESULT becomes "resources" ("a catch-all condition", systemd.exec(5)) with
+    known=False, and an unknown $EXIT_CODE or $EXIT_STATUS becomes null."""
+    result = env.get('SERVICE_RESULT', '')
+    known = result in SERVICE_RESULTS
+    if not known:
+        result = 'resources'
+    code = env.get('EXIT_CODE')
+    status = env.get('EXIT_STATUS')
+    if code not in EXIT_CODES:
+        code, status = None, None
+    elif code == 'exited':
+        if status is None or not re.fullmatch(r'[0-9]{1,3}', status) or int(status) > 255:
+            status = None
+    elif status is None or not SIGNAL_RE.fullmatch(status):
+        status = None
+    invocation = env.get('INVOCATION_ID')
+    invocation = invocation if invocation is not None and INVOCATION_RE.fullmatch(invocation) else None
+    return result, known, code, status, invocation
+
+
+def classify(result, known, code, status, cancel_reason):
+    """(status, reason) of the job; see the module docstring for the table."""
+    if result == 'oom-kill':
+        return 'oom', 'oom_kill'
+    if cancel_reason is not None:
+        return ('budget_exceeded' if cancel_reason == 'budget_exceeded' else 'cancelled'), cancel_reason
+    if result == 'timeout':
+        return 'timed_out', 'runtime_max_sec'
+    if result == 'success':
+        if code == 'exited' and status == '0':
+            return 'succeeded', None
+        return 'interrupted', 'stopped_externally'
+    if result == 'exit-code':
+        return 'failed', 'exit_status'
+    if result in ('signal', 'core-dump'):
+        return 'failed', 'signal'
+    if not known:
+        return 'failed', 'unknown_service_result'
+    return 'failed', result.replace('-', '_')
+
+
+def job_id_from(job_fd):
+    """The phase-3 job id the dispatcher recorded in dispatch.json, or None."""
+    data = read_owned('dispatch.json', job_fd, MAX_MARKER_BYTES)
+    if data is None:
+        return None
+    try:
+        document = strict_json(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    job_id = document.get('job_id') if isinstance(document, dict) else None
+    return job_id if isinstance(job_id, str) and JOB_ID_RE.fullmatch(job_id) else None
+
+
+def cancel_reason_from(job_fd):
+    data = read_owned('cancel.json', job_fd, MAX_MARKER_BYTES)
+    if data is None:
+        return None
+    try:
+        document = strict_json(data)
+    except (ValueError, UnicodeDecodeError):
+        return 'cancelled'
+    reason = document.get('reason') if isinstance(document, dict) else None
+    # A marker exists, so a stop was requested; an unreadable reason still means "cancelled".
+    return reason if reason in CANCEL_REASONS else 'cancelled'
+
+
+def open_job_dir(root, dispatch_id, runner_gid):
+    try:
+        root_fd = os.open(root, O_DIR)
+    except OSError:
+        raise Failure('root_unavailable')
+    try:
+        try:
+            jobs_fd = os.open('jobs', O_DIR, dir_fd=root_fd)
+        except OSError:
+            raise Failure('jobs_unavailable')
+        try:
+            st = os.fstat(jobs_fd)
+            if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+                raise Failure('jobs_untrusted')
+            try:
+                os.mkdir(dispatch_id, 0o751, dir_fd=jobs_fd)
+                created = True
+            except FileExistsError:
+                created = False
+            try:
+                fd = os.open(dispatch_id, O_DIR, dir_fd=jobs_fd)
+            except OSError:
+                raise Failure('job_dir_untrusted')
+            st = os.fstat(fd)
+            if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+                os.close(fd)
+                raise Failure('job_dir_untrusted')
+            if created:
+                os.fchown(fd, os.geteuid(), runner_gid)
+                os.fchmod(fd, 0o751)
+            return fd
+        finally:
+            os.close(jobs_fd)
+    finally:
+        os.close(root_fd)
+
+
+def write_status(job_fd, document, runner_gid):
+    data = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+    tmp = f'.status.json.{os.getpid()}.{secrets.token_hex(4)}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=job_fd)
+    try:
+        os.write(fd, data)
+        os.fchown(fd, os.geteuid(), runner_gid)
+        os.fchmod(fd, 0o640)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(tmp, dir_fd=job_fd)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    os.rename(tmp, 'status.json', src_dir_fd=job_fd, dst_dir_fd=job_fd)
+    try:
+        os.fsync(job_fd)
+    except OSError:
+        pass
+
+
+def remove_dropin(dropin_dir, dispatch_id):
+    try:
+        base = os.open(dropin_dir, O_DIR)
+    except OSError:
+        return
+    directory = f'{UNIT_PREFIX}{dispatch_id}.service.d'
+    try:
+        try:
+            fd = os.open(directory, O_DIR, dir_fd=base)
+        except OSError:
+            return
+        try:
+            os.unlink(DROPIN_NAME, dir_fd=fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+        try:
+            os.rmdir(directory, dir_fd=base)
+        except OSError:
+            pass
+    finally:
+        os.close(base)
+
+
+def record(dispatch_id, config_path, env):
+    if not DISPATCH_ID_RE.fullmatch(dispatch_id or ''):
+        raise Failure('invalid_id')
+    root, dropin_dir, runner_gid = load_config(config_path)
+    result, known, code, status, invocation = service_facts(env)
+    job_fd = open_job_dir(root, dispatch_id, runner_gid)
+    try:
+        cancel_reason = cancel_reason_from(job_fd)
+        final, reason = classify(result, known, code, status, cancel_reason)
+        document = {
+            'version': VERSION,
+            'id': dispatch_id,
+            'job_id': job_id_from(job_fd),
+            'unit': f'{UNIT_PREFIX}{dispatch_id}.service',
+            'service_result': result,
+            'exit_code': code,
+            'exit_status': status,
+            'status': final,
+            'reason': reason,
+            'cancel_reason': cancel_reason,
+            'invocation_id': invocation,
+            'started_at': None,
+            'ended_at': now_iso(),
+        }
+        write_status(job_fd, document, runner_gid)
+    finally:
+        os.close(job_fd)
+    remove_dropin(dropin_dir, dispatch_id)
+    log('notice', 'job_result_recorded', id=dispatch_id, status=final, service_result=result,
+        exit_code=code or '-', exit_status=status or '-')
+    return final
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog=PROG, allow_abbrev=False,
+                                     description='Record the final status of memo-job@<id>.service (ExecStopPost=+).')
+    parser.add_argument('--config', default=DEFAULT_CONFIG)
+    parser.add_argument('id', help='dispatch id: %%i of memo-job@.service')
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        record(args.id, args.config, os.environ)
+        return 0
+    except Failure as failure:
+        log('err', 'job_result_not_recorded',
+            id=args.id if DISPATCH_ID_RE.fullmatch(args.id or '') else 'invalid', reason=str(failure))
+        return 1
+    except Exception as error:  # noqa: BLE001 - journaled without details
+        log('err', 'job_result_not_recorded', reason=type(error).__name__)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

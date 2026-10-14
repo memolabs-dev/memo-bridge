@@ -8,6 +8,7 @@ import { collectHost, listHosts } from './probe.mjs';
 import { listProjects, projectInfo, projectGitStatus, auditProjectRegistry } from './catalog.mjs';
 import { CAPABILITIES } from './coordinator/policy.mjs';
 import { getRuntime } from './runtime.mjs';
+import { runnerInfo } from './runners/hosts.mjs';
 import { sandboxMode } from './runners/sandbox.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from './tools/coordinator-tools.mjs';
 import { WORKTREE_TOOLS, registerWorktreeTools } from './tools/worktree-tools.mjs';
@@ -17,7 +18,7 @@ import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 const BASE_TOOLS = ['list_hosts', 'host_status', 'bridge_info', 'projects_list', 'project_info', 'project_git_status',
   'projects_audit'];
@@ -98,14 +99,18 @@ server.registerTool('bridge_info', {
     runner: {
       worktrees: 'isolated Git worktrees under ~/projects/_worktrees/<project>/ (or MEMO_BRIDGE_WORKTREES_ROOT); Git hooks disabled',
       jobs: 'detected recipes only (test, build, lint); at most MEMO_BRIDGE_MAX_JOBS (default 2) per host; logs in the private state directory',
-      job_sandbox: (() => { const m = sandboxMode(); return m.ok ? m.mode : m.error; })()
+      // Executor, queueing, concurrency limit and job statuses of this process (hosts.mjs, TODO-P4-16).
+      ...runnerInfo({ ops: ALL_TOOLS, sandbox: (() => { const m = sandboxMode(); return m.ok ? m.mode : m.error; })() })
     },
     // What the tools themselves never do. Jobs run repository scripts a model can edit: they are
     // bounded by the job sandbox, and owner-equivalent when MEMO_BRIDGE_JOB_SANDBOX=off.
     excluded: ['arbitrary-shell', 'writes-outside-worktrees', 'default-branch-writes', 'force-push', 'merge', 'service-changes',
       'deployment'],
     excluded_scope: 'the tools themselves; jobs are bounded by job_sandbox, and owner-equivalent when it is off',
-    next: 'Hub exposure of these tools once the root CI runners are isolated; a VPS runner; a job queue.'
+    vps_runner: 'Phase 4: the same tools run on the VPS through the hub (memo-bridge-runner.service, runtime for host vps), jobs ' +
+      'queued one at a time as memo-job@<id>.service without credentials; hub write tools stay disabled until the root CI ' +
+      'runners are isolated (docs/RUNNER_VPS.md, docs/HUB_SECURITY.md)',
+    next: 'Hub write tools for the owner once the root CI runners are isolated; OIDC and public exposure (Phase 5).'
   });
 });
 

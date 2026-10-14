@@ -16,20 +16,25 @@
 //   wrote);
 // - no shell: git runs with fixed argv arrays, hooks disabled (a model can write files a
 //   hook path could point to), external diff drivers and textconv disabled;
+// - on the VPS runner (systemd credentials present), Git's network calls authenticate only with
+//   the push-gh credential, through the GIT_ASKPASS helper git-askpass.mjs; every other
+//   credential helper is switched off for those calls and no token is ever in argv or env;
 // - every path stays inside the worktree after realpath, and never under .git;
 // - every output is bounded, and text returned to models has control and bidi characters
 //   replaced.
 // Authorization and audit happen in server/tools/worktree-tools.mjs before these functions run.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { lstat, mkdir, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { constants as fsConstants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { projectInfo } from '../catalog.mjs';
 import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
-import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { PUSH_CREDENTIAL, credentialPath, credentialsRequired, parseIssueRef, readTokenFile } from '../coordinator/issue-lease.mjs';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
+import { ACTIVE_JOB_STATUSES } from './executor.mjs';
 import { reconcileJob } from './jobs.mjs';
 
 export const LIMITS = Object.freeze({
@@ -52,8 +57,8 @@ const PROTECTED = Object.freeze(['main', 'master']);
 const REMOTE_REFS_BYTES = 8 * 1024 * 1024;
 // Commits this worktree pushed, remembered so a later push only moves the remote branch from one of them.
 const PUSHED_KEEP = 50;
-// Active jobs block worktree_remove (they run inside the directory).
-const ACTIVE_JOB_STATUSES = Object.freeze(['queued', 'running']);
+// Active jobs block worktree_remove (they run inside the directory): queued, deferred,
+// dispatched and running (executor.mjs ACTIVE_JOB_STATUSES, Phase 4).
 const GIT_TIMEOUT_MS = 30_000;
 const NETWORK_TIMEOUT_MS = 120_000;
 
@@ -202,6 +207,81 @@ export function runGit(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, maxBytes = 1024 
 }
 const out = r => r.stdout.toString('utf8').trim();
 
+// ---------------------------------------------------------------------------------------------
+// Credentials for Git's network calls (Phase 4, D6, TODO-P4-11).
+//
+// On the Mac ($CREDENTIALS_DIRECTORY unset) nothing changes: Git uses the owner's own setup.
+// On the VPS the runner runs with LoadCredential=push-gh (systemd.exec(5), systemd 257: the
+// copy in $CREDENTIALS_DIRECTORY is readable only by the unit's user and root). Then:
+// - fetch, ls-remote and push get GIT_ASKPASS=git-askpass.mjs and the credential's *path* in
+//   MEMO_BRIDGE_ASKPASS_CREDENTIAL; the helper answers GitHub HTTPS prompts only;
+// - `-c credential.helper=` empties the helper list, so no other helper (system, global,
+//   URL-specific) can supply or store a credential (gitcredentials(7): an empty helper value
+//   resets the list; checked with git 2.54, url-specific helpers included; the VPS has git
+//   2.47.3, to verify in the TODO-P4-31 smoke);
+// - GIT_SAFETY (hooks and fsmonitor off) still prefixes every call (runGit);
+// - a missing or malformed credential fails closed (credential_unavailable): no fallback to an
+//   ambient login;
+// - every Git call, local or network, runs without CREDENTIALS_DIRECTORY or token variables.
+export const ASKPASS_PATH = fileURLToPath(new URL('./git-askpass.mjs', import.meta.url));
+export const ASKPASS_CREDENTIAL_VAR = 'MEMO_BRIDGE_ASKPASS_CREDENTIAL';
+const GIT_CREDENTIAL_VARS = ['CREDENTIALS_DIRECTORY', 'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+  'GIT_ASKPASS', 'SSH_ASKPASS', ASKPASS_CREDENTIAL_VAR];
+
+export function gitBaseEnv(env) {
+  if (!credentialsRequired(env)) return env;
+  const clean = { ...env };
+  for (const name of GIT_CREDENTIAL_VARS) delete clean[name];
+  return clean;
+}
+
+// The askpass program Git can execute. Git runs GIT_ASKPASS without a shell (prompt.c
+// do_askpass), so the file must be executable. lab-infra installs server/ with mode 0644
+// (role memo-bridge, tasks/app.yml), so where the installed helper is not executable a private
+// copy is kept under $MEMO_BRIDGE_STATE_DIR/bin (folder and file 0700, owned by this user) and
+// refreshed whenever the installed helper changes. null when neither is possible (fail closed).
+export async function askpassProgram(env, { source = ASKPASS_PATH } = {}) {
+  try { await access(source, fsConstants.X_OK); return source; } catch { /* not executable here: private copy */ }
+  const stateDir = env.MEMO_BRIDGE_STATE_DIR;
+  if (!isAbsolute(stateDir ?? '')) return null;
+  try {
+    const dir = join(stateDir, 'bin');
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const info = await lstat(dir);
+    if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o077)) return null;
+    const target = join(dir, 'git-askpass.mjs');
+    const content = await readFile(source);
+    let current = null;
+    try {
+      const t = await lstat(target);
+      if (t.isFile() && (t.mode & 0o777) === 0o700) current = await readFile(target);
+    } catch { current = null; }
+    if (!current || !current.equals(content)) {
+      const tmp = join(dir, `.git-askpass.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+      await writeFile(tmp, content, { mode: 0o700, flag: 'wx' });
+      await chmod(tmp, 0o700);
+      await rename(tmp, target);
+    }
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+// {config, env} for one network call, or {error}. `env` is the runner's environment.
+export async function networkGit(env) {
+  if (!credentialsRequired(env)) return { config: [], env };
+  const file = credentialPath(env, PUSH_CREDENTIAL);
+  const read = file ? await readTokenFile(file) : { error: 'credential_missing' };
+  if (read.error) return { error: fail('credential_unavailable', `${PUSH_CREDENTIAL} ${read.error}`) };
+  const askpass = await askpassProgram(env);
+  if (!askpass) return { error: fail('credential_unavailable', 'askpass_unavailable') };
+  return {
+    config: ['-c', 'credential.helper='],
+    env: { ...gitBaseEnv(env), GIT_ASKPASS: askpass, [ASKPASS_CREDENTIAL_VAR]: file }
+  };
+}
+
 async function revParse(cwd, ref, env) {
   const r = await runGit(cwd, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`], { readOnly: true, env, maxBytes: 200 });
   return r.code === 0 ? out(r) : null;
@@ -246,9 +326,10 @@ export function parseLsRemote(text) {
   }
   return { head, heads };
 }
-async function remoteBranches(cwd, env) {
-  const r = await runGit(cwd, ['ls-remote', '--symref', 'origin', 'HEAD', 'refs/heads/*'],
-    { readOnly: true, env, timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: REMOTE_REFS_BYTES });
+// `net` comes from networkGit(): credential configuration and environment for this call.
+async function remoteBranches(cwd, net) {
+  const r = await runGit(cwd, [...net.config, 'ls-remote', '--symref', 'origin', 'HEAD', 'refs/heads/*'],
+    { readOnly: true, env: net.env, timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: REMOTE_REFS_BYTES });
   if (r.code !== 0 || r.truncated) return null;
   return parseLsRemote(r.stdout.toString('utf8'));
 }
@@ -358,7 +439,9 @@ function commitMessage(value) {
 
 // ---------------------------------------------------------------------------------------------
 
-export function createWorktreeRunner(rt, { env = process.env } = {}) {
+export function createWorktreeRunner(rt, { env: runnerEnv = process.env } = {}) {
+  // Local Git calls never see the credentials directory; network calls get networkGit(runnerEnv).
+  const env = gitBaseEnv(runnerEnv);
   const read = fn => rt.store().transaction(repo => fn(repo), { write: false });
   const write = fn => rt.store().transaction(repo => fn(repo));
   const now = () => rt.now();
@@ -486,7 +569,10 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
 
       // Documented network call: refresh remote-tracking refs so the base is current and a
       // branch that exists only on the remote is detected. Never prunes, never fetches tags.
-      const fetched = await runGit(repoPath, ['fetch', '--no-tags', '--quiet', 'origin'], { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env });
+      const net = await networkGit(runnerEnv);
+      if (net.error) return net.error;
+      const fetched = await runGit(repoPath, [...net.config, 'fetch', '--no-tags', '--quiet', 'origin'],
+        { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env: net.env });
       if (fetched.code !== 0) return fail('fetch_failed', fetched.timedOut ? 'timeout' : `exit ${fetched.code}`);
       const defaultName = await defaultBranch(repoPath, env);
       if (!defaultName) return fail('default_branch_unknown');
@@ -495,7 +581,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const branch = args.branch ?? (issue ? `agent/${issue.number}-${suffix}` : `agent/ws-${suffix}`);
       if (!validBranch(branch)) return fail('invalid_input', 'branch');
       // Documented network call: the remote's own default branch and branches.
-      const remote = await remoteBranches(repoPath, env);
+      const remote = await remoteBranches(repoPath, net);
       if (!remote) return fail('fetch_failed', 'ls-remote');
       if (isProtectedBranch(branch, [defaultName, remote.head])) return fail('protected_branch');
       // Any existing branch with the same name in another case is the same ref file on APFS.
@@ -816,7 +902,9 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       if (!head) return fail('git_failed', 'HEAD');
       // Ask the remote itself (network): its default branch and its branches. The local
       // origin/HEAD can be missing or stale, and a narrow fetch refspec hides other branches.
-      const remote = await remoteBranches(root, env);
+      const net = await networkGit(runnerEnv);
+      if (net.error) return net.error;
+      const remote = await remoteBranches(root, net);
       if (!remote) return fail('push_failed', 'ls-remote');
       if (isProtectedBranch(row.branch, [remote.head, await defaultBranch(root, env)])) return fail('protected_branch');
       const variants = sameIgnoringCase([...remote.heads.keys()], row.branch).filter(name => name !== row.branch);
@@ -833,8 +921,8 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
 
       // Explicit refspec without '+': a non-fast-forward is rejected by the remote, never forced.
       const ref = `refs/heads/${row.branch}`;
-      const pushed = await runGit(root, ['push', '--porcelain', '--set-upstream', 'origin', `${ref}:${ref}`],
-        { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env });
+      const pushed = await runGit(root, [...net.config, 'push', '--porcelain', '--set-upstream', 'origin', `${ref}:${ref}`],
+        { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env: net.env });
       if (pushed.code !== 0) {
         const text = `${pushed.stdout.toString('utf8')}\n${pushed.stderr}`;
         if (/\[rejected\]|non-fast-forward|fetch first/.test(text)) return fail('push_rejected', 'non_fast_forward');
@@ -875,7 +963,7 @@ export function createWorktreeRunner(rt, { env = process.env } = {}) {
       const activeJobs = await write(repo => ACTIVE_JOB_STATUSES.flatMap(status =>
         repo.listJobs({ workspace_id: row.workspace_id, status, limit: 1000 }).filter(job => job.worktree_id === row.id))
         .map(job => reconcileJob(repo, job, now())).filter(job => ACTIVE_JOB_STATUSES.includes(job.status)));
-      if (activeJobs.length) return fail('job_active', `${activeJobs.length} job(s) queued or running in this worktree; cancel them with job_cancel`);
+      if (activeJobs.length) return fail('job_active', `${activeJobs.length} job(s) waiting or running in this worktree; cancel them with job_cancel`);
       const markRemoved = async detail => {
         const at = now();
         await write(repo => repo.updateWorktree(row.id, { status: 'removed', removed_at: at, updated_at: at }));

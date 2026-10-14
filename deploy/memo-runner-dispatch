@@ -1,0 +1,1157 @@
+#!/usr/bin/python3 -I
+"""memo-runner-dispatch: the only component that starts or stops memo-job@<id>.service.
+
+Phase 4 (VPS runner), design decision D3 of .agent/project/phase-4/spec.md. The runtime runs as
+the unprivileged user memo-runner and cannot start units itself (no polkit, NoNewPrivileges
+blocks sudo). It hands requests over through a spool (contract shared with
+server/runners/executor-systemd.mjs):
+
+    /var/lib/memo-runner/spool/queue/<id>.json   start request (strict schema, see below)
+    /var/lib/memo-runner/spool/cancel/<id>       stop request (empty, or a small JSON body)
+
+<id> is the dispatch id, `^[a-z0-9-]{8,64}$` (REQ-P4-11; the executor derives it from the job
+id), and the unit is memo-job@<id>.service. The request carries no argv: the recipe name selects
+the allowlisted argv shapes (built in, narrowed by runner.json), which the dispatcher pins into
+the unit's environment; the job-runner inside the unit must run one of them or nothing.
+
+memo-runner-dispatch.path watches both folders and starts memo-runner-dispatch.service, a root
+oneshot that runs this script. memo-runner is treated as untrusted (risk R-P4-08): every entry
+is re-validated here, the unit properties come from root-owned files only, and anything that
+does not match exactly is refused with `dispatch_refused`, journaled, and removed from the
+spool. Nothing in a spool entry is ever passed to a shell, and no command is built from it:
+the only processes started are `systemctl` with fixed verbs and a unit name derived from a
+validated dispatch id.
+
+What a valid start request does, in order:
+  1. checks that no memo-job@*.service is active, activating, deactivating or has a pending
+     job (concurrency 1, D4; the runtime store owns the queue, this is the second check);
+  2. creates /var/lib/memo-runner/jobs/<id>/ (root:memo-runner 0751) and its out/ folder
+     (memo-job:memo-runner 0750), and writes jobs/<id>/dispatch.json (root, 0640);
+     a refusal for a well-formed id writes jobs/<id>/status.json with
+     service_result "dispatch_refused" instead, which the executor reads as the job's end;
+  3. writes a runtime drop-in /run/systemd/system/memo-job@<id>.service.d/50-dispatch.conf
+     with WorkingDirectory=, ReadWritePaths=, RuntimeMaxSec= and Environment= built only from
+     validated values, and checks with `systemctl show -p DropInPaths` that systemd sees it
+     (a `daemon-reload` is issued once if it does not);
+  4. runs `systemctl start --no-block memo-job@<id>.service`.
+
+A cancel writes the root-owned marker jobs/<id>/cancel.json (read by record-result, so a
+stopped job ends `cancelled` or `budget_exceeded` instead of looking like a clean exit) and
+runs `systemctl stop --no-block memo-job@<id>.service`. A cancel for a request still in the
+queue removes it, and the job ends `cancelled_before_start` without any unit.
+
+`--status` prints a JSON summary (queue depth, active job, free disk, last result) and
+changes nothing.
+
+systemd references (systemd 257, Debian 13; man pages read on the VPS on 2026-10-14):
+  - systemd.unit(5), "drop-in" directories: for an instance foo@bar.service, systemd reads
+    foo@bar.service.d/ as well as foo@.service.d/, from /run/systemd/system among others.
+    Whether a never-loaded instance picks up a new drop-in WITHOUT daemon-reload is inferred,
+    not documented: hence the DropInPaths check and the single daemon-reload fallback
+    (to verify in the TODO-P4-01 spike).
+  - systemd.service(5), RuntimeMaxSec=: "If this is used and the service has been active for
+    longer than the specified time it is terminated and put into a failure state". A bare
+    number is seconds (systemd.time(7)).
+  - systemd.exec(5), ReadWritePaths=: "if paths contain symlinks, they are resolved". The
+    worktree is checked to contain no symlink, but memo-runner owns it and could swap it
+    after the check; DAC still bounds what memo-job can write (to verify in TODO-P4-01).
+  - systemctl(1), list-jobs [PATTERN...], set-property, daemon-reload.
+
+Exit status: 0 when the spool was processed (refusals included) or another dispatch held the
+lock; 2 when the configuration or the spool layout is not trusted (nothing is touched); 1 on
+an unexpected error.
+"""
+
+import argparse
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import selectors
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+PROG = 'memo-runner-dispatch'
+SPOOL_VERSION = 1
+
+# The dispatch id names the spool files, the job folder and the unit instance. REQ-P4-11 says
+# ^[a-z0-9-]{8,64}$; a leading '-' is refused as well. Every character is valid in a unit name
+# and needs no escaping in a unit file; the template must use %i (not %I, which would unescape
+# '-' into '/'). The executor uses 'j' + 31 hex characters of sha256(job id).
+DISPATCH_ID_RE = re.compile(r'[a-z0-9][a-z0-9-]{7,63}')
+QUEUE_NAME_RE = re.compile(r'([a-z0-9][a-z0-9-]{7,63})\.json')
+# A temporary file of the executor's atomic write (executor-systemd.mjs writeAtomic:
+# ".<name>.<pid>.<ms>.tmp", renamed into place). Left alone while young, removed when stale.
+TEMP_NAME_RE = re.compile(r'\.[a-z0-9][a-z0-9-]{7,63}(?:\.json)?\.[0-9]{1,10}\.[0-9]{1,16}\.tmp')
+TEMP_GRACE_SECONDS = 60
+TEMP_WAIT_SECONDS = 2.0
+# Phase-3 job ids (server/runners/jobs.mjs JOB_ID_RE): `job_` + 16 base64url characters.
+JOB_ID_RE = re.compile(r'job_[A-Za-z0-9_-]{16}')
+UNIT_PREFIX = 'memo-job@'
+UNIT_PATTERN = 'memo-job@*.service'
+# Must match lab-infra's memo-job@.service AssertPathExists= and runner.json job_unit.dropin.
+DROPIN_NAME = '50-dispatch.conf'
+
+MAX_REQUEST_BYTES = 4096
+MAX_CANCEL_BYTES = 1024
+MAX_CONFIG_BYTES = 256 * 1024
+MAX_RECORD_BYTES = 16 * 1024
+MAX_ENTRIES_PER_RUN = 64
+MAX_STATUS_SCAN = 2000
+HARD_MAX_TIMEOUT_SECONDS = 3600
+SYSTEMCTL_TIMEOUT_SECONDS = 30
+SYSTEMCTL_OUTPUT_LIMIT = 64 * 1024
+
+# The argv shapes a recipe may have: the phase-3 detection table (server/runners/recipes.mjs)
+# without SwiftPM (no Swift on the VPS, spec non-goal). runner.json may narrow this list,
+# never widen it.
+BUILTIN_RECIPES = {
+    'test': (
+        ('npm', 'test'),
+        ('python3', '-m', 'pytest', '-q'),
+        ('cargo', 'test'),
+        ('go', 'test', './...'),
+        ('make', 'test'),
+    ),
+    'build': (
+        ('npm', 'run', 'build'),
+        ('cargo', 'build'),
+        ('go', 'build', './...'),
+        ('make', 'build'),
+    ),
+    'lint': (
+        ('npm', 'run', 'lint'),
+    ),
+}
+
+# Why the runtime asks for a stop. `budget_exceeded` makes record-result end the job as
+# budget_exceeded; every other reason ends it as cancelled (spec, job state machine).
+CANCEL_REASONS = frozenset({
+    'cancelled', 'stale_lease', 'budget_exceeded', 'no_live_claim',
+    'workspace_closed', 'worktree_removed', 'runtime_shutdown',
+})
+
+REQUEST_KEYS = frozenset({'version', 'id', 'job_id', 'recipe', 'worktree', 'timeout_seconds'})
+CANCEL_KEYS = frozenset({'version', 'id', 'reason'})
+# service_result of the status.json written for a request that never got a unit; the executor
+# (server/runners/executor-systemd.mjs) maps it to a failed job.
+DISPATCH_REFUSED = 'dispatch_refused'
+CONFIG_KEYS = frozenset({
+    'root', 'runner_user', 'job_user', 'max_timeout_seconds', 'recipes', 'dropin_dir', 'lock_path',
+})
+DEFAULTS = {
+    'root': '/var/lib/memo-runner',
+    'runner_user': 'memo-runner',
+    'job_user': 'memo-job',
+    'max_timeout_seconds': HARD_MAX_TIMEOUT_SECONDS,
+    'dropin_dir': '/run/systemd/system',
+    'lock_path': '/run/memo-runner-dispatch/lock',
+}
+DEFAULT_CONFIG = '/etc/memo-bridge/runner.json'
+
+# A path component of the worktrees layout (<root>/<project>/<branch with / replaced by ->):
+# project names match catalog.mjs NAME_RE, branch names checkpoints.mjs BRANCH_RE. Nothing
+# here needs quoting in a unit file: no whitespace, quote, backslash, '%' or '$'.
+COMPONENT_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}')
+UNIT_VALUE_RE = re.compile(r'[A-Za-z0-9._/@-]{1,1024}')
+ACTIVE_STATES = frozenset({'active', 'activating', 'deactivating', 'reloading', 'refreshing'})
+# A previous dispatch.json with one of these outcomes means a unit may exist for this id.
+DISPATCHED_OUTCOMES = frozenset({'starting', 'started', 'cancelled_before_start'})
+
+SYSTEMCTL_ENV = {
+    'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
+    'LC_ALL': 'C',
+    'SYSTEMD_PAGER': '',
+    'SYSTEMD_COLORS': '0',
+    'SYSTEMD_LESS': '',
+}
+
+O_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+O_ENTRY = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+
+
+class ConfigError(Exception):
+    """The configuration or the on-disk layout is not trusted: touch nothing."""
+
+
+class Refusal(Exception):
+    """A spool entry is refused; `reason` is a fixed reason code."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+# ------------------------------------------------------------------------------------------
+# Journal. stderr of a oneshot goes to the journal; a leading <N> sets the priority
+# (sd-daemon(3), SyslogLevelPrefix= in systemd.exec(5)). Only ids, reason codes and counts
+# are logged: never request bodies, paths or command output.
+
+_PRIORITY = {'err': 3, 'warning': 4, 'notice': 5, 'info': 6}
+_SAFE_VALUE = re.compile(r'[A-Za-z0-9_.:@+-]{1,128}')
+
+
+def _clean(value):
+    text = str(value)
+    if _SAFE_VALUE.fullmatch(text):
+        return text
+    return 'sha256:' + hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:12]
+
+
+def log(level, event, **fields):
+    parts = [f'event={event}']
+    parts += [f'{key}={_clean(value)}' for key, value in fields.items() if value is not None]
+    try:
+        sys.stderr.write(f'<{_PRIORITY[level]}>{PROG}: {" ".join(parts)}\n')
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+
+# ------------------------------------------------------------------------------------------
+# Strict JSON: no duplicate keys, no NaN or Infinity, UTF-8 only.
+
+def strict_json(data):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate key')
+            result[key] = value
+        return result
+
+    def no_constant(_name):
+        raise ValueError('non-finite number')
+
+    text = data.decode('utf-8') if isinstance(data, (bytes, bytearray)) else data
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=no_constant)
+
+
+def is_int(value):
+    # bool is a subclass of int: `true` must not pass as 1.
+    return type(value) is int
+
+
+# ------------------------------------------------------------------------------------------
+# File helpers. Every spool and job path is opened relative to a directory fd with
+# O_NOFOLLOW, so a rename or symlink swap by memo-runner cannot redirect a root write.
+
+def read_fd(fd, limit):
+    chunks = []
+    size = 0
+    while True:
+        chunk = os.read(fd, min(65536, limit + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            raise Refusal('too_large')
+    return b''.join(chunks)
+
+
+def open_dir(name, dir_fd=None, owners=None, what='directory'):
+    """Open a directory without following a symlink; check owner and that it is not writable
+    by group or others when `owners` is given."""
+    try:
+        fd = os.open(name, O_DIR, dir_fd=dir_fd)
+    except OSError as error:
+        raise ConfigError(f'{what}_unavailable:{errno.errorcode.get(error.errno, "error")}')
+    st = os.fstat(fd)
+    if owners is not None and (st.st_uid not in owners or st.st_mode & 0o022):
+        os.close(fd)
+        raise ConfigError(f'{what}_untrusted')
+    return fd
+
+
+def read_trusted_file(name, dir_fd, limit):
+    """Read a file this script wrote itself (owned by the effective uid). None if absent."""
+    try:
+        fd = os.open(name, O_ENTRY, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_size > limit:
+            return None
+        try:
+            return strict_json(read_fd(fd, limit))
+        except (ValueError, UnicodeDecodeError, Refusal):
+            return None
+    finally:
+        os.close(fd)
+
+
+def write_json_atomic(dir_fd, name, document, uid, gid, mode=0o640):
+    data = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+    write_bytes_atomic(dir_fd, name, data, uid, gid, mode)
+
+
+def write_bytes_atomic(dir_fd, name, data, uid, gid, mode):
+    tmp = f'.{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+
+
+def remove_entry(dir_fd, name):
+    """Remove a spool entry. A symlink is removed as a link, never followed."""
+    try:
+        st = os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return True
+    try:
+        if stat.S_ISDIR(st.st_mode):
+            os.rmdir(name, dir_fd=dir_fd)
+        else:
+            os.unlink(name, dir_fd=dir_fd)
+        return True
+    except OSError:
+        log('err', 'spool_entry_stuck', entry=name)
+        return False
+
+
+def list_entries(dir_fd):
+    """Spool entries, oldest first (FIFO), bounded per run, and the number of young temporary
+    files left alone (an atomic write in progress; removed once older than the grace)."""
+    entries = []
+    pending = 0
+    now = time.time()
+    for name in os.listdir(dir_fd):
+        try:
+            st = os.lstat(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            continue
+        if TEMP_NAME_RE.fullmatch(name) and stat.S_ISREG(st.st_mode) and now - st.st_mtime < TEMP_GRACE_SECONDS:
+            pending += 1
+            continue
+        entries.append((st.st_mtime_ns, name))
+    entries.sort()
+    return [name for _, name in entries[:MAX_ENTRIES_PER_RUN]], pending
+
+
+def wait_for_renames(state):
+    """A young temporary file keeps the folder non-empty, and the path unit would start this
+    service again at once (systemd.path(5)) until a start limit fails it. Wait a little for the
+    executor's rename instead; the renamed file triggers a fresh run."""
+    deadline = time.monotonic() + TEMP_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not any(TEMP_NAME_RE.fullmatch(name) for fd in (state.queue_fd, state.cancel_fd)
+                   for name in os.listdir(fd)):
+            return
+        time.sleep(0.1)
+
+
+def read_spool_entry(dir_fd, name, owner_uid, limit):
+    """Read a spool file: a regular file, owned by memo-runner, one link, bounded size.
+    O_NONBLOCK keeps a FIFO from blocking the dispatcher; O_NOFOLLOW refuses symlinks."""
+    try:
+        fd = os.open(name, O_ENTRY, dir_fd=dir_fd)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.EMLINK, errno.ENXIO, errno.EISDIR):
+            raise Refusal('not_regular_file')
+        raise Refusal('unreadable')
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refusal('not_regular_file')
+        if st.st_uid != owner_uid:
+            raise Refusal('bad_owner')
+        if st.st_nlink != 1:
+            raise Refusal('hardlinked')
+        if st.st_size > limit:
+            raise Refusal('too_large')
+        return read_fd(fd, limit)
+    finally:
+        os.close(fd)
+
+
+# ------------------------------------------------------------------------------------------
+# Configuration: /etc/memo-bridge/runner.json, root-owned. Other components read other keys
+# of the same file; this script reads only the "dispatch" object and refuses unknown keys in it.
+
+class Config:
+    pass
+
+
+def _user(name, key):
+    if not isinstance(name, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', name):
+        raise ConfigError(f'{key}_invalid')
+    try:
+        return pwd.getpwnam(name)
+    except KeyError:
+        raise ConfigError(f'{key}_unknown')
+
+
+def _abs_path(value, key):
+    if not isinstance(value, str) or not value.startswith('/') or os.path.normpath(value) != value \
+            or not UNIT_VALUE_RE.fullmatch(value) or value == '/':
+        raise ConfigError(f'{key}_invalid')
+    return value
+
+
+def load_config(path):
+    try:
+        fd = os.open(path, O_ENTRY)
+    except OSError:
+        raise ConfigError('config_unreadable')
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ConfigError('config_not_regular')
+        if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+            raise ConfigError('config_untrusted')
+        try:
+            document = strict_json(read_fd(fd, MAX_CONFIG_BYTES))
+        except (ValueError, UnicodeDecodeError, Refusal):
+            raise ConfigError('config_malformed')
+    finally:
+        os.close(fd)
+    if not isinstance(document, dict):
+        raise ConfigError('config_malformed')
+    section = document.get('dispatch', {})
+    if not isinstance(section, dict):
+        raise ConfigError('config_malformed')
+    unknown = set(section) - CONFIG_KEYS
+    if unknown:
+        raise ConfigError('config_unknown_key')
+    values = dict(DEFAULTS)
+    values.update(section)
+
+    cfg = Config()
+    cfg.root = _abs_path(values['root'], 'root')
+    cfg.dropin_dir = _abs_path(values['dropin_dir'], 'dropin_dir')
+    cfg.lock_path = _abs_path(values['lock_path'], 'lock_path')
+    runner = _user(values['runner_user'], 'runner_user')
+    job = _user(values['job_user'], 'job_user')
+    cfg.runner_uid, cfg.runner_gid = runner.pw_uid, runner.pw_gid
+    cfg.job_uid = job.pw_uid
+    if os.geteuid() == 0:
+        # Root as runner or job user, or one user for both, would make the checks here
+        # meaningless (D2: memo-runner holds the credentials, memo-job holds none).
+        if cfg.runner_uid == 0 or cfg.job_uid == 0:
+            raise ConfigError('privileged_user')
+        if cfg.runner_uid == cfg.job_uid:
+            raise ConfigError('job_user_not_separate')
+    max_timeout = values['max_timeout_seconds']
+    if not is_int(max_timeout) or not 1 <= max_timeout <= HARD_MAX_TIMEOUT_SECONDS:
+        raise ConfigError('max_timeout_seconds_invalid')
+    cfg.max_timeout = max_timeout
+
+    recipes = values.get('recipes')
+    if recipes is None:
+        cfg.recipes = {name: frozenset(shapes) for name, shapes in BUILTIN_RECIPES.items()}
+    else:
+        if not isinstance(recipes, dict):
+            raise ConfigError('recipes_invalid')
+        cfg.recipes = {}
+        for name, shapes in recipes.items():
+            if name not in BUILTIN_RECIPES or not isinstance(shapes, list):
+                raise ConfigError('recipe_not_builtin')
+            allowed = set()
+            for shape in shapes:
+                if not isinstance(shape, list) or not all(isinstance(part, str) for part in shape):
+                    raise ConfigError('recipes_invalid')
+                if tuple(shape) not in BUILTIN_RECIPES[name]:
+                    # runner.json may only narrow the built-in list.
+                    raise ConfigError('recipe_not_builtin')
+                allowed.add(tuple(shape))
+            cfg.recipes[name] = frozenset(allowed)
+    cfg.worktrees_root = cfg.root + '/worktrees'
+    return cfg
+
+
+# ------------------------------------------------------------------------------------------
+# systemctl, without a shell, with a bounded output and a timeout.
+
+def resolve_systemctl(override):
+    candidate = override or shutil.which('systemctl')
+    if not candidate or not os.path.isabs(candidate):
+        raise ConfigError('systemctl_not_found')
+    return candidate
+
+
+def run_systemctl(cfg, *args, timeout=SYSTEMCTL_TIMEOUT_SECONDS):
+    """Return (returncode, stdout text). returncode is None on a timeout or a spawn failure.
+    stderr is discarded: it is never logged."""
+    argv = [cfg.systemctl, *args]
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=SYSTEMCTL_ENV, close_fds=True)
+    except OSError:
+        return None, ''
+    deadline = time.monotonic() + timeout
+    chunks = []
+    size = 0
+    fd = proc.stdout.fileno()
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                proc.wait()
+                proc.stdout.close()
+                return None, ''
+            if not selector.select(remaining):
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            if size < SYSTEMCTL_OUTPUT_LIMIT:
+                chunks.append(chunk[:SYSTEMCTL_OUTPUT_LIMIT - size])
+            size += len(chunk)
+    proc.stdout.close()
+    try:
+        returncode = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return None, ''
+    return returncode, b''.join(chunks).decode('utf-8', 'replace')
+
+
+def unit_name(dispatch_id):
+    return f'{UNIT_PREFIX}{dispatch_id}.service'
+
+
+def busy_units(cfg):
+    """Units of the memo-job@ template that are active or about to be. Raises Refusal when
+    systemd cannot be asked: fail closed."""
+    units = set()
+    code, out = run_systemctl(cfg, 'list-units', '--all', '--plain', '--no-legend', '--no-pager',
+                              '--type=service', UNIT_PATTERN)
+    if code != 0:
+        raise Refusal('busy_check_failed')
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) >= 4 and parts[0].startswith(UNIT_PREFIX) and parts[2] in ACTIVE_STATES:
+            units.add(parts[0])
+    # A unit started with --no-block may still be inactive with a pending start job.
+    code, out = run_systemctl(cfg, 'list-jobs', '--plain', '--no-legend', '--no-pager', UNIT_PATTERN)
+    if code != 0:
+        raise Refusal('busy_check_failed')
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].startswith(UNIT_PREFIX):
+            units.add(parts[1])
+    return sorted(units)
+
+
+# ------------------------------------------------------------------------------------------
+# Validation of a start request.
+
+def validate_worktree(path, cfg):
+    if not isinstance(path, str) or not path.startswith('/') or len(path) > 1024:
+        raise Refusal('worktree_invalid_path')
+    parts = path.split('/')[1:]
+    if any(part in ('.', '..') for part in parts):
+        raise Refusal('worktree_escape')
+    if os.path.normpath(path) != path:
+        raise Refusal('worktree_invalid_path')
+    prefix = cfg.worktrees_root + '/'
+    if not path.startswith(prefix):
+        raise Refusal('worktree_outside_root')
+    relative = path[len(prefix):].split('/')
+    # Layout of worktrees.mjs: <root>/<project>/<branch with / replaced by ->.
+    if len(relative) != 2 or not all(COMPONENT_RE.fullmatch(part) for part in relative):
+        raise Refusal('worktree_invalid_path')
+    try:
+        if os.path.realpath(cfg.worktrees_root, strict=True) != cfg.worktrees_root:
+            raise Refusal('worktree_root_invalid')
+    except OSError:
+        raise Refusal('worktree_root_invalid')
+    current = cfg.worktrees_root
+    for part in relative:
+        current = current + '/' + part
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            raise Refusal('worktree_missing')
+        except OSError:
+            raise Refusal('worktree_missing')
+        if stat.S_ISLNK(st.st_mode):
+            raise Refusal('worktree_symlink')
+        if not stat.S_ISDIR(st.st_mode):
+            raise Refusal('worktree_missing')
+    try:
+        if os.path.realpath(path, strict=True) != path:
+            raise Refusal('worktree_symlink')
+    except OSError:
+        raise Refusal('worktree_missing')
+    if st.st_uid != cfg.runner_uid:
+        raise Refusal('worktree_bad_owner')
+    # A linked worktree has a .git FILE pointing at the repository (worktrees.mjs).
+    try:
+        git_link = os.lstat(path + '/.git')
+    except OSError:
+        raise Refusal('worktree_not_linked')
+    if not stat.S_ISREG(git_link.st_mode):
+        raise Refusal('worktree_not_linked')
+    return path
+
+
+def validate_request(data, dispatch_id, cfg):
+    try:
+        document = strict_json(data)
+    except (ValueError, UnicodeDecodeError):
+        raise Refusal('malformed_json')
+    if not isinstance(document, dict) or set(document) != REQUEST_KEYS:
+        # Missing keys and extra keys (argv, unit properties, environment...) alike.
+        raise Refusal('invalid_schema')
+    if not is_int(document['version']) or document['version'] != SPOOL_VERSION:
+        raise Refusal('unsupported_version')
+    if document['id'] != dispatch_id:
+        raise Refusal('id_mismatch')
+    job_id = document['job_id']
+    if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
+        raise Refusal('invalid_job_id')
+    recipe = document['recipe']
+    if not isinstance(recipe, str) or not cfg.recipes.get(recipe):
+        raise Refusal('recipe_not_allowed')
+    timeout = document['timeout_seconds']
+    if not is_int(timeout) or not 1 <= timeout <= cfg.max_timeout:
+        raise Refusal('invalid_timeout')
+    worktree = validate_worktree(document['worktree'], cfg)
+    return {
+        'id': dispatch_id,
+        'job_id': job_id,
+        'recipe': recipe,
+        'allowed_argv': sorted(list(shape) for shape in cfg.recipes[recipe]),
+        'worktree': worktree,
+        'timeout_seconds': timeout,
+    }
+
+
+def parse_cancel(data, dispatch_id):
+    if not data.strip():
+        return 'cancelled'
+    try:
+        document = strict_json(data)
+    except (ValueError, UnicodeDecodeError):
+        raise Refusal('malformed_json')
+    if not isinstance(document, dict) or set(document) != CANCEL_KEYS:
+        raise Refusal('invalid_schema')
+    if not is_int(document['version']) or document['version'] != SPOOL_VERSION:
+        raise Refusal('unsupported_version')
+    if document['id'] != dispatch_id:
+        raise Refusal('id_mismatch')
+    if document['reason'] not in CANCEL_REASONS:
+        raise Refusal('invalid_reason')
+    return document['reason']
+
+
+# ------------------------------------------------------------------------------------------
+# Job folder and drop-in.
+
+def job_dir(state, dispatch_id, create, with_out=False):
+    """Open jobs/<id> (root:memo-runner 0751). 0751 lets memo-job reach out/ by its exact
+    path without listing jobs/<id>; status.json, dispatch.json and cancel.json stay 0640."""
+    cfg = state.cfg
+    if create:
+        try:
+            os.mkdir(dispatch_id, 0o751, dir_fd=state.jobs_fd)
+        except FileExistsError:
+            pass
+    try:
+        fd = os.open(dispatch_id, O_DIR, dir_fd=state.jobs_fd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise Refusal('job_dir_untrusted')
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid():
+        os.close(fd)
+        raise Refusal('job_dir_untrusted')
+    if create:
+        os.fchown(fd, os.geteuid(), cfg.runner_gid)
+        os.fchmod(fd, 0o751)
+    if with_out:
+        try:
+            os.mkdir('out', 0o750, dir_fd=fd)
+        except FileExistsError:
+            pass
+        try:
+            out_fd = os.open('out', O_DIR, dir_fd=fd)
+        except OSError:
+            os.close(fd)
+            raise Refusal('job_dir_untrusted')
+        try:
+            out_st = os.fstat(out_fd)
+            if out_st.st_uid not in (os.geteuid(), cfg.job_uid):
+                raise Refusal('job_dir_untrusted')
+            os.fchown(out_fd, cfg.job_uid, cfg.runner_gid)
+            os.fchmod(out_fd, 0o750)
+        except BaseException:
+            os.close(fd)
+            raise
+        finally:
+            os.close(out_fd)
+    return fd
+
+
+def dropin_path(cfg, dispatch_id):
+    return f'{cfg.dropin_dir}/{unit_name(dispatch_id)}.d/{DROPIN_NAME}'
+
+
+def dropin_text(cfg, request):
+    dispatch_id = request['id']
+    out = f'{cfg.root}/jobs/{dispatch_id}/out'
+    worktree = request['worktree']
+    # "npm:test,python3:-m:pytest:-q": tokens joined by ':', shapes by ','. No token contains
+    # either character (checked below).
+    allowed = ','.join(':'.join(shape) for shape in request['allowed_argv'])
+    env = [
+        f'MEMO_JOB_ID={request["job_id"]}',
+        f'MEMO_JOB_DISPATCH_ID={dispatch_id}',
+        f'MEMO_JOB_RECIPE={request["recipe"]}',
+        f'MEMO_JOB_ALLOWED_ARGV={allowed}',
+        f'MEMO_JOB_WORKTREE={worktree}',
+        f'MEMO_JOB_OUT={out}',
+        f'MEMO_JOB_TIMEOUT_SECONDS={request["timeout_seconds"]}',
+    ]
+    tokens = [token for shape in request['allowed_argv'] for token in shape]
+    values = [dispatch_id, request['job_id'], request['recipe'], worktree, out, *tokens]
+    if not all(UNIT_VALUE_RE.fullmatch(value) for value in values) \
+            or any(':' in token or ',' in token for token in tokens):
+        # Unreachable after validation; refuse rather than write something systemd would parse
+        # differently (specifiers, quotes, whitespace).
+        raise Refusal('unsafe_unit_value')
+    return (
+        f'# Written by {PROG} for {unit_name(dispatch_id)}; removed by record-result.\n'
+        '# Every value below was validated by the dispatcher (spool request + runner.json).\n'
+        '[Service]\n'
+        f'WorkingDirectory={worktree}\n'
+        f'ReadWritePaths={worktree} {out}\n'
+        f'RuntimeMaxSec={request["timeout_seconds"]}\n'
+        f'Environment={" ".join(env)}\n'
+    )
+
+
+def write_dropin(state, request):
+    cfg = state.cfg
+    directory = unit_name(request['id']) + '.d'
+    try:
+        os.mkdir(directory, 0o755, dir_fd=state.dropin_fd)
+    except FileExistsError:
+        pass
+    fd = os.open(directory, O_DIR, dir_fd=state.dropin_fd)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+            raise Refusal('dropin_dir_untrusted')
+        os.fchmod(fd, 0o755)
+        write_bytes_atomic(fd, DROPIN_NAME, dropin_text(cfg, request).encode('ascii'),
+                           os.geteuid(), os.getegid(), 0o644)
+    finally:
+        os.close(fd)
+
+
+def remove_dropin(dropin_fd, dispatch_id):
+    directory = unit_name(dispatch_id) + '.d'
+    try:
+        fd = os.open(directory, O_DIR, dir_fd=dropin_fd)
+    except OSError:
+        return
+    try:
+        os.unlink(DROPIN_NAME, dir_fd=fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+    try:
+        os.rmdir(directory, dir_fd=dropin_fd)
+    except OSError:
+        pass
+
+
+def dropin_loaded(cfg, dispatch_id):
+    code, out = run_systemctl(cfg, 'show', '--property=DropInPaths', '--value', unit_name(dispatch_id))
+    return code == 0 and dropin_path(cfg, dispatch_id) in out.split()
+
+
+# ------------------------------------------------------------------------------------------
+# Processing.
+
+class State:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.started_this_run = False
+        self.started = 0
+        self.refused = 0
+        self.cancelled = 0
+
+
+def write_record(state, dispatch_id, name, document, create_out=False):
+    fd = job_dir(state, dispatch_id, create=True, with_out=create_out)
+    try:
+        write_json_atomic(fd, name, document, os.geteuid(), state.cfg.runner_gid)
+    finally:
+        os.close(fd)
+
+
+def write_refusal_status(state, dispatch_id, job_id, reason):
+    """The end of a job that never got a unit, in the shape record-result uses, so the
+    executor settles it (service_result "dispatch_refused")."""
+    write_record(state, dispatch_id, 'status.json', {
+        'version': SPOOL_VERSION, 'id': dispatch_id, 'job_id': job_id, 'unit': None,
+        'service_result': DISPATCH_REFUSED, 'exit_code': None, 'exit_status': None,
+        'status': 'cancelled' if reason == 'cancelled_before_start' else 'failed', 'reason': reason,
+        'cancel_reason': None, 'invocation_id': None, 'started_at': None, 'ended_at': now_iso(),
+    })
+
+
+def previous_dispatch(state, dispatch_id):
+    fd = job_dir(state, dispatch_id, create=False)
+    if fd is None:
+        return None
+    try:
+        return read_trusted_file('dispatch.json', fd, MAX_RECORD_BYTES)
+    finally:
+        os.close(fd)
+
+
+def refuse(state, dispatch_id, reason, kind, job_id=None):
+    state.refused += 1
+    log('warning', 'dispatch_refused', kind=kind, id=dispatch_id if dispatch_id else 'invalid', reason=reason)
+    if dispatch_id is None:
+        return
+    try:
+        previous = previous_dispatch(state, dispatch_id)
+        if previous and previous.get('outcome') in DISPATCHED_OUTCOMES:
+            # Never overwrite the records of a unit that may exist.
+            return
+        write_record(state, dispatch_id, 'dispatch.json', {
+            'version': SPOOL_VERSION, 'id': dispatch_id, 'job_id': job_id, 'outcome': 'refused',
+            'error': DISPATCH_REFUSED, 'reason': reason, 'at': now_iso(),
+        })
+        write_refusal_status(state, dispatch_id, job_id, reason)
+    except (OSError, Refusal):
+        log('err', 'dispatch_record_failed', id=dispatch_id)
+
+
+def process_cancel(state, name):
+    cfg = state.cfg
+    if not DISPATCH_ID_RE.fullmatch(name):
+        refuse(state, None, 'invalid_name', 'cancel')
+        return
+    dispatch_id = name
+    try:
+        reason = parse_cancel(read_spool_entry(state.cancel_fd, name, cfg.runner_uid, MAX_CANCEL_BYTES), dispatch_id)
+    except Refusal as refusal:
+        log('warning', 'dispatch_refused', kind='cancel', id=dispatch_id, reason=refusal.reason)
+        state.refused += 1
+        return
+    queued = os.path.lexists(f'{cfg.root}/spool/queue/{dispatch_id}.json')
+    fd = job_dir(state, dispatch_id, create=False)
+    if fd is None:
+        if not queued:
+            # The dispatcher never saw this id, so no unit of it can exist.
+            log('notice', 'cancel_unknown_job', id=dispatch_id)
+            return
+        fd = job_dir(state, dispatch_id, create=True)
+    try:
+        previous = read_trusted_file('dispatch.json', fd, MAX_RECORD_BYTES)
+        if read_trusted_file('cancel.json', fd, MAX_RECORD_BYTES) is None:
+            write_json_atomic(fd, 'cancel.json', {
+                'version': SPOOL_VERSION, 'id': dispatch_id, 'reason': reason, 'requested_at': now_iso(),
+            }, os.geteuid(), cfg.runner_gid)
+    finally:
+        os.close(fd)
+    outcome = previous.get('outcome') if previous else None
+    if outcome not in ('starting', 'started'):
+        # Not started: drop a pending start request so it never runs.
+        remove_entry(state.queue_fd, f'{dispatch_id}.json')
+        if outcome != 'cancelled_before_start' and (queued or outcome is None):
+            job_id = previous.get('job_id') if previous else None
+            write_record(state, dispatch_id, 'dispatch.json', {
+                'version': SPOOL_VERSION, 'id': dispatch_id, 'job_id': job_id,
+                'outcome': 'cancelled_before_start', 'reason': reason, 'at': now_iso(),
+            })
+            write_refusal_status(state, dispatch_id, job_id, 'cancelled_before_start')
+        state.cancelled += 1
+        log('notice', 'job_cancelled_before_start', id=dispatch_id, reason=reason)
+        return
+    code, _ = run_systemctl(cfg, 'stop', '--no-block', unit_name(dispatch_id))
+    state.cancelled += 1
+    log('notice' if code == 0 else 'err', 'job_stop_requested', id=dispatch_id, reason=reason,
+        rc=code if code is not None else 'timeout')
+
+
+def process_request(state, name):
+    cfg = state.cfg
+    match = QUEUE_NAME_RE.fullmatch(name)
+    if not match:
+        refuse(state, None, 'invalid_name', 'start')
+        return
+    dispatch_id = match.group(1)
+    try:
+        data = read_spool_entry(state.queue_fd, name, cfg.runner_uid, MAX_REQUEST_BYTES)
+        request = validate_request(data, dispatch_id, cfg)
+    except Refusal as refusal:
+        refuse(state, dispatch_id, refusal.reason, 'start')
+        return
+    job_id = request['job_id']
+
+    previous = previous_dispatch(state, dispatch_id)
+    if previous and previous.get('outcome') in DISPATCHED_OUTCOMES:
+        # Idempotency: a retried request never starts a second unit.
+        refuse(state, dispatch_id, 'already_dispatched', 'start', job_id)
+        return
+    try:
+        if state.started_this_run:
+            raise Refusal('host_busy')
+        if busy_units(cfg):
+            raise Refusal('host_busy')
+    except Refusal as refusal:
+        refuse(state, dispatch_id, refusal.reason, 'start', job_id)
+        return
+
+    unit = unit_name(dispatch_id)
+    record = {'version': SPOOL_VERSION, 'id': dispatch_id, 'job_id': job_id, 'unit': unit,
+              'recipe': request['recipe'], 'allowed_argv': request['allowed_argv'],
+              'worktree': request['worktree'], 'timeout_seconds': request['timeout_seconds'], 'at': now_iso()}
+
+    def refused(reason, level='warning', **fields):
+        remove_dropin(state.dropin_fd, dispatch_id)
+        write_record(state, dispatch_id, 'dispatch.json', dict(record, outcome='refused', error=DISPATCH_REFUSED,
+                                                               reason=reason, at=now_iso()))
+        write_refusal_status(state, dispatch_id, job_id, reason)
+        state.refused += 1
+        log(level, 'dispatch_refused', kind='start', id=dispatch_id, reason=reason, **fields)
+
+    try:
+        write_record(state, dispatch_id, 'dispatch.json', dict(record, outcome='starting'), create_out=True)
+        # A refusal recorded by an earlier attempt must not end the job this one starts.
+        fd = job_dir(state, dispatch_id, create=False)
+        try:
+            os.unlink('status.json', dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(fd)
+        write_dropin(state, request)
+        if not dropin_loaded(cfg, dispatch_id):
+            run_systemctl(cfg, 'daemon-reload', timeout=120)
+            if not dropin_loaded(cfg, dispatch_id):
+                raise Refusal('dropin_not_loaded')
+    except (Refusal, OSError) as error:
+        refused(error.reason if isinstance(error, Refusal) else 'prepare_failed')
+        return
+
+    code, _ = run_systemctl(cfg, 'start', '--no-block', unit)
+    if code != 0:
+        refused('start_failed', level='err', rc=code if code is not None else 'timeout')
+        return
+    state.started_this_run = True
+    state.started += 1
+    write_record(state, dispatch_id, 'dispatch.json', dict(record, outcome='started', at=now_iso()))
+    log('notice', 'job_started', id=dispatch_id, job_id=job_id, unit=unit, recipe=request['recipe'],
+        timeout_seconds=request['timeout_seconds'])
+
+
+def open_layout(state):
+    cfg = state.cfg
+    me = {os.geteuid()}
+    runner = {cfg.runner_uid}
+    state.root_fd = open_dir(cfg.root, owners=me, what='root')
+    state.spool_fd = open_dir('spool', state.root_fd, owners=me | runner, what='spool')
+    state.queue_fd = open_dir('queue', state.spool_fd, owners=runner, what='spool_queue')
+    state.cancel_fd = open_dir('cancel', state.spool_fd, owners=runner, what='spool_cancel')
+    state.jobs_fd = open_dir('jobs', state.root_fd, owners=me, what='jobs')
+    state.dropin_fd = open_dir(cfg.dropin_dir, owners=me, what='dropin_dir')
+
+
+def ensure_lock_dir(path):
+    """Create the lock's folder (0700, owned by us) when the unit has no RuntimeDirectory=.
+    An existing folder must be a real directory owned by us and closed to others."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        raise ConfigError('lock_unavailable')
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise ConfigError('lock_unavailable')
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        raise ConfigError('lock_unavailable')
+
+
+def acquire_lock(cfg):
+    ensure_lock_dir(os.path.dirname(cfg.lock_path))
+    try:
+        fd = os.open(cfg.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        raise ConfigError('lock_unavailable')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(fd)
+        if error.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            return None
+        raise ConfigError('lock_unavailable')
+    return fd
+
+
+def dispatch(cfg):
+    lock_fd = acquire_lock(cfg)
+    if lock_fd is None:
+        log('info', 'dispatch_already_running')
+        return 0
+    state = State(cfg)
+    try:
+        open_layout(state)
+        # Cancels first, so a cancel that races its own start request wins.
+        cancels, pending_cancels = list_entries(state.cancel_fd)
+        for name in cancels:
+            # One bad entry must not keep the others (or itself, forever) in the spool.
+            try:
+                process_cancel(state, name)
+            except Exception as error:  # noqa: BLE001
+                log('err', 'cancel_failed', id=name if DISPATCH_ID_RE.fullmatch(name) else 'invalid',
+                    reason=getattr(error, 'reason', type(error).__name__))
+            remove_entry(state.cancel_fd, name)
+        requests, pending_requests = list_entries(state.queue_fd)
+        for name in requests:
+            try:
+                process_request(state, name)
+            except Exception as error:  # noqa: BLE001
+                log('err', 'dispatch_failed', reason=getattr(error, 'reason', type(error).__name__))
+            remove_entry(state.queue_fd, name)
+        if pending_cancels or pending_requests:
+            wait_for_renames(state)
+        log('info', 'dispatch_done', started=state.started, refused=state.refused,
+            cancelled=state.cancelled, pending=pending_cancels + pending_requests)
+        return 0
+    finally:
+        os.close(lock_fd)
+
+
+# ------------------------------------------------------------------------------------------
+# --status: read-only.
+
+def count_entries(path):
+    try:
+        return sum(1 for entry in os.scandir(path) if not TEMP_NAME_RE.fullmatch(entry.name))
+    except OSError:
+        return None
+
+
+def latest_record(jobs_path, name):
+    best = None
+    try:
+        with os.scandir(jobs_path) as entries:
+            for index, entry in enumerate(entries):
+                if index >= MAX_STATUS_SCAN:
+                    break
+                if not DISPATCH_ID_RE.fullmatch(entry.name) or not entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    st = os.lstat(f'{jobs_path}/{entry.name}/{name}')
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and (best is None or st.st_mtime_ns > best[0]):
+                    best = (st.st_mtime_ns, entry.name)
+    except OSError:
+        return None
+    if best is None:
+        return None
+    try:
+        fd = os.open(f'{jobs_path}/{best[1]}', O_DIR)
+    except OSError:
+        return None
+    try:
+        return read_trusted_file(name, fd, MAX_RECORD_BYTES)
+    finally:
+        os.close(fd)
+
+
+def status(cfg):
+    report = {'checked_at': now_iso(), 'root': cfg.root}
+    report['queue_depth'] = count_entries(f'{cfg.root}/spool/queue')
+    report['cancel_pending'] = count_entries(f'{cfg.root}/spool/cancel')
+    try:
+        report['active_units'] = busy_units(cfg)
+        report['systemctl_ok'] = True
+    except Refusal:
+        report['active_units'] = None
+        report['systemctl_ok'] = False
+    try:
+        vfs = os.statvfs(cfg.root)
+        report['free_disk_bytes'] = vfs.f_bavail * vfs.f_frsize
+    except OSError:
+        report['free_disk_bytes'] = None
+    jobs_path = f'{cfg.root}/jobs'
+    last = latest_record(jobs_path, 'status.json')
+    report['last_result'] = None if last is None else {
+        key: last.get(key) for key in ('id', 'job_id', 'status', 'reason', 'service_result', 'exit_status', 'ended_at')
+    }
+    dispatched = latest_record(jobs_path, 'dispatch.json')
+    report['last_dispatch'] = None if dispatched is None else {
+        key: dispatched.get(key) for key in ('id', 'job_id', 'outcome', 'reason', 'recipe', 'at')
+    }
+    sys.stdout.write(json.dumps(report, sort_keys=True, indent=2) + '\n')
+    return 0 if report['systemctl_ok'] else 1
+
+
+# ------------------------------------------------------------------------------------------
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog=PROG, allow_abbrev=False,
+                                     description='Start or stop memo-job@<id>.service from the memo-runner spool.')
+    parser.add_argument('--config', default=DEFAULT_CONFIG, help='runner.json (root-owned)')
+    parser.add_argument('--systemctl', default=None, help='systemctl binary (default: from PATH)')
+    parser.add_argument('--status', action='store_true', help='print a JSON summary and change nothing')
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        cfg = load_config(args.config)
+        cfg.systemctl = resolve_systemctl(args.systemctl)
+        if args.status:
+            return status(cfg)
+        return dispatch(cfg)
+    except ConfigError as error:
+        log('err', 'dispatch_config_error', reason=str(error))
+        return 2
+    except Exception as error:  # noqa: BLE001 - last resort, journaled without details
+        log('err', 'dispatch_internal_error', reason=type(error).__name__)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
