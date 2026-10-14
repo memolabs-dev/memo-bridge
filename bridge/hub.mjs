@@ -38,7 +38,7 @@ import { classifyCall, dangerReason, needsApproval, readOnlyCommand } from './op
 import { createGrantStore } from './operator-grants.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
-import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview, operatorTargets } from './operator-locks.mjs';
+import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
 import { HUB_OPERATOR_TOOLS } from '../server/tools/operator-repatriated.mjs';
 import { operatorHelp } from './operator-help.mjs';
 import { createTransfers } from './operator-transfer.mjs';
@@ -385,7 +385,7 @@ export function createHub(options) {
         while (sessionWorkspaces.size > 256) sessionWorkspaces.delete(sessionWorkspaces.keys().next().value);
       }
     }
-    const targets = operatorTargets(op, { ...args, host }, { homes: operator?.homes ?? DEFAULT_HOMES });
+    const targets = locks.targetsOf(op, { ...args, host });
     if (targets.error) return { ok: false, error: targets.error };
     if (targets.unknownUpload) return { ok: false, error: 'lock_required', next_step: 'start the upload again with operator_upload_init' };
     const ttlMs = ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 120) * 1000;

@@ -330,7 +330,9 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
       locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
   }
 
-  return Object.freeze({ handle, check, acquireImplicit, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
+  // What one call touches, with the uploads this table knows (implicit locks, D-R14).
+  const targetsOf = (op, args) => operatorTargets(op, args, { homes, uploads });
+  return Object.freeze({ handle, check, acquireImplicit, targetsOf, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
 }
 
 // Merge the hub's view into a sessions_overview answer of the runtime.
