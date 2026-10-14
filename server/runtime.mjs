@@ -16,6 +16,7 @@ import { CAPABILITIES, CLIENT_TYPES, WRITE_CAPABILITIES, authorize, hubGrantsFro
   makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
+import { createProjectSync } from './integrations/project-sync.mjs';
 
 export function currentHost() {
   return platform() === 'darwin' ? 'mac' : 'vps';
@@ -46,7 +47,8 @@ export function gateRemotePrincipal(p, policy) {
 }
 
 export function createRuntime({ stateDir = defaultStateDir(), principal = localOwnerPrincipal(), ledger, now = Date.now,
-  catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env, remotePolicy } = {}) {
+  catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env, remotePolicy,
+  projectSync } = {}) {
   let store;
   const coordinators = new Map();
   const views = new Map();
@@ -59,10 +61,14 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const sharedLedger = ledger ?? createIssueLeaseClient({ env, scratchDir: join(stateDir, 'ledger-gh') });
 
   const openStore = () => { store ??= openSqliteStore({ dir: stateDir }); return store; };
+  // One GitHub Projects sync per runtime, shared by every principal's coordinator and by
+  // github_create_pr; disabled unless MEMO_BRIDGE_PROJECT is set in this runtime's env.
+  let sync = projectSync ?? null;
+  const projectSyncOf = () => { sync ??= createProjectSync({ env }); return sync; };
   const coordinatorFor = p => {
     if (!coordinators.has(p)) {
       coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host,
-        remotePolicy: policy(),
+        remotePolicy: policy(), projectSync: projectSyncOf(),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
     }
     return coordinators.get(p);
@@ -90,6 +96,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
     remotePolicy: policy,
     store: openStore,
     ledger: sharedLedger,
+    projectSync: projectSyncOf,
     coordinator: () => coordinatorFor(principal),
     authorize: op => authorize(principal, op),
     audit: auditAs(principal),

@@ -274,7 +274,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
   readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = query => ghSearchIssues(query),
-  remotePolicy = remotePolicyFromEnv(), github = null }) {
+  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
   // Where the call came from and which client made it, as the server set them on the principal
@@ -299,6 +299,11 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   };
   // One extra journal row (session checks, rebinds); never throws.
   const note = (op, outcome, code, ids, meta) => store.transaction(repo => audit(repo, op, outcome, code, ids, meta)).catch(() => {});
+  // GitHub Projects view (server/integrations/project-sync.mjs): fire and forget, never
+  // awaited, so it can neither fail nor slow an operation. A failure is one journal row,
+  // project_sync_failed with a short code.
+  const sync = projectSync?.enabled ? projectSync : null;
+  const syncing = (ids, meta) => ({ onFailure: code => note('project_sync_failed', 'error', code, ids, meta) });
   const read = fn => store.transaction(repo => fn(repo, now()), { write: false });
   const write = fn => store.transaction(repo => fn(repo, now()));
 
@@ -367,7 +372,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     return stopped.map(j => j.job_id);
   }
 
-  async function releaseHeld(args, outcome, summary) {
+  async function releaseHeld(args, outcome, summary, meta = null) {
     const held = await heldClaim(args, { requireActive: false });
     if (held.error) return held.error;
     if (held.claim.state === 'released') {
@@ -385,6 +390,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     await write((repo, at) => repo.updateClaim(args.claim_id, { state: 'released', outcome: encodeOutcome(outcome, summary),
       fence_sha: fence ?? held.claim.fence_sha, updated_at: at }, held.claim.fence_sha));
     const cancelled = await cancelJobs(held.workspace.id, held.issue.ref);
+    void sync?.taskReleased({ issue: held.issue.ref, outcome }, syncing({ workspace_id: held.workspace.id, issue: held.issue.ref }, meta));
     return { ok: true, issue: held.issue.ref, released: true, outcome, ...(summary ? { summary } : {}),
       ...(cancelled.length ? { cancelled_jobs: cancelled } : {}) };
   }
@@ -552,7 +558,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     // Closing releases this workspace's claims in the ledger (outcome cancelled). It is safe
     // to call again: a closed workspace still releases any claim left recorded as held, for
     // example when the ledger was unreachable the first time.
-    async workspaceClose(args) {
+    async workspaceClose(args, meta) {
       const ws = await ownedWorkspace(args.workspace_id, { requireActive: false });
       if (ws.error) return ws.error;
       // Close first, so no new claim can be recorded for this workspace from now on, and cancel
@@ -571,6 +577,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
           outcome: outcome.state === 'released' ? 'cancelled' : 'lost', fence_sha: outcome.fence ?? claim.fence_sha, updated_at: at },
         claim.fence_sha));
         (outcome.state === 'released' ? released : lost).push(claim.issue_ref);
+        if (outcome.state === 'released') {
+          void sync?.taskReleased({ issue: claim.issue_ref, outcome: 'cancelled' },
+            syncing({ workspace_id: ws.workspace.id, issue: claim.issue_ref }, meta));
+        }
       }
       const workspace = await read(repo => repo.getWorkspace(ws.workspace.id));
       return { ok: true, workspace: publicWorkspace(workspace), released, lost, unreleased,
@@ -669,7 +679,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       return { ok: true, issue: issue.ref, lease: lease.receipt, checkpoints: checkpoints.map(publicCheckpoint) };
     },
 
-    async taskClaim(args) {
+    async taskClaim(args, meta) {
       const issue = parseIssueRef(args.issue);
       if (!issue) return fail('invalid_input', 'issue');
       const ttl = ttlOf(args.ttl_seconds);
@@ -715,6 +725,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         return fail(recorded === false ? 'workspace_closed' : 'store_unavailable',
           back.ok ? 'claim released' : `claim may remain until ${receipt.expires_at}`);
       }
+      // Also covers task_next and the takeover of an expired lease: the new holder is Réservé.
+      void sync?.taskClaimed({ issue: issue.ref, clientType: ws.workspace.client_type },
+        syncing({ workspace_id: ws.workspace.id, issue: issue.ref }, meta));
       return { ok: true, issue: issue.ref, worker, claim_id: receipt.claim_id, fence: receipt.fence_sha, epoch: receipt.epoch,
         expires_at: receipt.expires_at, project_origin_verified: Boolean(origin), ...(recovered ? { recovered: true } : {}) };
     },
@@ -741,16 +754,16 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       return { ok: true, issue: held.issue.ref, claim_id: args.claim_id, fence: r.fence_sha, expires_at: r.expires_at };
     },
 
-    async taskRelease(args) {
+    async taskRelease(args, meta) {
       if (!OUTCOMES.includes(args.outcome)) return fail('invalid_input', 'outcome');
-      return releaseHeld(args, args.outcome, null);
+      return releaseHeld(args, args.outcome, null, meta);
     },
 
     // task_release with outcome completed and an optional summary kept with the claim.
-    async taskComplete(args) {
+    async taskComplete(args, meta) {
       const summary = cleanText(args.summary, SUMMARY_MAX, { multiline: true });
       if (summary === undefined) return fail('invalid_input', 'summary');
-      return releaseHeld(args, 'completed', summary);
+      return releaseHeld(args, 'completed', summary, meta);
     },
 
     // The checkpoint is a write boundary: the ledger verifies the fence immediately before it.
@@ -787,7 +800,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     // Create up to BATCH_MAX Issues labelled agent:ready, priority:<p> and agent:batch-<id>.
     // Stops at the first failure and reports what exists: the answer is ok either way (a
     // retry with the same client_request_id replays it and never creates duplicates).
-    async batchCreate(args) {
+    async batchCreate(args, meta) {
       const checked = validateBatchTasks(args.tasks);
       if (checked.error) return fail('invalid_input', checked.error);
       const name = batchLabelText(args.name);
@@ -810,6 +823,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         const missing = labels.filter(l => !(r.issue.labels ?? []).includes(l));
         created.push({ issue: `${target.repo.full}#${r.issue.number}`, number: r.issue.number, title: r.issue.title,
           url: r.issue.url, priority: task.priority, ...(missing.length ? { missing_labels: missing } : {}) });
+        void sync?.taskCreated({ issue: `${target.repo.full}#${r.issue.number}`, priority: task.priority, batch, name },
+          syncing({ issue: `${target.repo.full}#${r.issue.number}` }, meta));
         if (missing.length) { failure = { index: created.length - 1, error: 'labels_dropped' }; break; }
       }
       return { ok: true, batch, label, project: target.project, repo: target.repo.full, count: created.length, tasks: created,
@@ -864,7 +879,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     },
 
     // Per task: state, holder, pull requests; counts and stale leases. Reads only.
-    async batchStatus(args) {
+    async batchStatus(args, meta) {
       if (!BATCH_ID_RE.test(args.batch ?? '')) return fail('invalid_input', 'batch');
       const target = await batchRepo(args.project);
       if (!target.ok) return target;
@@ -901,9 +916,17 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const counts = Object.fromEntries(TASK_STATES.map(s => [s, tasks.filter(t => t.state === s).length]).filter(([, n]) => n));
       const stale = tasks.filter(t => t.state === 'stale').map(t => ({ issue: t.issue, worker: t.holder?.worker ?? null,
         expired_at: t.holder?.expires_at ?? null }));
+      // An expired lease can be taken over by anyone: the board shows the task as Prêt again.
+      // Only a principal that may write moves the board; a read-only caller just reads.
+      if (sync && principal.capabilities.has(CAPABILITIES.WRITE)) {
+        for (const t of stale) {
+          void sync.taskStale({ issue: t.issue, lease: `${t.worker ?? ''}@${t.expired_at ?? ''}` }, syncing({ issue: t.issue }, meta));
+        }
+      }
       return { ok: true, batch: args.batch, project: target.project, repo: target.repo.full, total: tasks.length, counts,
         stale_leases: stale, tasks, ...(pulls.ok ? {} : { pull_requests_error: pulls.error }),
-        truncated: listed.issues.length >= BATCH_SCAN };
+        truncated: listed.issues.length >= BATCH_SCAN,
+        ...(sync ? { project_url: sync.url() } : projectSync?.error ? { project_sync_error: projectSync.error } : {}) };
     }
   });
 

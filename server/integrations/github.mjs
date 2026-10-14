@@ -107,6 +107,36 @@ function ghFailure(out) {
   return fail('github_unavailable', detail ?? `exit ${out.code}`);
 }
 
+// The `type` of a GraphQL error object mapped to the same short codes as REST failures; an
+// unknown type is github_graphql_error.
+const GRAPHQL_ERRORS = [
+  [/^NOT_FOUND$/, 'github_not_found'],
+  [/^INSUFFICIENT_SCOPES$/, 'github_scope_missing'],
+  [/^FORBIDDEN$/, 'github_forbidden'],
+  [/^RATE_LIMITED$/, 'github_rate_limited'],
+  [/^(UNPROCESSABLE|ARGUMENT_ERROR)$/, 'github_validation_failed']
+];
+
+// One GraphQL request through `gh api graphql --input -` (body {query, variables}), under the
+// operator's gh login like every other call here. Returns {ok, data} or {ok: false, error}
+// with a short code; GitHub's messages are not returned, so nothing they echo can be logged.
+// gh prints the response on stdout and exits non-zero when it carries `errors`.
+export async function ghGraphql(query, variables = {}, { gh = runGh, timeoutMs = 15_000 } = {}) {
+  const out = await gh(['api', 'graphql', '--input', '-'], { input: JSON.stringify({ query, variables }), timeoutMs,
+    maxBytes: 1024 * 1024 });
+  if (out.spawnFailed || out.timedOut || out.overflow) return { ok: false, error: ghFailure(out).error };
+  let doc = null;
+  try { doc = JSON.parse(out.stdout); } catch { /* not JSON */ }
+  const errors = Array.isArray(doc?.errors) ? doc.errors : [];
+  if (errors.length) {
+    const type = String(errors[0]?.type ?? '');
+    return { ok: false, error: GRAPHQL_ERRORS.find(([rx]) => rx.test(type))?.[1] ?? 'github_graphql_error' };
+  }
+  if (out.code !== 0) return { ok: false, error: ghFailure(out).error };
+  if (!doc || typeof doc.data !== 'object' || doc.data === null) return { ok: false, error: 'github_unavailable' };
+  return { ok: true, data: doc.data };
+}
+
 // Registered repositories: the GitHub origin of every available repo project of PROJECTS.md.
 async function catalogRepos(catalogOptions) {
   const catalog = await readProjectRegistry(catalogOptions);
