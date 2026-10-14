@@ -31,6 +31,8 @@ export const OPERATION_CAPABILITY = Object.freeze({
   workspace_status: CAPABILITIES.READ,
   workspace_list: CAPABILITIES.READ,
   workspace_recover: CAPABILITIES.READ,
+  // Every conversation's workspace, task and operator locks (multi-session D-MS1)
+  sessions_overview: CAPABILITIES.READ,
   // Tasks (GitHub Issues + lease ledger)
   tasks_list: CAPABILITIES.READ,
   task_status: CAPABILITIES.READ,

@@ -13,7 +13,7 @@ import { BATCH_MAX, BATCH_PRIORITIES, TASK_TEXT } from '../coordinator/batches.m
 
 export const COORDINATOR_TOOLS = Object.freeze(['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close',
   'workspace_recover', 'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete',
-  'task_checkpoint', 'batch_create', 'task_next', 'batch_status']);
+  'task_checkpoint', 'batch_create', 'task_next', 'batch_status', 'sessions_overview']);
 
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
@@ -153,10 +153,18 @@ export function registerCoordinatorTools(server, getService) {
   }, call('batchCreate'));
 
   server.registerTool('task_next', {
-    description: 'Take the next task of a batch: claims, through the lease ledger, the first ready task of the batch that nobody holds, for your workspace (opened with workspace_open on the batch project). If another conversation wins a task first, the next one is tried. Returns the task (Issue, title, scope, acceptance), claim_id, fence, expiry and the steps to follow; a workspace that already holds a task of the batch gets that task back. {done:true} when no task is left.',
-    inputSchema: z.object({ workspace_id: workspaceId, batch: batchId, ttl_seconds: ttl, client_request_id: clientRequestId }),
+    description: 'Take the next task nobody holds and claim it for your workspace through the lease ledger. Without batch: the agent:ready backlog of every allowed project (or of project), p0 first, then oldest; if the task is in another project, your workspace moves there (only while it holds no task and no worktree). With batch: the next task of that batch, in the workspace project. If another conversation wins a task first, the next one is tried. Returns the task (Issue, title, scope, acceptance), claim_id, fence, expiry, the steps, and brief: your task, the other conversations on the project and the rules. A workspace that already holds a task gets it back (already_held). {done:true} when nothing is left. The only way to take work besides task_claim on an Issue the owner named.',
+    inputSchema: z.object({ workspace_id: workspaceId, batch: batchId.optional(),
+      project: z.string().max(80).optional().describe('Without batch: only this project (projects_list).'),
+      ttl_seconds: ttl, client_request_id: clientRequestId }),
     annotations: { ...write, idempotentHint: true }
   }, call('taskNext'));
+
+  server.registerTool('sessions_overview', {
+    description: 'Call at the start of every conversation and before taking work. Lists every active workspace of this owner across all conversations (at most 20, newest first): workspace id, client, session tag (a short label of the conversation, you: true for yours), project, held task and its lease (held or expired, local view), last activity, and the operator locks each one holds. Read-only and cheap.',
+    inputSchema: z.object({ workspace_id: workspaceId.optional().describe('Your workspace, to mark it as you when the conversation has no session tag.') }),
+    annotations: { ...read, openWorldHint: false }
+  }, call('sessionsOverview'));
 
   server.registerTool('batch_status', {
     description: 'Progress of a batch: for each task its state (ready, claimed, stale, blocked, done, closed, not_ready, unknown), who holds it (worker, workspace, client) and until when, linked pull requests, then counts per state and the stale leases (claimed but expired). Read-only for Memo Bridge; when the GitHub Projects view is on (MEMO_BRIDGE_PROJECT), also returns project_url and shows stale tasks as Prêt there.',
