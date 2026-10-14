@@ -127,6 +127,30 @@ Every result is `{ ok: true, ... }` or `{ ok: false, error, detail? }`.
 
 Memo Bridge never fetches, pushes or writes to the repository. Uncommitted files are never transferred.
 
+## GitHub Projects view (optional)
+
+The Coordinator can mirror its tasks onto a GitHub Projects (v2) board, for example the org project "Memo Labs OS" (`https://github.com/orgs/memolabs-dev/projects/1`). The sync is one-way: the Issues and the lease ledger stay the source of truth, the board is only a view, and Memo Bridge never reads it back to decide anything. Code: `server/integrations/project-sync.mjs`.
+
+- **Off by default.** Set `MEMO_BRIDGE_PROJECT=owner/number` (for example `memolabs-dev/1`) in the environment of the Memo Bridge server to turn it on. An invalid value keeps it off, and `batch_status` then returns `project_sync_error: "invalid_project_spec"`.
+- **Board fields.** `Status` (single select: Prêt, Réservé, En revue, Bloqué, Fait), `Priorité` (P0 to P3), `Agent` (ChatGPT, Claude Code, opencode, Runner VPS, Humain) and `Lot` (text). Field and option ids are read at runtime with GraphQL and cached for 10 minutes; names are matched without case. Ids are never hard-coded: a field or option recreated on the board under the same name is picked up on the next read.
+- **Auth.** The same ambient `gh` login as the other GitHub calls (`server/integrations/github.mjs`, `gh api graphql`). Mutations need the `project` scope (`gh auth refresh -s project`).
+
+| Coordinator event | Board update |
+|---|---|
+| `batch_create`, each Issue created | add the Issue, Status Prêt, Priorité from its `priority:` label, Lot = batch name and id (`Refonte export (a1b2c3d4e5)`) |
+| `task_claim`, `task_next`, and the claim that takes over an expired lease | Status Réservé, Agent from the workspace `client_type` (chatgpt: ChatGPT, claude-code: Claude Code, opencode: opencode, runner: Runner VPS, anything else: Humain) |
+| `github_create_pr` (opened or already open) | Status En revue on the task; the pull request is added with Status En revue |
+| `task_complete` | Status Fait |
+| `task_release` with outcome `blocked` | Status Bloqué |
+| `task_release` with outcome `failed` or `cancelled`, `workspace_close` | Status Prêt |
+| `batch_status` sees an expired lease (state `stale`) | Status Prêt, once per expired lease, only for a caller that may write |
+
+`batch_status` also returns `project_url`, the board address, when the sync is on.
+
+**GraphQL calls.** Per GitHub's "Using the API to manage Projects" (`https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects`): the fields come from `organization(login){projectV2(number){fields}}` (then `user(login)` when the owner is not an organization); the Issue or pull request node id from `repository{issueOrPullRequest(number)}`; `addProjectV2ItemById` adds it and returns the existing item when it is already on the board; then one `updateProjectV2ItemFieldValue` per field, since an item cannot be added and updated in the same call.
+
+**Never in the way.** Every update is fire and forget: the operation answers without waiting, updates of one Issue apply in order, each one is stopped after 30 seconds (10 seconds per GraphQL call), and at most 200 run at once. A failure never changes the operation's result: it is one journal row, op `project_sync_failed`, outcome `error`, with a short fixed code (`github_scope_missing`, `github_auth_required`, `github_unavailable`, `project_not_found`, `project_field_missing`, `project_option_missing`, `project_sync_timeout`, ...). GitHub's own messages are never kept, so no token or other text it echoes can reach the journal. After a failed update the item and field ids are read again on the next event.
+
 ## Local state
 
 The local store holds workspaces, a mirror of the claims held here, checkpoints and the audit journal. It never holds the lease itself, and `workspace_status` shows this mirror. Use `task_status` or `workspace_recover` for the authoritative state. A `task_complete` summary is stored in the claim's outcome column after the keyword (`completed: <summary>`) and returned split as `outcome` and `summary`. All access to it goes through `server/coordinator/store.mjs`. The contract tests in `tests/coordinator-store-contract.test.mjs` are written per engine, so a Postgres adapter can follow when the hub owns this state.

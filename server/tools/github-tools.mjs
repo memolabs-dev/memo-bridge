@@ -198,6 +198,13 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     }
     const failed = outcome.ok === false;
     await rt.audit(op, failed ? (DENIED.has(outcome.error) ? 'denied' : 'error') : 'ok', failed ? outcome.error : null, ids);
+    // GitHub Projects view: the task and its pull request go to En revue. Fire and forget; a
+    // failure is one project_sync_failed row (server/integrations/project-sync.mjs).
+    const sync = !failed && ids.issue ? rt.projectSync?.() : null;
+    if (sync?.enabled) {
+      void sync.taskReview({ issue: ids.issue, repo: outcome.repo, pull: outcome.number },
+        { onFailure: code => rt.audit('project_sync_failed', 'error', code, ids) });
+    }
     return result(outcome);
   });
 }

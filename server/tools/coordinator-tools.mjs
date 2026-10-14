@@ -159,7 +159,7 @@ export function registerCoordinatorTools(server, getService) {
   }, call('taskNext'));
 
   server.registerTool('batch_status', {
-    description: 'Progress of a batch: for each task its state (ready, claimed, stale, blocked, done, closed, not_ready, unknown), who holds it (worker, workspace, client) and until when, linked pull requests, then counts per state and the stale leases (claimed but expired). Read-only.',
+    description: 'Progress of a batch: for each task its state (ready, claimed, stale, blocked, done, closed, not_ready, unknown), who holds it (worker, workspace, client) and until when, linked pull requests, then counts per state and the stale leases (claimed but expired). Read-only for Memo Bridge; when the GitHub Projects view is on (MEMO_BRIDGE_PROJECT), also returns project_url and shows stale tasks as Prêt there.',
     inputSchema: z.object({
       project: z.string().max(80).describe('Project the batch was created in.'),
       batch: batchId

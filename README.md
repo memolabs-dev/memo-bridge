@@ -20,6 +20,7 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 - Tasks (a task is a GitHub Issue): `tasks_list`, `task_status`, `task_claim`, `task_renew`, `task_checkpoint`, `task_release`, `task_complete`
 - Batches for a conductor conversation (`docs/REMOTE_CHATGPT.md`): `batch_create`, `task_next`, `batch_status`
 - Audit journal: `audit_events`, `audit_operation`
+- Optional GitHub Projects view: with `MEMO_BRIDGE_PROJECT=owner/number` set (for example `memolabs-dev/1`), task creation, claims, pull requests, completion and releases are mirrored one way onto that board (Status, Priorité, Agent, Lot), fire and forget; off by default (`docs/COORDINATOR.md`, "GitHub Projects view")
 
 ### Phase 3: the Mac runner (`docs/RUNNER.md`)
 
