@@ -37,6 +37,17 @@
 import { basename } from 'node:path';
 
 export const APPROVAL_TTL_MS = 10 * 60_000;
+// Standing approvals (operator-grants.mjs) carry ids with this prefix; single-use ones never do.
+export const STANDING_ID_PREFIX = 'ap_st_';
+export const isStandingApproval = id => typeof id === 'string' && id.startsWith(STANDING_ID_PREFIX);
+// May a signed approval id stand for this call (spec D-R5)? A standing id only for a grantable
+// operator_run or operator_script below T3; any single-use id as before.
+export function approvalInScope(approval, op, args, tier) {
+  if (!isStandingApproval(approval)) return true;
+  if (tier === 3 || !['operator_run', 'operator_script'].includes(op)) return false;
+  const danger = classifyCall(op, args);
+  return danger === null || danger.hard === false;
+}
 export const STANDING_APPROVAL_MS = 15 * 60_000;
 
 const DESTRUCTIVE = new Set(['rm', 'dd', 'wipefs', 'parted', 'fdisk', 'sfdisk', 'gdisk', 'ufw', 'nft', 'iptables', 'ip6tables',
@@ -51,7 +62,7 @@ const DSCL_WRITES = new Set(['-create', '-createpl', '-createpli', '-append', '-
   '-delete', '-deletepl', '-deletepli', '-change', '-changei', '-passwd', '-mcxset', '-mcxdelete', '-mcximport', '-auth', '-authonly']);
 const WRAPPERS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'fish', 'busybox', 'python', 'python3', 'perl', 'ruby', 'node', 'php',
   'env', 'xargs', 'find', 'sudo', 'doas', 'su', 'nice', 'ionice', 'timeout', 'nohup', 'setsid', 'chroot', 'nsenter', 'unshare',
-  'systemd-run', 'runuser', 'flock', 'watch', 'stdbuf', 'ssh', 'awk', 'gawk', 'mawk', 'sed', 'crontab', 'at', 'docker', 'make',
+  'systemd-run', 'runuser', 'flock', 'watch', 'stdbuf', 'awk', 'gawk', 'mawk', 'sed', 'crontab', 'at', 'docker', 'make',
   'git', 'npm', 'npx', 'pnpm', 'pip', 'pip3', 'apt', 'apt-get', 'dpkg', 'osascript', 'launchctl', 'open', 'security']);
 const CRITICAL_UNIT_RE = /^(ssh|sshd|traefik|memo-bridge-[A-Za-z0-9@._-]*|memo-operator[A-Za-z0-9@._-]*)(\.service|\.socket)?$/;
 const SENSITIVE_PATH_RE = /^\/etc\/(ssh(\/|$)|sudoers|pam\.d(\/|$)|passwd-?$|shadow-?$|group-?$|gshadow-?$)/;
@@ -60,42 +71,234 @@ const AGENT_CONTROL_RE = /(^|\/)\.memo-operator(\/|$)|^\/etc\/memo-operator(\/|$
 // Mac root: launchd daemons, the root helper's files, the local user database (any case).
 const MAC_ROOT_CONTROL_RE = /\/Library\/LaunchDaemons(\/|$)|\/Library\/Application Support\/MemoBridge(\/|$)|^\/var\/(log\/memo-operator|db\/memo-operator-root|run\/memo-operator|db\/dslocal)(\/|$)/i;
 
+export const DESTRUCTIVE_PROGRAMS = DESTRUCTIVE;
 const isDestructiveName = name => DESTRUCTIVE.has(name) || /^mkfs(\.|$)/.test(name);
 // One spelling per path: repeated slashes folded, /private/{etc,var,tmp} read as /{etc,var,tmp}.
 const fold = value => value.replace(/\/{2,}/g, '/').replace(/^\/private\/(etc|var|tmp)(?=\/|$)/i, '/$1');
 const sensitivePath = value => typeof value === 'string'
   && [SENSITIVE_PATH_RE, AGENT_CONTROL_RE, MAC_ROOT_CONTROL_RE].some(re => re.test(fold(value)));
 
-// Why this call is dangerous, or null. op and args as the tool receives them.
-export function dangerReason(op, args = {}) {
-  if (op === 'operator_script') return 'script';
+// Repatriation (spec .agent/project/repatriate D-R1 to D-R3, D-R9, D-R11): every danger is either
+// HARD (asks every time; no standing approval covers it) or GRANTABLE (a standing approval that
+// names every wrapper or remote program of the call covers it, operator-grants.mjs). Hard
+// reasons are looked for first, over the whole argv, so `ssh lab rm -rf /x` is command:rm, not
+// wrapper:ssh. git, gh, docker and rsync rules apply wherever the program appears in argv
+// (`env git push -f`), and inside the strings of shell-like programs (`ssh lab "git push -f"`,
+// `bash -c "gh pr merge 1"`), where every word is checked too. Scripts, make targets and package
+// scripts stay opaque: an argv classifier cannot see what they run (SECURITY.md).
+//   gh (D-R2): reads free; merge, repository deletion and settings, releases deletion, secrets,
+//     variables, auth, keys, extensions, aliases, workflow dispatch, deletions, and `gh api` with a
+//     DELETE, or a POST, PUT or PATCH on a protected endpoint, or a GraphQL mutation: hard.
+//   git (D-R3): force or deleting pushes, pushes to main or master, reset --hard, clean -f,
+//     branch -D, history rewrites, reflog expire, update-ref -d, stash clear: hard.
+//   ssh, scp, sftp, mosh, and rsync to a remote (D-R9): remote:<program>, grantable. `ssh lab` is
+//     root on lab, so it is T3 equivalent: an approval or a standing grant naming ssh, every time.
+//   rsync --delete*, --remove-source-files: hard. Local rsync: free.
+//   docker rm, rmi, prune, volume rm, compose down -v (D-R11): hard.
+export const REMOTE_PROGRAMS = Object.freeze(new Set(['ssh', 'scp', 'sftp', 'mosh', 'slogin']));
+// Programs whose string arguments are shell lines: their words are scanned for hard reasons.
+const SHELL_STRING = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'fish', 'busybox', 'ssh', 'mosh', 'slogin', 'su', 'sudo', 'doas',
+  'osascript', 'watch', 'xargs', 'nohup', 'setsid', 'timeout', 'env']);
+// Programs whose arguments start another program.
+const PREFIX_WRAPPERS = new Set(['env', 'timeout', 'nice', 'ionice', 'nohup', 'setsid', 'stdbuf', 'xargs', 'flock', 'watch', 'time',
+  'chrt', 'taskset', 'caffeinate', 'sudo', 'doas', 'su', 'runuser', 'chroot', 'nsenter', 'unshare', 'systemd-run', 'busybox']);
+const WORD_SPLIT = /[\s;&|()`<>"']+/;
+const isWrapperName = name => WRAPPERS.has(name) || /^python3?(\.\d+)?$/.test(name);
+
+const GH_VALUE_FLAGS = new Set(['-R', '--repo', '--hostname']);
+const GH_HARD_TOP = new Set(['auth', 'secret', 'ssh-key', 'gpg-key', 'extension', 'alias']);
+const GH_HARD_SUB = Object.freeze({
+  pr: ['merge'], repo: ['delete', 'archive', 'unarchive', 'rename', 'edit', 'deploy-key'], release: ['delete', 'delete-asset'],
+  variable: ['set', 'delete'], workflow: ['run', 'enable', 'disable'], run: ['delete'], cache: ['delete'],
+  issue: ['delete', 'transfer'], label: ['delete'], project: ['delete'], codespace: ['delete'], ruleset: ['delete']
+});
+const GH_API_VALUE_FLAGS = new Set(['-X', '--method', '-H', '--header', '-f', '-F', '--field', '--raw-field', '--input', '-q', '--jq',
+  '-t', '--template', '--hostname', '-p', '--preview', '--cache']);
+const GH_FIELD_FLAGS = new Set(['-f', '-F', '--field', '--raw-field']);
+// Endpoints whose writes change access, history, code or deployments (D-R2).
+const GH_PROTECTED = [/^repos\/[^/]+\/[^/]+\/?$/, /(^|\/)merges?(\/|$)/, /\/pulls\/[^/]+\/merge/, /\/git\/refs/, /\/branches\//,
+  /\/rulesets/, /\/collaborators/, /\/hooks/, /\/keys/, /\/secrets/, /\/variables/, /\/environments/, /\/transfer/, /\/deployments/,
+  /\/actions\/(permissions|workflows\/[^/]+\/dispatches|runs)/, /\/dispatches/, /\/invitations/, /\/pages/, /^orgs\//, /^user(\/|$)/,
+  /^admin\//, /^teams\//, /\/teams\//, /^authorizations/, /^applications\//];
+
+function ghHard(argv) {
+  const rest = argv.slice(1);
+  const pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--') { pos.push(...rest.slice(i + 1)); break; }
+    if (GH_VALUE_FLAGS.has(a)) { i++; continue; }
+    if (a.startsWith('-')) continue;
+    pos.push(a);
+  }
+  const [top, sub] = pos;
+  if (!top) return null;
+  if (GH_HARD_TOP.has(top)) return `gh:${top}`;
+  if (GH_HARD_SUB[top]?.includes(sub)) return `gh:${top}-${sub}`;
+  if (top === 'repo' && sub === 'sync' && rest.includes('--force')) return 'gh:repo-sync-force';
+  if (top !== 'api') return null;
+  // gh api: the method is -X/--method, else POST as soon as a field or an input is given.
+  let method = null; let fields = false; let input = false; let endpoint = null; const values = [];
+  const after = rest.slice(rest.indexOf('api') + 1);
+  for (let i = 0; i < after.length; i++) {
+    const a = after[i];
+    const eq = a.indexOf('=');
+    const flag = a.startsWith('--') && eq > 0 ? a.slice(0, eq) : a;
+    const inline = a.startsWith('--') && eq > 0 ? a.slice(eq + 1) : null;
+    if (/^-X./.test(a)) { method = a.slice(2); continue; }
+    if (GH_API_VALUE_FLAGS.has(flag)) {
+      const value = inline ?? after[++i] ?? '';
+      if (flag === '-X' || flag === '--method') method = value;
+      if (GH_FIELD_FLAGS.has(flag)) { fields = true; values.push(value); }
+      if (flag === '--input') input = true;
+      continue;
+    }
+    if (a.startsWith('-')) continue;
+    if (endpoint === null) endpoint = a;
+  }
+  const verb = String(method ?? (fields || input ? 'POST' : 'GET')).toUpperCase();
+  const path = String(endpoint ?? '').replace(/^https?:\/\/[^/]+\//, '').replace(/^\/+/, '').replace(/\?.*$/, '').toLowerCase();
+  if (path === 'graphql') return input || values.some(v => /\bmutation\b/i.test(v)) ? 'gh:api-graphql-mutation' : null;
+  if (verb === 'GET' || verb === 'HEAD') return null;
+  if (verb === 'DELETE') return 'gh:api-delete';
+  return GH_PROTECTED.some(re => re.test(path)) ? `gh:api-${verb.toLowerCase()}` : null;
+}
+
+const GIT_VALUE_OPTS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--config-env', '--super-prefix']);
+const shortHas = (a, letter) => /^-[A-Za-z]+$/.test(a) && a.slice(1).includes(letter);
+const DEFAULT_BRANCHES = new Set(['main', 'master']);
+
+function gitHard(argv) {
+  const rest = argv.slice(1);
+  let i = 0;
+  for (; i < rest.length; i++) {
+    const a = rest[i];
+    if (GIT_VALUE_OPTS.has(a)) { i++; continue; }
+    if (!a.startsWith('-')) break;
+  }
+  const sub = rest[i];
+  const args = rest.slice(i + 1);
+  if (!sub) return null;
+  const has = (...names) => args.some(a => names.includes(a));
+  switch (sub) {
+    case 'push': {
+      if (args.some(a => a === '--force' || a.startsWith('--force-with-lease') || a === '--force-if-includes' || a === '--mirror'
+        || a === '--prune' || a === '--delete' || a === '--all' || shortHas(a, 'f') || shortHas(a, 'd'))) return 'git:push-force-or-delete';
+      const refs = args.filter(a => !a.startsWith('-'));
+      for (const ref of refs.slice(1)) {
+        if (ref.startsWith('+')) return 'git:push-force-or-delete';
+        if (ref.startsWith(':')) return 'git:push-force-or-delete';
+        const dst = (ref.includes(':') ? ref.slice(ref.lastIndexOf(':') + 1) : ref).replace(/^refs\/heads\//, '');
+        if (DEFAULT_BRANCHES.has(dst)) return 'git:push-default-branch';
+      }
+      return null;
+    }
+    case 'reset': return has('--hard') ? 'git:reset-hard' : null;
+    case 'clean': return args.some(a => a === '--force' || shortHas(a, 'f')) ? 'git:clean-force' : null;
+    case 'branch': return args.some(a => a === '-D' || shortHas(a, 'D')) || (has('--delete', '-d') && has('--force', '-f'))
+      ? 'git:branch-force-delete' : null;
+    case 'filter-branch': case 'filter-repo': return `git:${sub}`;
+    case 'reflog': return ['expire', 'delete'].includes(args[0]) ? 'git:reflog-expire' : null;
+    case 'update-ref': return has('-d', '--delete') ? 'git:update-ref-delete' : null;
+    case 'stash': return args[0] === 'clear' ? 'git:stash-clear' : null;
+    default: return null;
+  }
+}
+
+const DOCKER_VALUE_OPTS = new Set(['-H', '--host', '--context', '-c', '--config', '-l', '--log-level']);
+function dockerHard(argv) {
+  const rest = argv.slice(1);
+  const pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (DOCKER_VALUE_OPTS.has(rest[i])) { i++; continue; }
+    if (!rest[i].startsWith('-')) pos.push(rest[i]);
+  }
+  const [sub, next] = pos;
+  if (['rm', 'rmi'].includes(sub)) return `docker:${sub}`;
+  if (['system', 'container', 'image', 'volume', 'network', 'builder', 'buildx'].includes(sub) && ['prune', 'rm'].includes(next)) return `docker:${sub}-${next}`;
+  if (sub === 'compose' && pos.includes('down') && rest.some(a => ['-v', '--volumes', '--rmi'].includes(a) || a.startsWith('--rmi='))) return 'docker:compose-down-volumes';
+  return null;
+}
+
+function rsyncHard(argv) {
+  return argv.slice(1).some(a => a.startsWith('--delete') || a === '--remove-source-files') ? 'rsync:delete' : null;
+}
+// rsync reaches another host: host:path, rsync://, or a remote shell option.
+function rsyncRemote(argv) {
+  return argv.slice(1).some(a => a === '-e' || a.startsWith('--rsh') || a.startsWith('--rsync-path') || (/^-[A-Za-z]+$/.test(a) && a.includes('e'))
+    || a.startsWith('rsync://') || (!a.startsWith('-') && !a.startsWith('/') && !a.startsWith('.') && /^[^/]*[A-Za-z0-9_.\]-]:/.test(a)));
+}
+
+const PROGRAM_RULES = Object.freeze({ gh: ghHard, git: gitHard, docker: dockerHard, rsync: rsyncHard });
+
+// Hard reason of one word list (argv, or the words of a shell string), or null.
+function hardOfWords(words) {
+  for (const item of words) {
+    const name = basename(item);
+    if (isDestructiveName(name)) return `command:${name}`;
+    // "--file=/etc/shadow" style arguments are checked on their value too.
+    const value = item.includes('=') ? item.slice(item.indexOf('=') + 1) : item;
+    if (sensitivePath(item) || sensitivePath(value)) return 'sensitive_path';
+  }
+  for (let i = 0; i < words.length; i++) {
+    const rule = PROGRAM_RULES[basename(words[i])];
+    const reason = rule ? rule(words.slice(i)) : null;
+    if (reason) return reason;
+  }
+  if (words.some(a => basename(a) === 'dscl')) {
+    const verb = words.find(a => DSCL_WRITES.has(a.toLowerCase()));
+    if (verb) return `dscl:${verb.toLowerCase()}`;
+  }
+  const i = words.findIndex(a => basename(a) === 'systemctl');
+  if (i >= 0) {
+    const rest = words.slice(i + 1).filter(a => !a.startsWith('-'));
+    const verb = rest[0];
+    if (['reboot', 'poweroff', 'halt', 'kexec', 'emergency', 'rescue', 'isolate', 'kill'].includes(verb)) return `systemctl:${verb}`;
+    if (['stop', 'disable', 'mask'].includes(verb) && rest.slice(1).some(u => CRITICAL_UNIT_RE.test(u))) return `systemctl:${verb}`;
+  }
+  return null;
+}
+
+// Containers whose stop or restart cuts the owner off (D-R11): the proxy, the bridge, OAuth.
+export const CRITICAL_CONTAINER_RE = /^(traefik|memo-.*|pocket-id.*)$/i;
+
+// {reason, hard, programs} for one call, or null when it is not dangerous. programs: the wrapper
+// and remote programs of a grantable call, every one of which a standing approval must name.
+export function classifyCall(op, args = {}) {
+  if (op === 'operator_script') {
+    if (args.as_root === true) return { reason: 'script', hard: true, programs: [] };
+    return { reason: 'script', hard: false, programs: [String(args.interpreter ?? '')] };
+  }
   if (op === 'operator_run') {
     const argv = Array.isArray(args.argv) ? args.argv.filter(a => typeof a === 'string') : [];
-    // A wrapper only matters as the program itself: whatever it runs is then out of sight.
+    const shellish = argv.some(a => SHELL_STRING.has(basename(a)));
+    const hard = hardOfWords(argv) ?? (shellish ? hardOfWords(argv.flatMap(a => a.split(WORD_SPLIT).filter(Boolean))) : null);
+    if (hard) return { reason: hard, hard: true, programs: [] };
+    // The program itself; behind a command prefix (env, timeout, nice, xargs...) every later
+    // wrapper or remote name too, conservatively (`timeout 5 ssh lab id` needs timeout and ssh).
+    const programs = [];
+    const scan = PREFIX_WRAPPERS.has(basename(argv[0] ?? '')) ? argv.length : Math.min(argv.length, 1);
+    for (let i = 0; i < scan; i++) {
+      const name = basename(argv[i]);
+      if ((isWrapperName(name) || REMOTE_PROGRAMS.has(name) || (name === 'rsync' && rsyncRemote(argv.slice(i)))) && !programs.includes(name)) programs.push(name);
+    }
+    if (programs.length === 0) return null;
+    // The reason names the program itself when it is one, else the first one found.
     const program = basename(argv[0] ?? '');
-    if (WRAPPERS.has(program) || /^python3?(\.\d+)?$/.test(program)) return `wrapper:${program}`;
-    for (const item of argv) {
-      const name = basename(item);
-      if (isDestructiveName(name)) return `command:${name}`;
-      // "--file=/etc/shadow" style arguments are checked on their value too.
-      const value = item.includes('=') ? item.slice(item.indexOf('=') + 1) : item;
-      if (sensitivePath(item) || sensitivePath(value)) return 'sensitive_path';
-    }
-    if (argv.some(a => basename(a) === 'dscl')) {
-      const verb = argv.find(a => DSCL_WRITES.has(a.toLowerCase()));
-      if (verb) return `dscl:${verb.toLowerCase()}`;
-    }
-    const i = argv.findIndex(a => basename(a) === 'systemctl');
-    if (i >= 0) {
-      const rest = argv.slice(i + 1).filter(a => !a.startsWith('-'));
-      const verb = rest[0];
-      if (['reboot', 'poweroff', 'halt', 'kexec', 'emergency', 'rescue', 'isolate', 'kill'].includes(verb)) return `systemctl:${verb}`;
-      if (['stop', 'disable', 'mask'].includes(verb) && rest.slice(1).some(u => CRITICAL_UNIT_RE.test(u))) return `systemctl:${verb}`;
-    }
-    return null;
+    const first = programs.includes(program) ? program : programs[0];
+    const remote = REMOTE_PROGRAMS.has(first) || first === 'rsync';
+    return { reason: `${remote ? 'remote' : 'wrapper'}:${first}`, hard: false, programs };
   }
+  const reason = otherReason(op, args);
+  return reason ? { reason, hard: true, programs: [] } : null;
+}
+
+function otherReason(op, args) {
   if (op === 'operator_service') {
     return ['stop'].includes(args.action) && CRITICAL_UNIT_RE.test(String(args.unit)) ? `service:${args.action}` : null;
+  }
+  if (op === 'operator_docker') {
+    return ['stop', 'restart'].includes(args.action) && CRITICAL_CONTAINER_RE.test(String(args.container ?? '')) ? `docker:${args.action}` : null;
   }
   if (op === 'operator_delete') {
     if (args.recursive === true) return 'delete_directory';
@@ -104,6 +307,11 @@ export function dangerReason(op, args = {}) {
   if (['operator_edit', 'operator_chmod', 'operator_upload_init'].includes(op)) return sensitivePath(args.path) ? 'sensitive_path' : null;
   if (['operator_move', 'operator_copy'].includes(op)) return sensitivePath(args.src) || sensitivePath(args.dst) ? 'sensitive_path' : null;
   return null;
+}
+
+// Why this call is dangerous, or null. op and args as the tool receives them.
+export function dangerReason(op, args = {}) {
+  return classifyCall(op, args)?.reason ?? null;
 }
 
 // Does this call need an approval under `mode`? tier is the call's tier (0..3).
