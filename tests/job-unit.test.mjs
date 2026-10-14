@@ -122,3 +122,28 @@ test('the real runner in unit mode: exit status, and SIGTERM ends it by the same
   assert.equal(stopped.signal, 'SIGTERM', JSON.stringify(stopped));
   assert.match(f.log(), /exit (SIGTERM|143)/);
 });
+
+// Debian's dash does not pass SIGTERM on, and a recipe may leave a background process: a
+// grandchild holding the output pipes must not keep the unit alive (CI hang on Linux).
+const GRANDCHILD = `const { spawn } = require('child_process');
+spawn(process.execPath, ['-e', "console.log('grandchild'); setInterval(() => {}, 1000)"], { stdio: 'inherit' });
+process.on('SIGTERM', () => process.exit(0));
+console.log('started'); setInterval(() => {}, 1000);`;
+
+test('SIGTERM reaches the whole recipe group, so a grandchild cannot hold the unit open', { timeout: 20000 }, async t => {
+  const f = fixture(t, GRANDCHILD);
+  let term;
+  const running = runJobUnit(f.args, { env: f.env, cwd: f.worktree, createLogSink,
+    onSignal: (sig, fn) => { term = fn; }, offSignal: () => {} });
+  await new Promise(resolve => { const poll = setInterval(() => { try { if (/grandchild/.test(f.log())) { clearInterval(poll); resolve(); } } catch { /* not yet */ } }, 50); });
+  term();
+  const r = await running;
+  assert.equal(r.signal, 'SIGTERM', JSON.stringify(r));
+});
+
+test('a background process left by a finished recipe does not keep the unit open', { timeout: 20000 }, async t => {
+  const f = fixture(t, `require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' }).unref(); console.log('done');`);
+  const r = await runJobUnit(f.args, { env: f.env, cwd: f.worktree, createLogSink });
+  assert.equal(r.code, 0, JSON.stringify(r));
+  assert.match(f.log(), /done/);
+});

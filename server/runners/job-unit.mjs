@@ -19,16 +19,20 @@
 //   3. runs it without a shell, with the allow-listed environment of sandbox.mjs (no MEMO_JOB_*,
 //      no token variable), a private HOME and TMPDIR, output appended to <out>/job.log (opened
 //      without following symlinks, capped like Phase 3);
-//   4. exits with the recipe's exit code. On SIGTERM (cancel, RuntimeMaxSec, shutdown) it
-//      forwards the signal, waits for the recipe, then ends by the same signal, so systemd
-//      reports a stop rather than a failure. KillMode=control-group stops whatever the recipe
-//      left behind (systemd.kill(5)).
+//   4. exits with the recipe's exit code. The recipe runs as its own process group. On SIGTERM
+//      (cancel, RuntimeMaxSec, shutdown) it signals the whole group, not only the recipe's first
+//      process: `npm test` runs `sh -c` and Debian's dash does not pass the signal on, so a
+//      grandchild kept the output pipes open and the unit never ended. It then ends by the same
+//      signal, so systemd reports a stop rather than a failure. When the recipe's first process
+//      exits, what it left in its group is killed so the pipes close; KillMode=control-group
+//      still stops anything that left the group (systemd.kill(5)).
 // A refusal exits 2 before anything runs, with one line in job.log when it can be opened and
 // one JSON line on stderr (the journal): codes only, never file contents or environment values.
 import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync } from 'node:fs';
 import { constants as osConstants, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
+import { signalGroup } from './executor-local.mjs';
 import { DISPATCH_ID_RE } from './executor-systemd.mjs';
 import { RECIPE_NAMES, detectRecipes } from './recipes.mjs';
 import { jobEnvironment } from './sandbox.mjs';
@@ -126,8 +130,13 @@ export async function runJobUnit(args, { env = process.env, cwd = process.cwd(),
     const result = await new Promise(resolve => {
       let stopping = null;
       const child = spawn(plan.argv[0], plan.argv.slice(1), { cwd: plan.worktree, env: childEnv, shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'] });
-      const onTerm = () => { stopping = 'SIGTERM'; try { child.kill('SIGTERM'); } catch { /* gone */ } };
+        stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      const onTerm = () => {
+        stopping = 'SIGTERM';
+        if (!signalGroup(child.pid, 'SIGTERM')) { try { child.kill('SIGTERM'); } catch { /* gone */ } }
+      };
+      // The first process is gone: whatever it left in its group would hold the pipes open.
+      child.on('exit', () => { signalGroup(child.pid, 'SIGKILL'); });
       onSignal('SIGTERM', onTerm);
       child.stdout.on('data', chunk => log.write(chunk));
       child.stderr.on('data', chunk => log.write(chunk));
