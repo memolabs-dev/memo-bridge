@@ -80,9 +80,11 @@ export const OPERATION_CAPABILITY = Object.freeze({
 
 // Phase 6 operator ops (spec §4). Kept apart from OPERATION_CAPABILITY on purpose: those are
 // served by the runtime, these by the operator agent of the host named in the arguments
-// (bridge/ops.mjs builds the two kinds from the two tables). Lot 1 serves T0 only; the T1 to T3
-// tools arrive with Lot 2 and their own tests.
+// (bridge/ops.mjs builds the two kinds from the two tables). Lot 1 served T0; Lot 2 adds T1 to T3.
 export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
+  // T0
+  operator_job_status: CAPABILITIES.OPERATOR_READ,
+  approval_status: CAPABILITIES.OPERATOR_READ,
   operator_policy: CAPABILITIES.OPERATOR_READ,
   operator_state: CAPABILITIES.OPERATOR_READ,
   operator_list: CAPABILITIES.OPERATOR_READ,
@@ -91,12 +93,33 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   operator_logs: CAPABILITIES.OPERATOR_READ,
   operator_service_status: CAPABILITIES.OPERATOR_READ,
   operator_freeze_status: CAPABILITIES.OPERATOR_READ,
-  operator_audit_verify: CAPABILITIES.OPERATOR_READ
+  operator_audit_verify: CAPABILITIES.OPERATOR_READ,
+  // T1 (Lot 2): inside the host's write roots
+  operator_edit: CAPABILITIES.OPERATOR_WRITE,
+  operator_upload_init: CAPABILITIES.OPERATOR_WRITE,
+  operator_upload_chunk: CAPABILITIES.OPERATOR_WRITE,
+  operator_upload_complete: CAPABILITIES.OPERATOR_WRITE,
+  operator_move: CAPABILITIES.OPERATOR_WRITE,
+  operator_copy: CAPABILITIES.OPERATOR_WRITE,
+  operator_delete: CAPABILITIES.OPERATOR_WRITE,
+  operator_chmod: CAPABILITIES.OPERATOR_WRITE,
+  // T2: as the agent user; operator_run with as_root is T3 (operatorCallTier)
+  operator_run: CAPABILITIES.OPERATOR_EXEC,
+  operator_service: CAPABILITIES.OPERATOR_EXEC,
+  // T3, lab only, through the root helper
+  operator_script: CAPABILITIES.OPERATOR_ROOT
 });
 export const isOperatorOperation = operation => typeof operation === 'string' && Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation);
 // The tier (0..3) of an operator op, or null.
 export const operatorTier = operation => (isOperatorOperation(operation)
   ? OPERATOR_TIER_CAPABILITIES.indexOf(OPERATOR_OPERATION_CAPABILITY[operation]) : null);
+
+// The tier of one call: the op's tier, raised to T3 for operator_run with as_root (spec D1).
+export function operatorCallTier(operation, args) {
+  const tier = operatorTier(operation);
+  if (tier === null) return null;
+  return operation === 'operator_run' && args?.as_root === true ? 3 : tier;
+}
 
 // The capability an operation needs, from either table, or null for an unknown operation.
 export function operationCapability(operation) {

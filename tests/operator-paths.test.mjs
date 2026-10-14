@@ -50,7 +50,7 @@ test('resolve: realpath first, then roots and denylist on the canonical path (AC
 
 test('resolve on the Mac: "~/" expands to the agent home, Keychains stay denied', async t => {
   const { p } = makeHost(t);
-  const policy = parseOperatorPolicy({ version: 1, host: 'mac', max_tier: 'exec', roots: { read: ['~'], write: [] },
+  const policy = parseOperatorPolicy({ version: 1, host: 'mac', max_tier: 'read', roots: { read: ['~'], write: [] },
     frozen_file: '~/.memo-operator/FROZEN', audit_file: '~/.memo-operator/audit.jsonl' }, { home: p('home/op') });
   assert.equal((await resolveOperatorPath(policy, '~/keys')).ok, true);
   mkdirSync(p('home/op/Library/Keychains'), { recursive: true });

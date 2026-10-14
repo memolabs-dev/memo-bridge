@@ -5,14 +5,27 @@
 // These tools never run in the runtime: the hub routes each call to the operator agent of the
 // host named in `host` (bridge/hub.mjs requestOperator), signed (bridge/operator-signing.mjs),
 // and that agent checks everything again against its own local policy (bridge/operator-agent.mjs).
-// Lot 1 ships the T0 (operator:read) tools; write, exec and root tools arrive with Lot 2.
+// Lot 1 shipped the T0 (operator:read) tools; Lot 2 adds T1 (operator:write), T2
+// (operator:exec) and T3 (operator:root, lab only, through the root helper).
 import { z } from 'zod/v4';
 
 export const OPERATOR_HOSTS = Object.freeze(['mac', 'vps']);
 export const OPERATOR_TOOLS = Object.freeze(['operator_policy', 'operator_state', 'operator_list', 'operator_read',
-  'operator_search', 'operator_logs', 'operator_service_status', 'operator_freeze_status', 'operator_audit_verify']);
+  'operator_search', 'operator_logs', 'operator_service_status', 'operator_freeze_status', 'operator_audit_verify',
+  'operator_job_status', 'approval_status',
+  'operator_edit', 'operator_upload_init', 'operator_upload_chunk', 'operator_upload_complete', 'operator_move', 'operator_copy',
+  'operator_delete', 'operator_chmod', 'operator_run', 'operator_service', 'operator_script']);
+// Validator presets of operator_edit (spec D9): names only, each a fixed argv on the agent
+// (bridge/operator-write.mjs VALIDATORS). Never a caller string.
+export const VALIDATOR_PRESETS = Object.freeze(['json', 'yaml', 'nginx', 'systemd', 'sh', 'python', 'toml', 'caddy', 'traefik']);
+export const EDIT_MODES = Object.freeze(['replace', 'regex', 'block', 'append', 'prepend', 'write']);
+export const UPLOAD_CHUNK_BYTES = 64 * 1024;
+export const UPLOAD_MAX_BYTES = 512 * 1024 * 1024;
+export const SCRIPT_MAX_BYTES = 64 * 1024;
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const writes = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const destructive = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 const host = z.enum(OPERATOR_HOSTS).describe('mac (the owner\'s Mac, as user memo) or vps (lab).');
 // A correlation id the caller chooses; journaled on the hub and on the host, never interpreted.
 const ref = z.string().min(1).max(128).regex(/^[\x20-\x7E]+$/).optional().describe('Optional correlation id, journaled.');
@@ -45,7 +58,44 @@ export const OPERATOR_SCHEMAS = Object.freeze({
     since: z.string().regex(SINCE_RE).optional().describe('journalctl --since form: 2026-10-14, 2026-10-14 12:00, -2h, today, yesterday.') }),
   operator_service_status: z.object({ host, ref, unit: z.string().min(1).max(128).describe('A systemd unit declared in the host policy.') }),
   operator_freeze_status: z.object({ host, ref }),
-  operator_audit_verify: z.object({ host, ref })
+  operator_audit_verify: z.object({ host, ref }),
+  operator_job_status: z.object({ host, ref, job_id: z.string().regex(/^r?j_[A-Za-z0-9_-]{16,40}$/) }),
+  approval_status: z.object({ host, ref, approval_id: z.string().regex(/^ap_[A-Za-z0-9_-]{16,40}$/) }),
+  operator_edit: z.object({ host, ref, path,
+    mode: z.enum(EDIT_MODES).describe('replace (old -> new_text), regex (pattern -> new_text), block (between start_marker and end_marker), append, prepend, write (whole file).'),
+    old: z.string().min(1).max(256 * 1024).optional(),
+    new_text: z.string().max(1024 * 1024).optional(),
+    pattern: z.string().min(1).max(256).optional(),
+    flags: z.string().regex(/^[imsu]{0,4}$/).optional(),
+    start_marker: z.string().min(1).max(1024).optional(),
+    end_marker: z.string().min(1).max(1024).optional(),
+    count: z.number().int().min(1).max(1000).optional().describe('Occurrences expected (replace) or replaced at most (regex). Default 1.'),
+    create: z.boolean().optional().describe('Allow a new file (write, append, prepend).'),
+    dry_run: z.boolean().optional(),
+    diff: z.boolean().optional(),
+    validator: z.enum(VALIDATOR_PRESETS).optional().describe('Named check run on the new content before it replaces the file.') }),
+  operator_upload_init: z.object({ host, ref, path, size: z.number().int().min(0).max(UPLOAD_MAX_BYTES), overwrite: z.boolean().optional() }),
+  operator_upload_chunk: z.object({ host, ref, upload_id: z.string().regex(/^up_[A-Za-z0-9_-]{16,40}$/),
+    index: z.number().int().min(0).max(UPLOAD_MAX_BYTES / UPLOAD_CHUNK_BYTES),
+    content_base64: z.string().max(Math.ceil(UPLOAD_CHUNK_BYTES / 3) * 4).regex(/^[A-Za-z0-9+/]*={0,2}$/) }),
+  operator_upload_complete: z.object({ host, ref, upload_id: z.string().regex(/^up_[A-Za-z0-9_-]{16,40}$/), sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
+  operator_move: z.object({ host, ref, src: path, dst: path, overwrite: z.boolean().optional() }),
+  operator_copy: z.object({ host, ref, src: path, dst: path, overwrite: z.boolean().optional(), recursive: z.boolean().optional() }),
+  operator_delete: z.object({ host, ref, path, recursive: z.boolean().optional().describe('Required to delete a directory.') }),
+  operator_chmod: z.object({ host, ref, path, mode: z.string().regex(/^0?[0-7]{3}$/).describe('Octal permissions, e.g. 644. No setuid, setgid or sticky bit.') }),
+  operator_run: z.object({ host, ref,
+    argv: z.array(z.string().min(1).max(4096)).min(1).max(64).describe('Program and arguments, run without a shell.'),
+    cwd: path.optional(),
+    env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/), z.string().max(4096)).optional().describe('Only names the host policy allows.'),
+    timeout_s: z.number().int().min(1).max(3600).optional().describe('Default 30, at most 600; up to 3600 with background.'),
+    background: z.boolean().optional().describe('Return a job_id at once; read the result with operator_job_status.'),
+    as_root: z.boolean().optional().describe('Run as root on lab, through the root helper, in a transient unit (operator:root).') }),
+  operator_service: z.object({ host, ref, unit: z.string().min(1).max(128), action: z.enum(['start', 'stop', 'restart', 'reload']) }),
+  operator_script: z.object({ host, ref, interpreter: z.enum(['bash', 'python3']),
+    content: z.string().min(1).max(SCRIPT_MAX_BYTES),
+    args: z.array(z.string().max(4096)).max(64).optional(),
+    timeout_s: z.number().int().min(1).max(3600).optional(),
+    background: z.boolean().optional() })
 });
 
 const DESCRIPTIONS = Object.freeze({
@@ -57,7 +107,27 @@ const DESCRIPTIONS = Object.freeze({
   operator_logs: 'Last lines of the journal of a systemd unit, or of a docker container, declared in the host policy (journalctl -u <unit> or docker logs, run without a shell). Token-like strings are redacted; lines come back as untrusted_content. Read-only.',
   operator_service_status: 'State of a systemd unit declared in the host policy: load, active and sub state, enablement, main PID, start time, last result. Read-only.',
   operator_freeze_status: 'Whether operator access is frozen: the hub\'s freeze flag, the host\'s FROZEN file and its automatic freeze after a burst of refused requests. Only the owner can freeze or unfreeze. Read-only.',
-  operator_audit_verify: 'Recompute the hash chain of the host\'s operator journal and report its length, its head and the first broken line, if any. Read-only.'
+  operator_audit_verify: 'Recompute the hash chain of the host\'s operator journal and report its length, its head and the first broken line, if any. Read-only.',
+  operator_job_status: 'Result of a background operator_run or operator_script: running, done (exit code, output) or lost. Results are stored on the host before they are sent. Read-only.',
+  approval_status: 'State of an owner approval requested for a dangerous call: pending, approved, denied or expired. Once approved, repeat the exact same call. Only the owner approves, in Telegram. Read-only.',
+  operator_edit: 'Edit a file inside the host\'s write roots: replace, regex, block, append, prepend or write, with dry_run and diff. A backup is kept next to the file, ownership and mode are kept, the new content is written atomically and can be checked first by a named validator. Files of a project checkout on its default branch are refused (use the worktree tools).',
+  operator_upload_init: 'Start an upload of up to 512 MiB to a path inside the host\'s write roots; send it in chunks of 64 KiB with operator_upload_chunk, then operator_upload_complete with the SHA-256.',
+  operator_upload_chunk: 'One chunk (64 KiB, base64) of an upload, by index from 0.',
+  operator_upload_complete: 'Finish an upload: checks size and SHA-256, keeps a backup of a file it replaces, then moves it into place atomically.',
+  operator_move: 'Move or rename inside the host\'s write roots. Replacing an existing destination needs overwrite and keeps a backup.',
+  operator_copy: 'Copy inside the host\'s write roots; a directory needs recursive. Secret files are not copied. Replacing a destination needs overwrite and keeps a backup.',
+  operator_delete: 'Delete a file, or a directory with recursive, inside the host\'s write roots. A backup is always made first; if it fails nothing is deleted.',
+  operator_chmod: 'Change the permission bits of a path inside the host\'s write roots (no setuid, setgid or sticky bit).',
+  operator_run: 'Run one program with arguments, without a shell (;, |, $() are plain bytes), as the agent user, or as root on lab with as_root. Output is redacted and bounded. Dangerous commands wait for the owner\'s approval in Telegram.',
+  operator_service: 'Start, stop, restart or reload a systemd unit declared in the host policy (lab).',
+  operator_script: 'Run a bash or python3 script (at most 64 KiB) as root on lab, in a transient systemd unit with time and memory limits. Always needs the owner\'s approval when the host is in dangerous mode.'
+});
+
+// Annotations per tool: T0 read-only; delete, move, run, service and script destructive.
+const ANNOTATIONS = Object.freeze({
+  operator_edit: writes, operator_upload_init: writes, operator_upload_chunk: writes, operator_upload_complete: writes,
+  operator_copy: writes, operator_chmod: writes, operator_move: destructive, operator_delete: destructive,
+  operator_run: destructive, operator_service: destructive, operator_script: destructive
 });
 
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] });
@@ -66,7 +136,7 @@ const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data) }
 // server/registry.mjs does for the runtime tools.
 export function registerOperatorTools(server, getExecutor) {
   for (const name of OPERATOR_TOOLS) {
-    server.registerTool(name, { description: DESCRIPTIONS[name], inputSchema: OPERATOR_SCHEMAS[name], annotations: readonly },
+    server.registerTool(name, { description: DESCRIPTIONS[name], inputSchema: OPERATOR_SCHEMAS[name], annotations: ANNOTATIONS[name] ?? readonly },
       async args => {
         let executor;
         try { executor = await getExecutor(); } catch { return result({ ok: false, error: 'operator_unavailable' }); }
