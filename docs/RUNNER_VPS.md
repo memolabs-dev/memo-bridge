@@ -100,10 +100,12 @@ The hub (`memo-bridge-hub.service`) needs, for the runner to be reachable:
 lab-infra pins a full commit sha (`memo_bridge_version`). For that commit:
 
 ```
-npm run release:manifest      # clean tree required
+pnpm run release:manifest     # clean tree required
 ```
 
-writes `dist/release/SHA256SUMS` (the files lab-infra copies: `bridge/`, `server/`, `package.json`, `package-lock.json`, `deploy/memo-runner-dispatch`, `deploy/record-result`) and `dist/release/memo-bridge-release.json` with `commit` and `sums_sha256`, the sha256 of `SHA256SUMS`. Record both values in lab-infra next to `memo_bridge_version`. lab-infra does not check `sums_sha256` yet (follow-up below).
+writes `dist/release/SHA256SUMS` (the files lab-infra copies: `bridge/`, `server/`, `package.json`, `pnpm-lock.yaml`, `deploy/memo-runner-dispatch`, `deploy/record-result`) and `dist/release/memo-bridge-release.json` with `commit` and `sums_sha256`, the sha256 of `SHA256SUMS`. Record both values in lab-infra next to `memo_bridge_version`. lab-infra does not check `sums_sha256` yet (follow-up below).
+
+memo-bridge uses pnpm (`packageManager` in `package.json`) and ships `pnpm-lock.yaml` instead of `package-lock.json`. Before lab-infra pins a commit that has no `package-lock.json`, its role must copy `pnpm-lock.yaml` (`memo_bridge_app_files`) and install the production dependencies with `pnpm install --frozen-lockfile --prod --ignore-scripts` in place of `npm ci --omit=dev --ignore-scripts`, with pnpm installed on the VPS.
 
 Then the lab-infra order: PR-A (adopt, empty `make check` diff), PR-B with `memo_runner_enabled: true`, the new `memo_bridge_version`, the two tokens in the keychain, after the TODO-P4-01 spike.
 

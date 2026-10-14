@@ -3,7 +3,7 @@
 // path to the runtime: remote surface, forwarder, hub v2 envelope, agent, runtime, store, Git.
 // remote.json has the exact shape lab-infra renders. Stage R (writes disabled), stage W (writes
 // enabled in a test config, the write gate probe on a systemctl fixture), and the journal.
-// Run alone with `npm run smoke:remote`.
+// Run alone with `pnpm run smoke:remote`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

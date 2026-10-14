@@ -7,7 +7,7 @@ const root = resolve(process.cwd());
 // The server and the detached job runner it starts from its own directory ship together.
 const bundled = ['plugin/server/dist/index.mjs', 'plugin/server/dist/job-runner.mjs'].map(file => join(root, file));
 if (!bundled.every(file => existsSync(file))) {
-  console.error('First run npm run build');
+  console.error('First run pnpm run build');
   process.exit(1);
 }
 const zipPath = join(root, 'dist/memo-bridge-plugin-portable.zip');

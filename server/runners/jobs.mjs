@@ -34,7 +34,7 @@
 // root dispatcher through the spool, follows the unit, and records the status root wrote
 // from systemd's own result. The job's code never writes the store there.
 //
-// Version skew: `npm run install:local` replaces job-runner.mjs under servers that are still
+// Version skew: `pnpm run install:local` replaces job-runner.mjs under servers that are still
 // running. The runner protocol is passed first on the runner's command line; a runner refuses
 // a job launched with another protocol, and a runner older than the protocol argument reads
 // it as its state directory and refuses too (not absolute). Bump it on any change to the job

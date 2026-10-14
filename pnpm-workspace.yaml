@@ -1,0 +1,5 @@
+# pnpm settings for this single-package repository (https://pnpm.io/settings).
+# Dependency build scripts are refused unless listed here (strictDepBuilds, https://pnpm.io/settings/build).
+# esbuild (a dev dependency) runs its postinstall, as it did under npm.
+allowBuilds:
+  esbuild: true
