@@ -104,7 +104,7 @@ export function covers(lock, need) {
 
 // What one operator call touches: [{kind, key, shown, unresolved?}], or {error}. T0 calls touch
 // nothing. Commands are opaque (their argv can name any path): a run with a cwd is covered by a
-// path lock on that cwd, a run without one, a root run and a script need the host.
+// path lock on that cwd, a run without one, a root run and a script need the host. A user script follows the run rule.
 export function operatorTargets(op, args, { homes = DEFAULT_HOMES, uploads = null } = {}) {
   const host = args?.host;
   const path = raw => {
@@ -130,7 +130,16 @@ export function operatorTargets(op, args, { homes = DEFAULT_HOMES, uploads = nul
     case 'operator_run':
       if (args.as_root === true || typeof args.cwd !== 'string') return global;
       return all([path(args.cwd)]);
-    case 'operator_script': return global;
+    // Repatriation D-R6: a user script with a cwd is covered by a path lock on it, like a run.
+    case 'operator_script':
+      if (args.as_root === true || typeof args.cwd !== 'string') return global;
+      return all([path(args.cwd)]);
+    case 'operator_docker': {
+      // Reads touch nothing; restart, stop and start need a lock on the container.
+      if (!['restart', 'stop', 'start'].includes(args.action)) return [];
+      const container = lockTarget(host, 'container', args.container, homes);
+      return container ? [container] : { error: 'invalid_arguments' };
+    }
     case 'operator_service': {
       const unit = lockTarget(host, 'unit', args.unit, homes);
       return unit ? [unit] : { error: 'invalid_arguments' };
@@ -276,6 +285,32 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     return { ok: true };
   }
 
+  // Implicit per-call locks (repatriation D-R14, bench 2026-10-14 20:04): a remote call with no
+  // covering lock of its own holds its targets for the duration of the call only, refused only
+  // when ANOTHER workspace's lock overlaps. Never counted in the per-workspace limit, never
+  // verified with the runtime (they last one call). Returns {ok, ids, release()} or a refusal.
+  function acquireImplicit(host, targets, { principal, clientSession, workspaceId, ttlMs = 3_600_000 }) {
+    sweep();
+    const caller = session(clientSession);
+    const hostLocks = [...locks.values()].filter(l => l.host === host);
+    const mine = hostLocks.filter(l => l.workspaceId === workspaceId && l.principal === principal.id);
+    for (const need of targets) {
+      const blocking = hostLocks.find(l => (l.workspaceId !== workspaceId || l.principal !== principal.id) && overlaps(l, need));
+      if (blocking) return fail('locked_by_other_session', { holder: holderOf(blocking),
+        next_step: 'another conversation holds this target: tell the owner and wait, or work elsewhere' });
+    }
+    const t = now();
+    const ids = [];
+    for (const need of targets) {
+      if (mine.some(l => covers(l, need))) continue;
+      const lock = { id: newId(), host, kind: need.kind, key: need.key, shown: need.shown, workspaceId, principal: principal.id, session: caller,
+        project: null, reason: 'implicit (one call)', taken: t, expires: t + ttlMs, implicit: true };
+      locks.set(lock.id, lock);
+      ids.push(lock.id);
+    }
+    return { ok: true, ids, release: () => { for (const id of ids) locks.delete(id); } };
+  }
+
   // A started upload belongs to the path it was started for (operator_upload_init answer).
   function recordUpload(args, data) {
     if (data?.ok !== true || typeof data.upload_id !== 'string' || typeof args?.path !== 'string') return;
@@ -295,7 +330,9 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
       locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
   }
 
-  return Object.freeze({ handle, check, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
+  // What one call touches, with the uploads this table knows (implicit locks, D-R14).
+  const targetsOf = (op, args) => operatorTargets(op, args, { homes, uploads });
+  return Object.freeze({ handle, check, acquireImplicit, targetsOf, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
 }
 
 // Merge the hub's view into a sessions_overview answer of the runtime.

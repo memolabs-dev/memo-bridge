@@ -61,7 +61,10 @@ for (const id of ['operator-mac', 'operator-vps']) if (existsSync(`${dir}/${id}.
 const freezeFile = env.MEMO_BRIDGE_OPERATOR_FREEZE_FILE || '/etc/memo-bridge/operator-FROZEN';
 if (!isAbsolute(freezeFile)) throw new Error('MEMO_BRIDGE_OPERATOR_FREEZE_FILE must be an absolute path');
 const approvalModes = env.MEMO_BRIDGE_OPERATOR_APPROVAL ? JSON.parse(env.MEMO_BRIDGE_OPERATOR_APPROVAL) : undefined;
-const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile, approvalModes } : null;
+// Repatriation D-R14: the project a conversation's workspace is opened on when an operator call
+// arrives without one (default "ops").
+const autoWorkspaceProject = env.MEMO_BRIDGE_OPERATOR_AUTO_PROJECT || 'ops';
+const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile, approvalModes, autoWorkspaceProject } : null;
 const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit, operator });
 
 // Built before the hub starts: the public listener gets the TLS pair, remote.json and the hub's
@@ -81,7 +84,7 @@ if (operator && env.MEMO_BRIDGE_TELEGRAM_CHAT_ID) {
   if (ownerChatId === null) throw new Error('MEMO_BRIDGE_TELEGRAM_CHAT_ID must be a numeric chat id');
   const token = await readTelegramToken(env);
   if (token.error) throw new Error(`telegram-bot credential ${token.error}`);
-  bot = createOperatorBot({ client: createTelegramClient({ token: token.token }), ownerChatId, approvals: hub.operatorApprovals,
+  bot = createOperatorBot({ client: createTelegramClient({ token: token.token }), ownerChatId, approvals: hub.operatorApprovals, grants: hub.operatorGrants,
     log: (event, details) => audit({ at: new Date().toISOString(), event, ...details }),
     hub: {
       freeze: by => hub.setOperatorFrozen(true, by),

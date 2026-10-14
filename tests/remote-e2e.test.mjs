@@ -50,8 +50,9 @@ test('stage W (remote_writes enabled, no root runner): a conversation claims, wr
   const chat = await s.client(await s.mint());
   assert.deepEqual((await chat.tools()).map(tool => tool.name).sort(), sorted(REMOTE_TOOLS));
 
-  // workspace_open: client_type and host come from the server, mac is refused.
-  assert.equal((await chat.call('workspace_open', { project: 'demo', host: 'mac' })).data.error, 'host_not_remote_enabled');
+  // workspace_open: client_type and host come from the server; a requested mac is kept as a label (repatriation D-R14).
+  const macOpened = await chat.call('workspace_open', { project: 'demo', host: 'mac' });
+  assert.deepEqual([macOpened.data.ok, macOpened.data.workspace.host, macOpened.data.note.host_requested], [true, 'vps', 'mac']);
   const opened = await chat.call('workspace_open', { project: 'demo', client_type: 'codex' }, S1);
   assert.equal(opened.data.ok, true, JSON.stringify(opened.data));
   assert.deepEqual([opened.data.workspace.client_type, opened.data.workspace.host], ['chatgpt', 'vps']);

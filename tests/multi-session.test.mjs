@@ -429,7 +429,8 @@ test('hub: a lock refuses another workspace before anything is signed; workspace
   assert.equal(refused.error, 'locked_by_other_session');
   assert.equal(refused.holder.reason, 'migration');
   assert.equal(refused.host, 'vps');
-  assert.equal((await call('operator_edit', { path: '/srv/a/f', mode: 'append', new_text: 'x' }, SB)).error, 'workspace_required');
+  // Repatriation D-R14: without a workspace the call gets an implicit one and an implicit lock, which the held lock still refuses.
+  assert.equal((await call('operator_edit', { path: '/srv/a/f', mode: 'append', new_text: 'x' }, SB)).error, 'locked_by_other_session');
   // The holder passes the gate: the call goes on to the (absent) agent.
   assert.equal((await call('operator_edit', { workspace_id: WS_A, path: '/srv/a/f', mode: 'append', new_text: 'x' }, SA)).error, 'host_offline');
   assert.ok(audit.some(e => e.event === 'operator_refused' && e.reason === 'locked_by_other_session'));
@@ -440,7 +441,8 @@ test('hub: a lock refuses another workspace before anything is signed; workspace
 test('host default: the Mac when operator-mac is connected, with the host in the result', async t => {
   const { hub } = await hubWith(t, { mac: true });
   const out = await hub.requestOperator(undefined, 'operator_policy', { args: {}, principal: CHAT });
-  assert.deepEqual(out, { ok: true, served_by: 'fake-mac', host: 'mac' });
+  // Repatriation D-R4: the hub adds the host's standing approvals to operator_policy.
+  assert.deepEqual(out, { ok: true, served_by: 'fake-mac', host: 'mac', standing_approvals: [] });
 });
 
 test('host default: vps when the Mac is not connected; root, script and dangerous calls need the host', async t => {

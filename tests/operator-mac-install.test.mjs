@@ -56,7 +56,9 @@ function macHome(t) {
 
 function run(home, args = []) {
   const out = spawnSync('/bin/bash', [SCRIPT, ...args], { encoding: 'utf8', timeout: 120_000,
-    env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(home, 'tmp'), MEMO_OPERATOR_NODE: process.execPath } });
+    // The root helper probe looks in the temporary home, not /Library: this Mac may have the real one installed.
+    env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(home, 'tmp'), MEMO_OPERATOR_NODE: process.execPath,
+      MEMO_OPERATOR_ROOT_DIR: join(home, 'no-root-helper') } });
   const lines = out.stdout.trim().split('\n').filter(Boolean);
   const steps = Object.fromEntries(lines.filter(l => l.startsWith('{')).map(l => JSON.parse(l)).map(o => [o.step, o]));
   return { ...out, steps };
@@ -89,7 +91,11 @@ test('dry run: key 0600 never printed, policy 0444 that operator-policy.mjs load
   const policy = loadOperatorPolicy({ path: L.policyFile, expectedHost: 'mac', trustedUids: [0, UID], home });
   assert.deepEqual([policy.maxTierName, policy.approvalMode, policy.rootHelper], ['exec', 'dangerous', null]);
   assert.deepEqual([...policy.declaredRoots.read], [home]);
-  assert.deepEqual([...policy.declaredRoots.write], ['memolabs', 'Desktop', 'Downloads', 'Documents'].map(d => join(home, d)).concat('/tmp'));
+  // Repatriation D-R10 (owner decision 2026-10-14): the whole home and /tmp; run_path for user runs.
+  assert.deepEqual([...policy.declaredRoots.write], [home, '/tmp']);
+  assert.deepEqual([...policy.runPath], [join(home, 'Library/pnpm/bin'), join(home, '.local/bin'), '/opt/homebrew/bin', '/opt/homebrew/sbin']);
+  for (const denied of ['.local/share/memo-bridge/operator/bridge/operator-agent-cli.mjs', '.memo-operator/policy.json', '.ssh/id_ed25519',
+    'Library/Keychains/login.keychain-db', '.password-store/x.gpg']) assert.equal(createDenylist(policy).denied(join(home, denied)), true, denied);
   assert.deepEqual([policy.frozenFile, policy.auditFile, policy.stateDir], [L.frozenFile, L.auditFile, L.stateDir]);
   assert.equal(mode(L.stateDir), 0o700);
   assert.equal(mode(L.logs), 0o700);

@@ -146,4 +146,17 @@ Residual risks, accepted by the owner:
 - T2 on the Mac is the owner's user: a command can do what `memo` can do; the read-only policy
   stops the agent's own write tools, not a command.
 - An argv classifier does not see everything a program does; a prompt injection can still run
-  a call that is not on the dangerous list.
+  a call that is not on the dangerous list. Since the repatriation of SentinelX usage
+  (`.agent/project/repatriate/`), the classifier also treats as hard (one approval per call,
+  never covered by a standing approval) `gh pr merge`, `gh api` writes on protected endpoints and
+  deletions, `gh secret`, `gh auth`, force or deleting pushes and pushes to main or master,
+  `git reset --hard`, `git clean -f`, `rsync --delete`, `docker rm` and prune, wherever the
+  program appears in argv and inside shell and `ssh` strings.
+- A standing approval (`operator_grant`, approved once by the owner in Telegram, 1 to 12 h) on a
+  wrapper such as `bash`, `python3`, `node`, `make` or `git` lets any command run as the agent
+  user without a prompt under its cwd prefixes; on `ssh` it is root on lab. Root calls are never
+  covered, and the agent and the root helper refuse a standing id on a hard call themselves.
+- Read-only commands (`ps`, `cat`, `grep`, `git status`...) run without workspace, lock or
+  approval; the agent checks their path arguments against the read roots and the denylist and
+  switches off git configuration that can name programs. Remote writes take an implicit lock for
+  the duration of one call.

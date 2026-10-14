@@ -25,7 +25,7 @@
 import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { z } from 'zod/v4';
 import { operatorCallTier, OPERATOR_OPERATION_CAPABILITY } from '../server/coordinator/policy.mjs';
-import { needsApproval } from './operator-dangerous.mjs';
+import { approvalInScope, needsApproval } from './operator-dangerous.mjs';
 import { finalizeResult } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
 import { TRANSFER_SOURCE_SCHEMAS } from './operator-transfer-source.mjs';
@@ -108,15 +108,20 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       const admitted = guard.admit(tier);
       if (admitted) return refuse(admitted);
       if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
+      // A standing approval never stands for a hard call or a root one (spec D-R5).
+      if (!approvalInScope(signed.approval, op, args, tier)) return refuse('approval_scope');
       const schema = schemas[op];
       const parsed = schema ? schema.safeParse(args ?? {}) : { success: false };
       if (!parsed.success) return refuse('invalid_arguments');
       if (parsed.data.host !== policy.host) return refuse('host_mismatch');
 
-      const toRoot = tier === 3 || (op === 'operator_job_status' && String(parsed.data.job_id).startsWith('rj_'));
+      // operator_docker goes to the root helper whatever its tier (repatriation D-R11), on lab only.
+      const toRoot = tier === 3 || (op === 'operator_job_status' && String(parsed.data.job_id).startsWith('rj_')) || op === 'operator_docker';
       let data;
       try {
-        if (Object.hasOwn(internal, op)) {
+        if (op === 'operator_docker' && policy.host !== 'vps') {
+          data = { ok: false, error: 'docker_unavailable_on_host' };
+        } else if (Object.hasOwn(internal, op)) {
           data = await internal[op](parsed.data, { id: ctx.id, args, principal, operator: ctx.operator });
         } else if (toRoot) {
           // The helper checks the same signature and its own policy, runs, journals, bounds.

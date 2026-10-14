@@ -41,7 +41,9 @@ export function createApprovalStore({ now = Date.now, random = randomBytes, maxP
       const key = keyOf(call);
       for (const a of items.values()) if (a.key === key && effective(a) === 'pending') return { approval: a, created: false };
       if ([...items.values()].filter(a => effective(a) === 'pending').length >= maxPending) return { error: 'approval_backlog' };
-      const id = `ap_${random(18).toString('base64url')}`;
+      // Never ap_st_: that prefix marks a standing approval (operator-grants.mjs, D-R5).
+      let id;
+      do { id = `ap_${random(18).toString('base64url')}`; } while (id.startsWith('ap_st_'));
       const a = { id, key, host: call.host, op: call.op, argsSha256: call.argsSha256, principal: call.principal, reason: call.reason ?? null,
         status: 'pending', created: now(), expires: now() + APPROVAL_TTL_MS, consumed: false, standingUntil: null, decidedBy: null };
       items.set(id, a);

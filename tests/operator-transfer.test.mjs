@@ -79,15 +79,18 @@ test('AC-2: secret, outside the roots, existing destination, overwrite with back
   assert.equal((await transfer(hub, { src_host: 'vps', src_path: '/x', dst_host: 'mac', dst_path: '/y' }, READER)).error, 'forbidden');
 });
 
-test('AC-2: a ChatGPT conversation needs its workspace and a lock on the destination; a frozen hub refuses', async t => {
+test('AC-2: a ChatGPT conversation writes the destination under its lock, explicit or implicit; another conversation\'s lock and a frozen hub refuse', async t => {
   const { hub, hosts } = await twoHostStack(t);
   writeFileSync(hosts.vps.p('srv/rw/r.txt'), 'remote\n');
   const args = { src_host: 'vps', src_path: hosts.vps.p('srv/rw/r.txt'), dst_host: 'mac', dst_path: hosts.mac.p('srv/rw/r.txt') };
   const session = 'c'.repeat(32);
   const call = (op, a) => hub.requestOperator(op === 'operator_transfer' ? undefined : a.host, op, { args: a, principal: CHAT, clientSession: session });
-  assert.equal((await call('operator_transfer', args)).error, 'workspace_required');
-  const noLock = await call('operator_transfer', { ...args, workspace_id: WS });
-  assert.deepEqual([noLock.error, noLock.side], ['lock_required', 'destination']);
+  // Repatriation D-R14: without workspace or lock, the destination writes use the conversation's
+  // workspace and an implicit lock held for each write, released after it.
+  const implicit = await call('operator_transfer', { ...args, dst_path: hosts.mac.p('srv/rw/r0.txt') });
+  assert.equal(implicit.status, 'done', JSON.stringify(implicit));
+  assert.equal(readFileSync(hosts.mac.p('srv/rw/r0.txt'), 'utf8'), 'remote\n');
+  assert.equal(hub.operatorLocks.size, 0);
   assert.equal((await call('operator_lock', { host: 'mac', workspace_id: WS, kind: 'path', target: hosts.mac.p('srv/rw') })).ok, true);
   const done = await call('operator_transfer', { ...args, workspace_id: WS });
   assert.equal(done.status, 'done', JSON.stringify(done));

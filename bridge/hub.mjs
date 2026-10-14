@@ -20,6 +20,7 @@ import { createServer } from 'node:https';
 import WebSocket, { WebSocketServer } from 'ws';
 import { McpServer, WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
+import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { bearerValid, nonce, verifyChallenge, keyFingerprint } from './crypto.mjs';
 import {
@@ -29,11 +30,12 @@ import {
 } from './protocol.mjs';
 import { AGENT_IDS, HOSTS, HUB_LOCAL_OPS, HUB_PRINCIPALS, OPERATOR_AGENT_IDS, OPERATOR_OPS, OPS, PRINCIPAL_IDS, RUNTIME_OPS, collectToolDefinitions,
   denialReason, isForwardable, isOperatorOp, servableBy } from './ops.mjs';
-import { OPERATOR_TIER_CAPABILITIES, authorize, operatorCallTier } from '../server/coordinator/policy.mjs';
+import { OPERATOR_TIER_CAPABILITIES, authorize, isRemotePrincipal, operatorCallTier } from '../server/coordinator/policy.mjs';
 import { collectOperatorDefinitions } from '../server/registry.mjs';
 import { argsSha256, createOperatorSigner } from './operator-signing.mjs';
 import { createApprovalStore } from './operator-approvals.mjs';
-import { dangerReason, needsApproval } from './operator-dangerous.mjs';
+import { classifyCall, dangerReason, needsApproval, readOnlyCommand } from './operator-dangerous.mjs';
+import { createGrantStore } from './operator-grants.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
 import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
@@ -102,6 +104,24 @@ export function createHub(options) {
       requestId: ctx.requestId }),
     frozen: () => hubFrozen(), record: (event, details) => record(event, null, details),
     ...(operator?.transferLimits ? { limits: operator.transferLimits } : {}) });
+  // Repatriation D-R14 (live bench 2026-10-14): a remote operator write or command without a
+  // workspace gets the conversation's own one (sessions_overview "you"), or a new one on
+  // autoWorkspaceProject, opened through the runtime for that conversation and journaled
+  // workspace_auto_open. Needs the conversation's session hint; without it, one explicit step.
+  const autoProject = typeof operator?.autoWorkspaceProject === 'string' ? operator.autoWorkspaceProject : 'ops';
+  const sessionWorkspace = operator?.sessionWorkspace ?? (async (principal, clientSession) => {
+    const runtime = runtimeHost ?? 'vps';
+    const seen = await sendAgent(runtime, 'sessions_overview', { args: {}, principal, clientSession });
+    const mine = seen?.ok === true ? seen.you?.workspaces?.[0] : null;
+    if (typeof mine === 'string') return { ok: true, workspace_id: mine, opened: false };
+    const opened = await sendAgent(runtime, 'workspace_open', { args: { project: autoProject, client_type: principal.client_type ?? 'chatgpt',
+      client_label: 'operator (auto)', host: 'vps' }, principal, clientSession });
+    return opened?.ok === true && typeof opened.workspace?.workspace_id === 'string'
+      ? { ok: true, workspace_id: opened.workspace.workspace_id, opened: true, project: opened.workspace.project }
+      : { ok: false, error: opened?.error ?? seen?.error ?? 'workspace_unavailable' };
+  });
+  // Repatriation D-R4: standing approvals, in memory like approvals and locks.
+  const grants = createGrantStore({ ...(operator?.now ? { now: operator.now } : {}), homes: operator?.homes ?? DEFAULT_HOMES });
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
@@ -140,8 +160,11 @@ export function createHub(options) {
     locks.seen(options.clientSession);
     // sessions_overview: the runtime knows the workspaces, the hub the operator locks.
     if (op === 'sessions_overview') {
-      return sendAgent(host, op, options).then(out => mergeOverview(out, locks.overview(options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly],
-        options.clientSession)));
+      const who = options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly];
+      return sendAgent(host, op, options).then(out => {
+        const merged = mergeOverview(out, locks.overview(who, options.clientSession));
+        return merged?.ok === true ? { ...merged, standing_approvals: grants.list(who.id) } : merged;
+      });
     }
     return sendAgent(host, op, options);
   }
@@ -183,7 +206,7 @@ export function createHub(options) {
   function resolveOperatorHost(op, args) {
     if (args?.host !== undefined) return { host: args.host };
     if (op === 'operator_script' || (op === 'operator_run' && args?.as_root === true) || operatorCallTier(op, args) === 3 ||
-      dangerReason(op, args ?? {}) !== null) {
+      dangerReason(op, args ?? {}) !== null || (op === 'operator_grant' && args?.action === 'request')) {
       return { error: { ok: false, error: 'host_required', detail: 'Mac ou VPS ? This call needs host "mac" or "vps", named explicitly.' } };
     }
     const mac = agents.get(OPERATOR_AGENT_IDS.mac);
@@ -217,6 +240,7 @@ export function createHub(options) {
     // approval_status is answered here: approvals live in the hub (TODO-P6-11).
     if (op === 'approval_status') return approvals.status(args.approval_id, host);
     locks.seen(clientSession);
+    if (op === 'operator_grant') return grantCall(host, args, principal);
     // Operator locks are answered here too (multi-session D-MS4), frozen or not: they change
     // nothing on a host.
     if (LOCK_OPS.includes(op)) {
@@ -234,20 +258,42 @@ export function createHub(options) {
     // D-MS5: the workspace and the locks of a T1 to T3 call, before any approval is asked. The
     // workspace_id is ours: it never reaches the agent, the signature or the approval hash.
     let lockedArgs = args;
-    if (tier > 0) {
-      const gate = locks.check(op, args, { principal, clientSession });
+    // Repatriation D-R13: a read-only command needs no workspace and no lock (still T2: signature,
+    // rate limit, both journals; the agent checks its paths).
+    const readOnly = op === 'operator_run' && args.as_root !== true && readOnlyCommand(args.argv) !== null;
+    let auto = null;
+    let implicit = null;
+    if (tier > 0 && !readOnly) {
+      let gate = locks.check(op, args, { principal, clientSession });
+      // Repatriation D-R14: a remote call without workspace or lock gets the conversation's
+      // workspace and implicit locks for this call only.
+      if (!gate.ok && ['workspace_required', 'lock_required'].includes(gate.error) && isRemotePrincipal(principal)) {
+        const out = await implicitGate(host, op, args, principal, clientSession);
+        if (out.ok) {
+          args = { ...args, workspace_id: out.workspace_id }; lockedArgs = args; auto = out.auto; implicit = out.implicit;
+          gate = locks.check(op, args, { principal, clientSession });
+          if (!gate.ok) implicit.release();
+        } else gate = out;
+      }
       if (!gate.ok) {
         record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: gate.error});
         return gate;
       }
     }
+    try {
+      return await signedCall(host, op, { args, lockedArgs, principal, requestId, clientSession, tier, readOnly, auto, frozen });
+    } finally { implicit?.release(); }
+  }
+
+  async function signedCall(host, op, { args, lockedArgs, principal, requestId, clientSession, tier, readOnly, auto, frozen }) {
     if (Object.hasOwn(args, 'workspace_id')) { const { workspace_id: _ws, ...rest } = args; args = rest; }
     const hash = argsSha256(args);
     let approval = null;
     const mode = approvalModes[host];
     if (needsApproval(mode, op, args, tier)) {
       const call = { host, op, argsSha256: hash, principal: principal.id };
-      approval = approvals.consume(call);
+      // A single-use approval for this exact call first, then a standing approval (D-R4).
+      approval = approvals.consume(call) ?? grants.covers({ host, op, args, principal: principal.id });
       if (!approval) {
         if (!bot) {
           record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'approval_unavailable'});
@@ -268,8 +314,11 @@ export function createHub(options) {
           record('operator_approval_requested', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, tier, reason, args_sha256: hash,
             approval_id: asked.approval.id});
         }
+        const danger = classifyCall(op, args);
+        const grantable = tier < 3 && danger !== null && danger.hard === false;
         return { ok: false, error: 'pending_approval', approval_id: asked.approval.id, expires_at: new Date(asked.approval.expires).toISOString(),
-          detail: 'the owner was asked in Telegram; poll approval_status, then repeat this exact call once it is approved' };
+          detail: 'the owner was asked in Telegram; poll approval_status, then repeat this exact call once it is approved',
+          ...(grantable ? { standing_approval_hint: `avoid one approval per call: operator_grant action request with programs ${JSON.stringify(danger.programs)} and a cwd_prefixes entry covering this cwd, once per work session` } : {}) };
       }
     }
     const id = newId();
@@ -280,12 +329,16 @@ export function createHub(options) {
     const timeoutMs = foreground ? Math.max(OPS[op].timeoutMs, ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 30) * 1000) : undefined;
     const out = await sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, requestId, clientSession, id, operator: signature, timeoutMs });
     if (op === 'operator_upload_init') locks.recordUpload(lockedArgs, out);
-    const data = op === 'operator_freeze_status' && out && out.ok !== false
-      ? { ...out, hub_frozen: frozen, frozen_above_t0: Boolean(out.frozen_above_t0) || frozen } : out;
+    let data = auto && out && typeof out === 'object' && !Array.isArray(out) ? { ...out, auto } : out;
+    data = op === 'operator_freeze_status' && data && data.ok !== false
+      ? { ...data, hub_frozen: frozen, frozen_above_t0: Boolean(data.frozen_above_t0) || frozen } : data;
+    // The standing approvals live here: operator_policy shows the ones of this host (D-R4).
+    if (op === 'operator_policy' && data && data.ok !== false) data = { ...data, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
     // Hub journal (spec D7): tier, args hash and redacted args, approval, outcome, duration, output
     // hash. The wire id matches the host journal's request id when no request id travelled.
     record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
-      args_sha256: signature.args_sha256, args: journalArgs(args), approval_id: approval, outcome: data?.ok === false ? 'refused' : 'ok',
+      args_sha256: signature.args_sha256, args: journalArgs(args), approval_id: approval, ...(readOnly ? { read_only: true } : {}),
+      outcome: data?.ok === false ? 'refused' : 'ok',
       code: data?.ok === false && CODE_RE.test(String(data.error)) ? data.error : null,
       exit_code: Number.isInteger(data?.exit_code) ? data.exit_code : null, ms: Date.now() - started, output_sha256: sha256Hex(data ?? null) });
     return data;
@@ -298,6 +351,78 @@ export function createHub(options) {
     if (op === 'operator_help') return operatorHelp(args);
     if (op === 'operator_transfer_status') return transfers.status(args, { principal });
     return transfers.start(args, { principal, clientSession, requestId });
+  }
+
+  // D-R14 (bench 2026-10-14 19:57 and 20:04): the conversation's workspace, keyed by its session
+  // hash: its own active one (runtime sessions_overview "you"), else one opened on
+  // autoWorkspaceProject (journaled workspace_auto_open), else a coordination id derived from the
+  // session (the runtime could not open one; journaled workspace_implicit). Then implicit locks on
+  // what the call touches, the global one for root calls, scripts and commands without cwd,
+  // released when the call returns (journaled lock_implicit). Without a session hint nothing can be
+  // bound: one explicit next step.
+  const sessionWorkspaces = new Map(); // session hash -> {workspaceId, opened}
+  async function implicitGate(host, op, args, principal, clientSession) {
+    let workspaceId = args.workspace_id;
+    let opened = false;
+    if (workspaceId === undefined) {
+      if (!clientSession) {
+        return { ok: false, error: 'workspace_required', next_step: `call workspace_open {"project":"${autoProject}"}, then repeat this call with its workspace_id` };
+      }
+      const known = sessionWorkspaces.get(clientSession);
+      if (known) workspaceId = known.workspaceId;
+      else {
+        let found;
+        try { found = await sessionWorkspace(principal, clientSession); } catch { found = { ok: false }; }
+        if (found?.ok && /^ws_[A-Za-z0-9_-]{16}$/.test(String(found.workspace_id))) {
+          workspaceId = found.workspace_id;
+          opened = found.opened === true;
+          if (opened) record('workspace_auto_open', null, { principal: principal.id, workspace_id: workspaceId, project: found.project ?? autoProject, op });
+        } else {
+          workspaceId = `ws_${createHash('sha256').update(`memo-bridge/implicit-workspace|${clientSession}`).digest('base64url').slice(0, 16)}`;
+          record('workspace_implicit', null, { principal: principal.id, workspace_id: workspaceId, code: typeof found?.error === 'string' ? found.error.slice(0, 64) : null });
+        }
+        sessionWorkspaces.set(clientSession, { workspaceId });
+        while (sessionWorkspaces.size > 256) sessionWorkspaces.delete(sessionWorkspaces.keys().next().value);
+      }
+    }
+    const targets = locks.targetsOf(op, { ...args, host });
+    if (targets.error) return { ok: false, error: targets.error };
+    if (targets.unknownUpload) return { ok: false, error: 'lock_required', next_step: 'start the upload again with operator_upload_init' };
+    const ttlMs = ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 120) * 1000;
+    const held = locks.acquireImplicit(host, targets, { principal, clientSession, workspaceId, ttlMs });
+    if (!held.ok) return held;
+    if (held.ids.length) record('lock_implicit', OPERATOR_AGENT_IDS[host], { principal: principal.id, workspace_id: workspaceId, op,
+      kinds: targets.map(t => t.kind) });
+    return { ok: true, workspace_id: workspaceId, implicit: held,
+      auto: { workspace_id: workspaceId, workspace_opened: opened, lock: 'implicit, released after this call' } };
+  }
+
+  // operator_grant (D-R4): list, request (the owner decides in Telegram), revoke. Answered here,
+  // never signed: it changes nothing on a host. A request needs the exec capability it would serve.
+  async function grantCall(host, args, principal) {
+    if (args.action === 'list') return { ok: true, host, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
+    if (args.action === 'revoke') {
+      const out = grants.revoke(args.grant_id, { principal: principal.id });
+      record('operator_grant_revoked', OPERATOR_AGENT_IDS[host], { principal: principal.id, grant_id: typeof args.grant_id === 'string' ? args.grant_id : null,
+        outcome: out.ok ? 'ok' : 'refused' });
+      return { ...out, host };
+    }
+    if (!principal.capabilities?.has(OPERATOR_TIER_CAPABILITIES[2])) return fail('forbidden');
+    if (hubFrozen()) return fail('frozen');
+    if (!bot?.notifyGrant) return fail('approval_unavailable');
+    const out = grants.request({ host, programs: args.programs, cwd_prefixes: args.cwd_prefixes, ttl_hours: args.ttl_hours, reason: args.reason ?? null },
+      principal.id);
+    if (!out.ok) return { ...out, host };
+    const view = grants.get(out.grant.id);
+    try { await bot.notifyGrant(view, { principal: principal.id }); } catch {
+      grants.revoke(out.grant.id);
+      record('operator_approval_unsent', OPERATOR_AGENT_IDS[host], { principal: principal.id, op: 'operator_grant' });
+      return fail('approval_unavailable');
+    }
+    record('operator_grant_requested', OPERATOR_AGENT_IDS[host], { principal: principal.id, grant_id: view.grant_id, programs: view.programs,
+      cwd_prefixes: view.cwd_prefixes, ttl_hours: view.ttl_hours });
+    return { ok: true, host, status: 'pending', grant_id: view.grant_id, programs: view.programs, cwd_prefixes: view.cwd_prefixes, ttl_hours: view.ttl_hours,
+      detail: 'the owner was asked in Telegram; poll operator_grant action list until it is active, then run with cwd under a prefix' };
   }
 
   function setOperatorFrozen(value, by) {
@@ -482,7 +607,8 @@ export function createHub(options) {
         if (!isOperatorOp(op)) continue;
         const def = operatorDefs.get(op);
         mcp.registerTool(op,{description:def.description,inputSchema:def.inputSchema,annotations:def.annotations},
-          async args=>operatorContent(await requestOperator(args?.host, op, {args: args ?? {}, principal})));
+          async args=>(operatorCallTier(op, args ?? {}) > 0 && gate.mutatingOps !== 'owner'
+            ? result(fail('forbidden')) : operatorContent(await requestOperator(args?.host, op, {args: args ?? {}, principal}))));
       }
     }
     if (gate.runtimeEnabled && definitions) {
@@ -576,7 +702,7 @@ export function createHub(options) {
     inventory, requestAgent, requestOperator, availableOps,
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
     setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
-    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers,
+    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers, operatorGrants: grants,
     // The Telegram bot (bridge/operator-telegram.mjs), built by hub-cli with the hub's owner hooks.
     attachOperatorBot(value) { bot = value; },
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }

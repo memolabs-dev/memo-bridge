@@ -153,7 +153,7 @@ test('R-MR-02, R-MR-06: over the socket, only signed fresh T3 calls run; every c
   guard.clearAuto();
   // Dangerous mode: a script or a Mac root tool without a signed approval is refused.
   assert.equal((await client.request(r.sign('operator_run', { host: 'mac', argv: ['diskutil', 'eraseDisk'], as_root: true }))).error, 'approval_required');
-  assert.equal((await client.request(r.sign('operator_script', { host: 'mac', interpreter: 'bash', content: 'id' }))).error, 'approval_required');
+  assert.equal((await client.request(r.sign('operator_script', { host: 'mac', as_root: true, interpreter: 'bash', content: 'id' }))).error, 'approval_required');
   // A host other than the helper's own.
   assert.equal((await client.request(r.sign('operator_run', { host: 'vps', argv: ['true'], as_root: true }))).error, 'invalid_arguments');
   // The journal: root-owned on the Mac (here the test user), 0600, chained, every call in it.
@@ -208,7 +208,7 @@ test('R-MR-04: system PATH only, scripts from a root-only file removed after, ba
   assert.equal(seen[0].opts.env.LANG, 'C');
   assert.equal(seen[0].opts.cwd, join(r.base, 'work'));
   assert.equal(seen[0].opts.timeoutMs, 30_000);
-  const script = await helper.handle(r.sign('operator_script', { host: 'mac', interpreter: 'bash', content: 'echo "$1"', args: ['a b'] },
+  const script = await helper.handle(r.sign('operator_script', { host: 'mac', as_root: true, interpreter: 'bash', content: 'echo "$1"', args: ['a b'] },
     { approval: APPROVAL }));
   assert.equal(script.ok, true);
   assert.deepEqual(seen[1].argv.slice(2), ['a b']);
@@ -398,9 +398,12 @@ test('hub: Mac root calls need host "mac", a workspace and a global lock, and ap
   // No host: refused, even with the Mac connected (a root call is never defaulted).
   assert.equal((await call(undefined, { argv: ['id'], as_root: true })).error, 'host_required');
   assert.equal((await call(undefined, { argv: ['diskutil', 'list'] })).error, 'host_required', 'the Mac dangerous list reaches the hub');
-  // Named: the workspace, then the global lock.
-  assert.equal((await call('mac', { host: 'mac', argv: ['id'], as_root: true })).error, 'workspace_required');
-  assert.equal((await call('mac', { host: 'mac', workspace_id: WS, argv: ['id'], as_root: true })).error, 'lock_required');
+  // Named, without workspace or lock (repatriation D-R14): the conversation's workspace and an
+  // implicit global lock for this call only, released after it.
+  const implicit = await call('mac', { host: 'mac', argv: ['id'], as_root: true });
+  assert.deepEqual([implicit.ok, implicit.host, implicit.auto?.lock], [true, 'mac', 'implicit, released after this call']);
+  assert.equal(hub.operatorLocks.size, 0);
+  seen.length = 0;
   const lock = await hub.requestOperator('mac', 'operator_lock', { args: { host: 'mac', workspace_id: WS, kind: 'global', reason: 'mac root' },
     principal: CHAT, clientSession: S });
   assert.equal(lock.ok, true, JSON.stringify(lock));

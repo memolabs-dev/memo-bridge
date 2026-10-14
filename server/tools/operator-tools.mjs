@@ -17,6 +17,7 @@ export const OPERATOR_TOOLS = Object.freeze(['operator_policy', 'operator_state'
   'operator_job_status', 'approval_status',
   'operator_edit', 'operator_upload_init', 'operator_upload_chunk', 'operator_upload_complete', 'operator_move', 'operator_copy',
   'operator_delete', 'operator_chmod', 'operator_run', 'operator_service', 'operator_script', 'operator_lock', 'operator_unlock',
+  'operator_grant', 'operator_docker',
   ...REPATRIATED_OPERATOR_TOOLS]);
 // Validator presets of operator_edit (spec D9): names only, each a fixed argv on the agent
 // (bridge/operator-write.mjs VALIDATORS). Never a caller string.
@@ -25,6 +26,9 @@ export const EDIT_MODES = Object.freeze(['replace', 'regex', 'block', 'append', 
 export const UPLOAD_CHUNK_BYTES = 64 * 1024;
 export const UPLOAD_MAX_BYTES = 512 * 1024 * 1024;
 export const SCRIPT_MAX_BYTES = 64 * 1024;
+// Repatriation D-R6: user scripts take these; root scripts (as_root) bash and python3 only.
+export const SCRIPT_INTERPRETERS = Object.freeze(['bash', 'zsh', 'sh', 'python3', 'node']);
+export const DOCKER_ACTIONS = Object.freeze(['ps', 'inspect', 'logs', 'compose_ps', 'restart', 'stop', 'start']);
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const writes = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
@@ -107,11 +111,14 @@ export const OPERATOR_SCHEMAS = Object.freeze({
     background: z.boolean().optional().describe('Return a job_id at once; read the result with operator_job_status.'),
     as_root: z.boolean().optional().describe('Run as root through the host\'s root helper (lab; the Mac once installed), time-bounded (operator:root).') }),
   operator_service: z.object({ host, ref, workspace_id: workspaceId, unit: z.string().min(1).max(128), action: z.enum(['start', 'stop', 'restart', 'reload']) }),
-  operator_script: z.object({ host, ref, workspace_id: workspaceId, interpreter: z.enum(['bash', 'python3']),
+  operator_script: z.object({ host, ref, workspace_id: workspaceId, interpreter: z.enum(SCRIPT_INTERPRETERS),
     content: z.string().min(1).max(SCRIPT_MAX_BYTES),
     args: z.array(z.string().max(4096)).max(64).optional(),
-    timeout_s: z.number().int().min(1).max(3600).optional(),
-    background: z.boolean().optional() }),
+    cwd: path.optional().describe('Working directory; a standing approval needs it under its prefix.'),
+    env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/), z.string().max(4096)).optional().describe('Only names the host policy allows.'),
+    timeout_s: z.number().int().min(1).max(3600).optional().describe('Default 30, at most 600; up to 3600 with background.'),
+    background: z.boolean().optional(),
+    as_root: z.boolean().optional().describe('Run as root through the root helper (bash or python3 only, operator:root). Default: as the agent user.') }),
   operator_lock: z.object({ host, ref, workspace_id: z.string().max(40).describe('Your workspace_id from workspace_open.'),
     kind: z.enum(LOCK_KINDS).describe('path: a file or directory subtree; unit: a systemd unit; container: a docker container; global: the whole host (root calls, scripts, commands without cwd).'),
     target: z.string().min(1).max(4096).optional().describe('Absolute path ("~/" on the Mac), unit or container name. Not used for global.'),
@@ -120,6 +127,17 @@ export const OPERATOR_SCHEMAS = Object.freeze({
   operator_unlock: z.object({ host, ref, workspace_id: z.string().max(40).describe('Your workspace_id.'),
     lock_id: z.string().max(40).optional().describe('One lock (lk_...); or kind and target; nothing releases all your locks on this host.'),
     kind: z.enum(LOCK_KINDS).optional(), target: z.string().min(1).max(4096).optional() }),
+  operator_grant: z.object({ host, ref, action: z.enum(['list', 'request', 'revoke']),
+    programs: z.array(z.string().min(1).max(64)).min(1).max(16).optional().describe('request: bare program names, e.g. ["git","node","pnpm","python3","make","ssh"].'),
+    cwd_prefixes: z.array(z.string().min(1).max(4096)).min(1).max(4).optional().describe('request: directories the commands run in ("~/memolabs"); never "/".'),
+    ttl_hours: z.number().int().min(1).max(12).optional().describe('request: 1 to 12 hours. Default 8.'),
+    reason: z.string().max(200).optional(),
+    grant_id: z.string().regex(/^ap_st_[A-Za-z0-9_-]{16,34}$/).optional().describe('revoke: the grant to revoke.') }),
+  operator_docker: z.object({ host, ref, workspace_id: workspaceId, action: z.enum(DOCKER_ACTIONS),
+    container: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/).optional().describe('inspect, logs, restart, stop, start: a container name from ps.'),
+    project: z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9_-]{0,127}$/).optional().describe('compose_ps: a compose project name (omit to list projects).'),
+    lines: z.number().int().min(1).max(2000).optional().describe('logs: last lines, default 200.'),
+    since: z.string().regex(/^-?\d{1,5}(s|m|h)$/).optional().describe('logs: relative age, e.g. -2h or 30m.') }),
   ...REPATRIATED_SCHEMAS
 });
 
@@ -143,11 +161,13 @@ const DESCRIPTIONS = Object.freeze({
   operator_copy: 'Copy inside the host\'s write roots; a directory needs recursive. Secret files are not copied. Replacing a destination needs overwrite and keeps a backup.',
   operator_delete: 'Delete a file, or a directory with recursive, inside the host\'s write roots. A backup is always made first; if it fails nothing is deleted.',
   operator_chmod: 'Change the permission bits of a path inside the host\'s write roots (no setuid, setgid or sticky bit).',
-  operator_run: 'Run one program with arguments, without a shell (;, |, $() are plain bytes), as the agent user, or as root with as_root (lab, and the Mac when its root helper is installed). Output is redacted and bounded. Dangerous commands wait for the owner\'s approval in Telegram.',
+  operator_run: 'Run one program with arguments, without a shell (;, |, $() are plain bytes), as the agent user, or as root with as_root (lab, and the Mac when its root helper is installed). Output is redacted and bounded; the whole process group is killed at the timeout. Wrappers (git, node, pnpm, python3, make, bash...) and ssh, scp, rsync to a host wait for the owner\'s approval in Telegram unless a standing approval (operator_grant) covers program and cwd; the destructive list always asks.',
   operator_service: 'Start, stop, restart or reload a systemd unit declared in the host policy (lab).',
-  operator_script: 'Run a bash or python3 script (at most 64 KiB) as root through the host\'s root helper (lab: a transient systemd unit with time and memory limits; the Mac: its own process group, killed at the timeout). Always needs the owner\'s approval when the host is in dangerous mode.',
+  operator_script: 'Run a script (bash, zsh, sh, python3 or node, at most 64 KiB) as the agent user (the owner on the Mac, memo-operator on lab), in its own process group killed at the timeout, with cwd, allowed env, timeout and background. as_root: true runs bash or python3 as root through the root helper instead (operator:root). Needs the owner\'s approval, or a standing approval (operator_grant) naming the interpreter and covering cwd.',
   operator_lock: 'Take (or renew) an operator lock for your workspace before any operator write, command or root call: a path subtree, a systemd unit, a docker container, or global for the whole host. Other conversations are refused with locked_by_other_session on what you lock, and you are refused the same way on theirs: then stop and tell the owner. TTL 15 min by default, at most 2 h; release it with operator_unlock when done. Changes nothing on the host.',
   operator_unlock: 'Release your operator locks on a host: one lock_id, one kind and target, or all of them. Changes nothing on the host.',
+  operator_grant: 'Standing approvals. At the start of a work session, action request asks the owner ONCE in Telegram to approve a family of commands: programs (e.g. git, node, pnpm, python3, make, ssh), cwd_prefixes and ttl_hours (default 8, at most 12) on one host. While active, operator_run and operator_script calls with a cwd under a prefix, whose wrapper and remote programs are all named, run without asking again. The truly destructive list (rm, disks, sudoers, gh pr merge, force push, reset --hard...) still asks every time; as_root is never covered. list shows active and pending grants; revoke ends one. Changes nothing on the host.',
+  operator_docker: 'Docker on lab without the docker group, through the root helper: ps, inspect (projected, never the environment), logs, compose_ps; restart, stop, start of a container from the live list (these three need a container lock). Stopping or restarting traefik, memo-* or pocket-id asks the owner. No run, exec or pull here.',
   ...REPATRIATED_DESCRIPTIONS
 });
 
@@ -157,6 +177,7 @@ const ANNOTATIONS = Object.freeze({
   operator_copy: writes, operator_chmod: writes, operator_move: destructive, operator_delete: destructive,
   operator_run: destructive, operator_service: destructive, operator_script: destructive,
   operator_lock: writes, operator_unlock: { ...writes, idempotentHint: true },
+  operator_grant: writes, operator_docker: destructive,
   ...REPATRIATED_ANNOTATIONS
 });
 

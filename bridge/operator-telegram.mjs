@@ -1,7 +1,8 @@
 // Telegram bot of the operator surface (Phase 6, TODO-P6-11, spec D5, D6, AC-P6-04, AC-P6-05).
 //
 // One purpose, one fixed owner: the bot sends approval requests to the owner's private chat and
-// takes three commands from that chat only: /freeze, /unfreeze, /status. Every update from any
+// takes commands from that chat only: /freeze, /unfreeze, /status, and for standing approvals
+// (repatriation D-R4) /grant <host> <prog,prog> <cwd>[,<cwd>] [<hours>h], /approvals, /revoke <id>|all. Every update from any
 // other chat or user is ignored (counted, never read further). No tool sends a message, no tool
 // names a recipient, and the model cannot freeze or unfreeze anything.
 //
@@ -72,7 +73,19 @@ const DECISIONS = Object.freeze({ a: 'approve', d: 'deny', s: 'standing' });
 // (= his Telegram user id). approvals: createApprovalStore. hub hooks:
 //   freeze(by), unfreeze(by): the hub's owner-only setters (unfreeze also clears the agents'
 //   auto-freeze through the signed internal op), status(): text for /status.
-export function createOperatorBot({ client, ownerChatId, approvals, hub, log = () => {}, pollTimeoutS = 30, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+// "/grant mac git,node,pnpm ~/memolabs,~/work 8h" -> the arguments of grants.grantByOwner, or null.
+export function parseGrantCommand(text) {
+  const parts = String(text ?? '').trim().split(/\s+/);
+  if (parts.length < 4 || parts.length > 5) return null;
+  const [, host, programs, prefixes, ttl] = parts;
+  const hours = ttl === undefined ? 8 : /^\d{1,2}h?$/.test(ttl) ? Number.parseInt(ttl, 10) : NaN;
+  return { host, programs: programs.split(',').filter(Boolean), cwd_prefixes: prefixes.split(',').filter(Boolean), ttl_hours: hours };
+}
+
+const grantLine = g => `${g.grant_id} ${g.status} ${g.host}: ${g.programs.join(', ')} under ${g.cwd_prefixes.join(', ')}`
+  + (g.expires_at ? ` until ${g.expires_at}` : ` (${g.ttl_hours} h once approved)`) + (g.principal !== 'owner' ? ` for ${g.principal}` : '');
+
+export function createOperatorBot({ client, ownerChatId, approvals, grants = null, hub, log = () => {}, pollTimeoutS = 30, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
   if (!Number.isSafeInteger(ownerChatId)) throw new Error('owner chat id required');
   let offset = 0;
   let stopped = false;
@@ -89,10 +102,40 @@ export function createOperatorBot({ client, ownerChatId, approvals, hub, log = (
       if (command === '/freeze') { await hub.freeze('telegram'); await reply('Operator access frozen above T0.'); }
       else if (command === '/unfreeze') { const r = await hub.unfreeze('telegram'); await reply(`Operator access unfrozen. ${r ?? ''}`.trim()); }
       else if (command === '/status') await reply(String(await hub.status()));
+      else if (command === '/grant' && grants) {
+        const args = parseGrantCommand(msg.text);
+        const out = args ? grants.grantByOwner(args, 'telegram') : { ok: false, error: 'usage' };
+        log('operator_grant_owner', { ok: out.ok, error: out.ok ? null : out.error });
+        await reply(out.ok ? `Standing approval active.\n${grantLine(grants.get(out.grant.id))}`
+          : `Not granted: ${out.error}${out.detail ? ` (${out.detail})` : ''}${out.program ? ` ${out.program}` : ''}.\nUsage: /grant mac git,node,pnpm ~/memolabs 8h`);
+      } else if (command === '/approvals' && grants) {
+        const list = grants.list();
+        await reply(list.length ? `Standing approvals:\n${list.map(grantLine).join('\n')}` : 'No standing approval.');
+      } else if (command === '/revoke' && grants) {
+        const target = String(msg.text ?? '').trim().split(/\s+/)[1] ?? '';
+        if (target === 'all') { const n = grants.revokeAll(); log('operator_grant_revoked', { count: n }); await reply(`Revoked ${n} standing approval(s).`); }
+        else {
+          const out = grants.revoke(target);
+          log('operator_grant_revoked', { ok: out.ok });
+          await reply(out.ok ? `Revoked ${target}.` : `Not revoked: ${out.error}. Usage: /revoke <id> or /revoke all`);
+        }
+      }
       return;
     }
     if (cb) {
       if (!fromOwner(cb.message?.chat, cb.from)) { ignored++; log('telegram_update_ignored', {}); return; }
+      const sg = /^sg:([ad]):(ap_st_[A-Za-z0-9_-]{16,34})$/.exec(String(cb.data ?? ''));
+      if (sg && grants) {
+        const decision = sg[1] === 'a' ? 'approve' : 'deny';
+        const out = grants.decide(sg[2], decision, 'telegram');
+        log('operator_grant_decided', { grant_id: sg[2], decision, ok: out.ok });
+        await client.answerCallbackQuery({ callback_query_id: cb.id, text: out.ok ? `Done: ${decision}` : out.error });
+        if (out.ok && cb.message?.message_id) {
+          await client.editMessageText({ chat_id: ownerChatId, message_id: cb.message.message_id,
+            text: `${String(cb.message.text ?? '').slice(0, 3000)}\n\nDecision: ${decision}` }).catch(() => {});
+        }
+        return;
+      }
       const m = /^ap:([ads]):(ap_[A-Za-z0-9_-]{16,40})$/.exec(String(cb.data ?? ''));
       if (!m) { await client.answerCallbackQuery({ callback_query_id: cb.id, text: 'Unknown action' }); return; }
       const decision = DECISIONS[m[1]];
@@ -123,6 +166,26 @@ export function createOperatorBot({ client, ownerChatId, approvals, hub, log = (
       await client.sendMessage({ chat_id: ownerChatId, text, reply_markup: { inline_keyboard: [
         [{ text: 'Approve', callback_data: `ap:a:${approval.id}` }, { text: 'Deny', callback_data: `ap:d:${approval.id}` }],
         [{ text: 'Approve this exact call for 15 min', callback_data: `ap:s:${approval.id}` }]
+      ] } });
+    },
+    // Ask the owner for a standing approval (D-R4). grant: operator-grants.mjs view.
+    async notifyGrant(grant, { principal }) {
+      const wrappers = grant.programs.filter(p => !['gh', 'rsync', 'scp', 'sftp', 'ssh', 'mosh'].includes(p));
+      const text = redactSecrets([
+        'Memo Bridge standing approval request',
+        `host: ${grant.host}   for ${grant.ttl_hours} h once approved`,
+        `programs: ${grant.programs.join(', ')}`,
+        `cwd under: ${grant.cwd_prefixes.join(', ')}`,
+        `principal: ${principal}`,
+        ...(grant.reason ? [`reason: ${grant.reason}`] : []),
+        '',
+        `While active these run without asking: ${wrappers.length ? `${wrappers.join(', ')} can run ANY command as the agent user. ` : ''}`
+          + `${grant.programs.includes('ssh') || grant.programs.includes('scp') ? 'ssh and scp to lab act as ROOT on lab. ' : ''}`
+          + 'rm, disks, sudoers, gh pr merge, force push, reset --hard and root calls still ask every time.',
+        `Revoke any time: /revoke ${grant.grant_id}`
+      ].join('\n')).text.slice(0, MAX_TEXT);
+      await client.sendMessage({ chat_id: ownerChatId, text, reply_markup: { inline_keyboard: [
+        [{ text: 'Approve', callback_data: `sg:a:${grant.grant_id}` }, { text: 'Deny', callback_data: `sg:d:${grant.grant_id}` }]
       ] } });
     },
     async pollOnce() {

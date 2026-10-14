@@ -29,9 +29,9 @@ hash-chained journal.
 | Tier | Scope (Pocket ID) | lab (`operator-vps`) | Mac (`operator-mac`) |
 |---|---|---|---|
 | T0 read | `operator:read` | policy, state, list, read, search, journal and docker logs of declared units and containers, service status, job status, approval status, freeze status, audit verify | the same, without logs and service status (no journald, no systemd: `logs_unavailable_on_host`, `systemd_unavailable_on_host`) |
-| T1 write | `operator:write` | edit (presets, backup, atomic), upload, move, copy, delete with backup, chmod, inside the write roots | the same, inside `~/memolabs`, `~/Desktop`, `~/Downloads`, `~/Documents`, `/tmp` |
-| T2 exec | `operator:exec` | `operator_run` argv as `memo-operator` (no shell, no sudo, no docker group); `operator_service` start, stop, restart, reload of declared units through polkit | `operator_run` argv as `memo`, the owner's own user |
-| T3 root | `operator:root` | `operator_run as_root`, `operator_script` (bash, python3), each in a transient `systemd-run` unit with `RuntimeMaxSec`, `MemoryMax=2G`, `TasksMax=512`, through the root helper | the same two tools, through the LaunchDaemon `dev.memolabs.memo-operator-root`: each call in its own process group, killed at the timeout, `PATH` limited to system directories, no memory limit; without the helper installed, `root_unavailable_on_host` |
+| T1 write | `operator:write` | edit (presets, backup, atomic), upload, move, copy, delete with backup, chmod, inside the write roots; `operator_grant` (standing approvals, answered by the hub) | the same, inside the whole home and `/tmp` minus the denylist (owner decision 2026-10-14); writes under `~/Library/LaunchAgents` ask |
+| T2 exec | `operator:exec` | `operator_run` argv and `operator_script` (bash, zsh, sh, python3, node) as `memo-operator` (no sudo, no docker group), each in its own process group killed at the timeout; `operator_service` start, stop, restart, reload of declared units through polkit; `operator_docker` through the root helper | `operator_run` and `operator_script` as `memo`, the owner's own user, with `HOME`, the agent's `SSH_AUTH_SOCK` and `run_path` (pnpm, `~/.local/bin`, Homebrew) first in `PATH` |
+| T3 root | `operator:root` | `operator_run as_root`, `operator_script as_root` (bash, python3), each in a transient `systemd-run` unit with `RuntimeMaxSec`, `MemoryMax=2G`, `TasksMax=512`, through the root helper | the same two tools, through the LaunchDaemon `dev.memolabs.memo-operator-root`: each call in its own process group, killed at the timeout, `PATH` limited to system directories, no memory limit; without the helper installed, `root_unavailable_on_host` |
 
 Reads cover the read roots (`/` on lab, `~` on the Mac) minus the secret denylist: `.ssh`,
 `.gnupg`, `.env*`, `*.pem`, `*.key`, `*.p8`, `id_*`, `*secret*`, keychains, credential stores,
@@ -69,8 +69,8 @@ Spec: `.agent/project/repatriate-tools/spec.md`. Parity study:
 caller (`operator_transfer_source`: read roots, denylist, `O_NOFOLLOW`, size and SHA-256 computed
 on the source host; `operator_read_chunk`: refused with `source_changed` when the file moved),
 and writes them through the destination's own `operator_upload_*`. So the destination keeps every
-upload rule: write roots, denylist, `use_dev_flow`, the caller's workspace and **a lock on
-`dst_path`**, the hub freeze, the approval mode, a backup on overwrite, an atomic rename, and the
+upload rule: write roots, denylist, `use_dev_flow`, the caller's workspace and a lock on
+`dst_path` (the caller's, else an implicit one held for each write, see below), the hub freeze, the approval mode, a backup on overwrite, an atomic rename, and the
 SHA-256 checked at the destination. Why: a 64 KiB chunk is 87 KiB of base64, under the 128 KiB
 request cap and the 128 KiB agent result bound; the 16 KiB frame limit is met by the protocol's
 `part` frames. No new frame type or protocol version. Four lanes per transfer, two transfers per
@@ -103,6 +103,93 @@ policy, a root list or an allowlist, or works around a refusal.
 **Memory across conversations** (`memory_save`, `memory_search`, `memory_get`, `memory_list`) is a
 runtime feature, not an operator one: `docs/COORDINATOR.md` and the server instructions describe
 it; the store is the coordinator SQLite (schema v5) on the host that runs the runtime.
+
+## Read-only commands, implicit workspace and implicit locks
+
+Live bench of 2026-10-14 (19:57 and 20:04): "the 5 most CPU-hungry processes on the Mac" and
+"create ~/memolabs/workspace/bench-mb/note.md" each took one SentinelX call and failed here. Now:
+
+- **Read-only commands** run at once, with no workspace, no lock and no approval, even when the
+  program is a wrapper: `ps`, `top -l 1` (or `-b`), `uptime`, `vm_stat`, `df`, `du`, `ls`,
+  `stat`, `file`, `wc`, `head`, `tail`, `cat`, `grep`, `rg` (no `--pre`), `find` (no `-exec`,
+  `-delete`, `-fprint`), `git status`, `log`, `diff`, `show`, `branch` (listing), `rev-parse`,
+  `ls-files`, `blame`, `config --get`, `gh` read verbs and `gh api` GET, `uname`, `sw_vers`,
+  `system_profiler <DataType>`, `launchctl list` or `print`, `systemctl status`, `show`,
+  `list-*`, `journalctl` (no vacuum or rotate), `docker ps`, `logs`, `inspect`, `free`,
+  `ip ... show`, `ss` (no `-K`), `hostname`, `date +fmt`, `sysctl` reads
+  (`bridge/operator-dangerous.mjs readOnlyCommand`). Any write-capable flag makes the call a
+  normal command again. They stay T2: signed, rate limited, in both journals (`read_only: true`
+  on the hub line). The agent checks every path-like argument (absolute, `~`, or relative to the
+  cwd) against the read roots and the denylist (`path_secret`, `path_not_allowed`), and runs
+  read-only git with `core.fsmonitor=false`, `core.pager=cat`, `GIT_OPTIONAL_LOCKS=0`,
+  `--no-ext-diff` and `--no-textconv`.
+- **Writes just work.** A remote write, command or root call without a `workspace_id` uses the
+  conversation's workspace, keyed by its session hash: its own active one, else one opened on
+  the project `ops` (`MEMO_BRIDGE_OPERATOR_AUTO_PROJECT`, journaled `workspace_auto_open`), else a
+  coordination id derived from the session (`workspace_implicit`). Without an explicit lock the
+  call takes an **implicit lock** on its path, unit or container (global for root calls,
+  scripts and commands without cwd) for the duration of the call only (`lock_implicit`), and is
+  refused with `locked_by_other_session` only when another conversation holds an overlapping
+  lock. Explicit `operator_lock` stays for long multi-step work. The result carries `auto`.
+  Without a session hint (stdio, 9443) nothing changes.
+- `workspace_open` from ChatGPT with `host: "mac"` no longer fails: the workspace (a
+  coordination record) lives on the vps runtime, the requested host is kept in its label, and the
+  result says so in `note`. Operator tools still act on the host they name.
+- Refusals that the model can fix carry `next_step`.
+
+## Standing approvals (owner decision 2026-10-14)
+
+Measured on SentinelX over 1.5 days: `gh` 632, `git` 441, `ssh` 185 calls. Asking Telegram for
+each `git`, `node`, `pnpm`, `python3`, `make` or `ssh` call would have been about 780 prompts.
+
+1. At the start of a work session ChatGPT calls, once,
+   `operator_grant {action: "request", host, programs: ["git","node","pnpm","python3","make","ssh"], cwd_prefixes: ["~/memolabs"], ttl_hours: 8}`.
+   The bot sends the owner the request with Approve and Deny, and says plainly what it means:
+   a wrapper can run any command as the agent user, and `ssh` to lab is root on lab.
+2. Once approved (TTL 1 to 12 h), an `operator_run` or `operator_script` call that is not
+   `as_root`, whose `cwd` is under a prefix and whose wrapper and remote programs are all named
+   (`timeout 5 ssh lab id` needs `timeout` and `ssh`; a script needs its interpreter) runs
+   without a prompt. Both journals carry the grant id (`ap_st_...`).
+3. The owner can also type `/grant mac git,node,pnpm ~/memolabs 8h` in the bot chat (active at
+   once), list with `/approvals`, and end with `/revoke <id>` or `/revoke all`. ChatGPT sees them
+   with `operator_grant {action: "list"}`, in `operator_policy` and in `sessions_overview`, and
+   may revoke its own.
+4. Never covered, always one prompt per call: the hard list below, every `as_root` call,
+   `operator_docker` stop or restart of `traefik`, `memo-*`, `pocket-id*`. A grant can never name
+   `/` as a prefix, nor `sudo`, `su`, `doas`, `rm`, `dd` and the other destructive programs.
+   The agent and the root helper refuse a standing id on a hard or root call themselves
+   (`approval_scope`), whatever the hub signed.
+5. Grants live in hub memory: a hub restart drops them; ask again.
+
+Hard list additions (repatriation D-R1 to D-R3, D-R9), wherever the program appears in argv and
+inside the strings of shells and `ssh`: `gh pr merge`, `gh repo delete|archive|rename|edit`,
+`gh release delete`, `gh secret`, `gh variable set|delete`, `gh auth`, `gh ssh-key`,
+`gh gpg-key`, `gh extension`, `gh alias`, `gh workflow run|enable|disable`, `gh run delete`,
+`gh issue delete`, `gh api` with DELETE, or POST, PUT, PATCH on a protected endpoint (merge,
+refs, branches and protection, rulesets, collaborators, hooks, keys, secrets, variables,
+environments, deployments, dispatches, the repository itself, orgs, user), `gh api graphql` with
+a mutation or `--input`; `git push` with `-f`, `--force`, `--force-with-lease`, `--delete`,
+`--mirror`, `--prune`, `--all`, a `+` or `:` refspec, or a destination `main` or `master`;
+`git reset --hard`, `git clean -f`, `git branch -D`, `git filter-branch`, `filter-repo`,
+`reflog expire`, `update-ref -d`, `stash clear`; `rsync --delete*` and `--remove-source-files`;
+`docker rm`, `rmi`, `prune`, `volume rm`, `compose down -v`. Free: `gh` reads and other `gh`
+writes (`pr create`, `issue comment`).
+
+**ssh, scp, rsync.** `ssh`, `scp`, `sftp`, `mosh`, and `rsync` to a remote (`host:path`, `-e`,
+`--rsh`, `--rsync-path`) are dangerous and grantable (`remote:<program>`), and need an explicit
+`host` (`host_required`). `ssh lab` opens a root shell on lab: treat a grant naming `ssh` as root
+on lab for its duration. Local `rsync` between paths is free.
+
+## Docker on lab (`operator_docker`)
+
+Without the docker group: the root helper speaks to `/var/run/docker.sock` with the Docker
+Engine API (`/v1.44`; lab answers 1.40 to 1.56, read 2026-10-14). Actions: `ps`, `inspect`
+(projected: never `Config.Env`, only compose labels), `logs` (last lines, `since` like `-2h`,
+redacted), `compose_ps` (projects, or one project's containers), and `restart`, `stop`, `start`
+of a container from the live list. T2 (`operator:exec`); a mutation holds a container lock;
+stop or restart of `traefik`, `memo-*`, `pocket-id*` asks the owner. No `run`, `exec`, `pull`:
+`operator_run as_root ["docker", ...]` stays T3 with approval. On the Mac:
+`docker_unavailable_on_host`.
 
 ## Approval flow (`approval_mode: dangerous`, both hosts)
 
@@ -284,6 +371,13 @@ the root tree, the state and the socket; keeps `/var/log/memo-operator`), then
   `/usr/local` runs as root as given; bare names resolve in system directories only.
 - **`sudo` on the install script** runs that script, from your checkout, as root. Run it only
   from a checkout you trust, on a commit you read.
+- **A standing approval on a wrapper is any command.** `bash`, `python3`, `node`, `make`,
+  `pnpm` or `git` can run anything as the agent user; `ssh` is root on lab. The cwd prefix bounds
+  where a call starts, not what it touches. The hard list still asks, but an argv classifier
+  cannot see inside scripts, `make` targets, package scripts or `ssh` strings beyond their words.
+- **Whole home writable on the Mac.** The T1 tools may now rewrite `~/.zshrc`, `~/.gitconfig`
+  and the like; the denylist keeps keys, keychains, browser profiles, `~/.memo-operator` and the
+  agents' own code under `~/.local/share/memo-bridge` out of reach.
 - **T2 on the Mac is the owner's user.** `operator_run` can do what `memo` can do, including
   rewriting `~/.memo-operator` (the directory is the owner's). The read-only policy stops the T1
   tools, not a command. What stands in the way: approval for wrappers and for any argument
