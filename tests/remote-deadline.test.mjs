@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 import { parseRemotePolicy } from '../bridge/write-gate.mjs';
-import { createForwarder } from '../bridge/forward.mjs';
+import { RETRY_SAFE_OPS, createForwarder } from '../bridge/forward.mjs';
 import { coordinatorOn, journal, stubLedger, tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const CHAT = makePrincipal('oidc:owner-sub', Object.values(CAPABILITIES), { client_type: 'chatgpt', via: 'hub' });
@@ -125,4 +125,24 @@ test('fast calls answer directly; reads are never cut by the soft deadline; a re
     requestAgent: () => new Promise(resolve => setTimeout(() => resolve({ ok: true, value: 1 }), 30)) });
   assert.deepEqual(await slowRead.call({ op: 'task_status', args: {}, principal: CHAT }),
     { ok: true, value: 1, request_id: 'req-read-0001' });
+});
+
+test('fix F6: only retry-safe ops answer accepted; a slow workspace_open waits for its outcome and gets no injected id', async () => {
+  const seen = [];
+  const requestAgent = (host, op, { args }) => {
+    seen.push({ op, args });
+    return new Promise(resolve => setTimeout(() => resolve({ ok: true, op }), 60));
+  };
+  const forwarder = createForwarder({ requestAgent, softDeadlineMs: 5, audit: () => {} });
+  for (const op of ['workspace_open', 'worktree_commit', 'task_release', 'job_cancel']) {
+    const res = await forwarder.call({ op, args: {}, principal: CHAT });
+    assert.equal(res.status, undefined, `${op} never answers accepted`);
+    assert.equal(res.ok, true);
+    assert.equal(res.op, op);
+  }
+  assert.deepEqual(seen.map(s => s.args.client_request_id), [undefined, undefined, undefined, undefined]);
+  for (const op of RETRY_SAFE_OPS) {
+    const res = await forwarder.call({ op, args: {}, principal: CHAT });
+    assert.equal(res.status, 'accepted', op);
+  }
 });

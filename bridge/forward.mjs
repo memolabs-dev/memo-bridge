@@ -32,6 +32,10 @@ const sha256 = value => createHash('sha256').update(value).digest('hex');
 
 // Hash of the ChatGPT conversation hint, or null. Read from the SDK request context
 // (ctx.mcpReq._meta, @modelcontextprotocol/server 2.3.1 BaseContext); never from arguments.
+// Mutating ops whose runtime handler replays the first result for the same client_request_id
+// (runOnce or the jobs request table): the only ones that may answer `accepted`.
+export const RETRY_SAFE_OPS = Object.freeze(new Set(['task_claim', 'worktree_push', 'github_create_pr', 'jobs_submit']));
+
 export function clientSessionHash(ctx) {
   const value = ctx?.mcpReq?._meta?.['openai/session'];
   if (typeof value !== 'string' || !value || value.length > MAX_SESSION_CHARS) return null;
@@ -100,11 +104,15 @@ export function createForwarder({ requestAgent, host = 'vps', softDeadlineMs = S
       }
 
       const mutating = isMutating(op);
+      // Fix F6: only an op the runtime makes idempotent on client_request_id may answer
+      // `accepted` past the soft deadline; every other mutating op waits for its outcome, so a
+      // retry never repeats it (a second workspace_open, a second commit).
+      const retrySafe = mutating && RETRY_SAFE_OPS.has(op);
       let forwardArgs = args ?? {};
-      // A mutating call always carries a client_request_id, so that an `accepted` answer can be
+      // Such a call always carries a client_request_id, so that an `accepted` answer can be
       // retried safely: the model's own id when it gave a valid one, else one derived here.
       let clientRequestId = null;
-      if (mutating) {
+      if (retrySafe) {
         clientRequestId = CLIENT_REQUEST_ID_RE.test(forwardArgs.client_request_id ?? '') ? forwardArgs.client_request_id : `rq_${requestId}`;
         forwardArgs = { ...forwardArgs, client_request_id: clientRequestId };
       }
@@ -121,7 +129,7 @@ export function createForwarder({ requestAgent, host = 'vps', softDeadlineMs = S
       const withId = result => (result && typeof result === 'object' && !Array.isArray(result) && !('request_id' in result)
         ? { ...result, request_id: requestId } : result);
 
-      if (!mutating) return finish(withId(await settled));
+      if (!retrySafe) return finish(withId(await settled));
 
       let timer;
       const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(null), softDeadlineMs); timer.unref?.(); });

@@ -17,7 +17,7 @@ import { ownsWorkspace } from '../coordinator/policy.mjs';
 import { validBranch } from '../coordinator/checkpoints.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
-import { AI_ATTRIBUTION, isProtectedBranch, pushedCommits } from '../runners/worktrees.mjs';
+import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
 import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
 import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, sessionBindingDecision }
   from '../../bridge/write-gate.mjs';
@@ -39,7 +39,7 @@ const LABEL_RE = /^[^,\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_not_active', 'wrong_host', 'claim_required',
   'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'repo_not_allowed', 'repo_not_registered',
   'default_branch_refused', 'branch_not_pushed', 'unknown_workspace', 'unknown_worktree', 'project_not_allowed',
-  'head_not_pushed_by_workspace', 'session_mismatch']);
+  'head_not_pushed_by_workspace', 'session_mismatch', 'path_protected']);
 
 const repoArg = z.string().max(140).describe('owner/repo of a registered project (its GitHub origin), or memolabs-dev/.github.');
 const limitArg = z.number().int().min(LIMITS.list.min).max(LIMITS.list.max).optional()
@@ -263,6 +263,14 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   // Remotely the pull request carries only what this workspace pushed: a branch someone moved
   // since (another session, a terminal) is refused rather than proposed under the owner's name.
   if (remote && !(await pushedCommits(rt, worktree.id)).includes(head.sha)) return fail('head_not_pushed_by_workspace');
+  // F1 (D9): what the pull request would carry, measured from the merge-base with the default
+  // branch GitHub reports, never touches a protected CI path.
+  if (remote) {
+    const { GIT_DIR, GIT_WORK_TREE, ...gitEnv } = gitBaseEnv(process.env);
+    const hits = await protectedSinceDefault(worktree.path, head.sha, base.branch, gitEnv);
+    if (!hits) return fail('git_failed', 'protected path check');
+    if (hits.count) return fail('path_protected', `${hits.count} change(s) under .github/workflows, .github/actions or .github/dependabot.yml`);
+  }
 
   // Idempotent: an already open pull request for this branch is returned as is.
   const existing = await github.openPullFor(repo, branch);

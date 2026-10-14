@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { platform } from 'node:os';
 import { createCoordinator } from './coordinator/index.mjs';
 import { createIssueLeaseClient } from './coordinator/issue-lease.mjs';
-import { CLIENT_TYPES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
+import { CAPABILITIES, CLIENT_TYPES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
   makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
@@ -33,11 +33,14 @@ export function remoteGrants(baseGrants, policy) {
   if (!policy?.configured || typeof policy.owner_sub !== 'string') return baseGrants;
   return Object.freeze({ ...baseGrants, [`oidc:${policy.owner_sub}`]: policy.remote_writes === 'enabled' ? 'owner' : 'read' });
 }
+// A remote principal never holds coordinator:audit (fix F3, REQ-P5-09): with it, audit_events
+// and audit_operation would show every principal's events, workspaces and branches, including
+// hub:owner's and projects outside the remote allowlist, to the remote client.
 export function gateRemotePrincipal(p, policy) {
   if (!p || !isRemotePrincipal(p)) return p;
   if (!policy?.configured) return null;
-  if (policy.remote_writes === 'enabled') return p;
-  const kept = [...p.capabilities].filter(c => !WRITE_CAPABILITIES.includes(c));
+  const denied = policy.remote_writes === 'enabled' ? [CAPABILITIES.AUDIT] : [CAPABILITIES.AUDIT, ...WRITE_CAPABILITIES];
+  const kept = [...p.capabilities].filter(c => !denied.includes(c));
   if (kept.length === p.capabilities.size) return p;
   return makePrincipal(p.id, kept, { ...(p.client_type ? { client_type: p.client_type } : {}), ...(p.via ? { via: p.via } : {}) });
 }

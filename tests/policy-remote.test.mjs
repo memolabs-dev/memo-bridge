@@ -193,11 +193,27 @@ test('runtime: remote.json grants the owner read, or owner once remote_writes is
   assert.equal(closed.principalFromHub({ id: 'oidc:someone-else' }), null, 'only the owner sub of remote.json');
   const forced = runtimeFor(t, await tempStateDir(t), { MEMO_BRIDGE_REMOTE_CONFIG: await policyPath(t,
     { projects: ['drop'], remote_writes: 'disabled' }), MEMO_BRIDGE_HUB_PRINCIPALS: JSON.stringify({ [`oidc:${SUB}`]: 'owner' }) });
-  assert.deepEqual(caps(forced.principalFromHub({ id: `oidc:${SUB}` })), [CAPABILITIES.AUDIT, CAPABILITIES.READ].sort(),
-    'an env owner grant still loses every write capability while the gate is closed');
+  assert.deepEqual(caps(forced.principalFromHub({ id: `oidc:${SUB}` })), [CAPABILITIES.READ],
+    'an env owner grant still loses every write capability (and audit) while the gate is closed');
   const open = runtimeFor(t, await tempStateDir(t), { MEMO_BRIDGE_REMOTE_CONFIG: await policyPath(t,
     { projects: ['drop'], oidc: { owner_sub: SUB }, remote_writes: 'enabled' }) });
-  assert.deepEqual(caps(open.principalFromHub({ id: `oidc:${SUB}` })), [...ALL].sort());
+  assert.deepEqual(caps(open.principalFromHub({ id: `oidc:${SUB}` })), ALL.filter(c => c !== CAPABILITIES.AUDIT).sort(),
+    'fix F3: every capability but coordinator:audit');
   // Phase 4 hub principals are not touched by the remote policy.
   assert.deepEqual(caps(closed.principalFromHub({ id: 'hub:owner' })), [CAPABILITIES.READ]);
+});
+
+test('fix F3 (REQ-P5-09): with writes enabled, a remote principal sees only its own audit events, never hub:owner\'s', async t => {
+  const rt = runtimeFor(t, await tempStateDir(t), { MEMO_BRIDGE_REMOTE_CONFIG: await policyPath(t,
+    { projects: ['drop'], oidc: { owner_sub: SUB }, remote_writes: 'enabled' }),
+  MEMO_BRIDGE_HUB_PRINCIPALS: JSON.stringify({ 'hub:owner': 'owner' }) });
+  const owner = coordinatorCall(rt.as(rt.principalFromHub({ id: 'hub:owner' })));
+  assert.equal((await owner('workspace_open', { project: 'drop', client_type: 'claude-code', host: 'vps' })).ok, true);
+  const { registerAuditTools } = await import('../server/tools/audit-tools.mjs');
+  const tools = {};
+  registerAuditTools({ registerTool(name, def, handler) { tools[name] = { def, handler }; } }, () => rt.as(rt.principalFromHub({ id: `oidc:${SUB}` })));
+  const seen = JSON.parse((await tools.audit_events.handler({})).content[0].text);
+  assert.equal(seen.ok, true, JSON.stringify(seen));
+  assert.notEqual(seen.scope, 'all');
+  assert.deepEqual((seen.events ?? []).filter(e => e.principal !== `oidc:${SUB}`), [], 'no other principal\'s event');
 });

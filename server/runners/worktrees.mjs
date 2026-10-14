@@ -40,7 +40,7 @@ import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
 import { PUSH_CREDENTIAL, credentialPath, credentialsRequired, parseIssueRef, readTokenFile } from '../coordinator/issue-lease.mjs';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
 import { runOnce } from '../coordinator/store.mjs';
-import { isProtectedRepoPath, protectedPaths, remotePolicyFromEnv, remoteProjectRefusal, requestMeta,
+import { isProtectedRepoPath, isRemotePrincipal, protectedPaths, remotePolicyFromEnv, remoteProjectRefusal, requestMeta,
   sessionBindingDecision } from '../../bridge/write-gate.mjs';
 import { ACTIVE_JOB_STATUSES } from './executor.mjs';
 import { reconcileJob } from './jobs.mjs';
@@ -457,7 +457,7 @@ function commitMessage(value) {
 // Paths a commit or a push would carry that touch a protected path (D9), bounded. `range` is
 // either ['--cached'] (the index against HEAD) or [base, 'HEAD'] plus the per-commit history of
 // base..HEAD, so a change added then reverted in a later commit is still seen.
-async function protectedChanges(root, env, { staged = false, base = null } = {}) {
+async function protectedChanges(root, env, { staged = false, base = null, tip = 'HEAD' } = {}) {
   const names = [];
   const collect = r => {
     if (r.code !== 0 || r.truncated) return false;
@@ -468,11 +468,28 @@ async function protectedChanges(root, env, { staged = false, base = null } = {})
   if (staged) {
     if (!collect(await runGit(root, [...diffArgs, '--cached'], { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
   } else {
-    if (!collect(await runGit(root, [...diffArgs, base, 'HEAD'], { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
-    if (!collect(await runGit(root, ['log', '--format=', '--name-only', '-z', '--no-renames', '-m', `${base}..HEAD`],
+    if (!collect(await runGit(root, [...diffArgs, base, tip], { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
+    if (!collect(await runGit(root, ['log', '--format=', '--name-only', '-z', '--no-renames', '-m', `${base}..${tip}`],
       { readOnly: true, env, maxBytes: 4 * 1024 * 1024 }))) return null;
   }
   return protectedPaths([...new Set(names)]);
+}
+// Protected changes `tip` carries that the remote's default branch does not (F1, D9): measured
+// from the merge-base with the default branch, so a branch started from another branch (a WIP
+// branch, a Dependabot bump) cannot carry that branch's workflow change into a pull request.
+// The default branch is `commit` (its tip as the remote reported it) when that commit is
+// known locally, else the remote-tracking ref of each name in `names`, first found; none: null.
+const SHA_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+export async function protectedSinceDefault(root, tip, names, env, { commit = null } = {}) {
+  if (typeof tip !== 'string' || !(SHA_RE.test(tip) || tip === 'HEAD')) return null;
+  const refs = [...(SHA_RE.test(commit ?? '') ? [commit] : []),
+    ...[names].flat().filter(name => typeof name === 'string' && validBranch(name)).map(name => `refs/remotes/origin/${name}`)];
+  let against = null;
+  for (const ref of refs) { against = await revParse(root, ref, env); if (against) break; }
+  if (!against) return null;
+  const mb = await runGit(root, ['merge-base', '--end-of-options', tip, against], { readOnly: true, env, maxBytes: 200 });
+  if (mb.code !== 0) return null;
+  return protectedChanges(root, env, { base: out(mb), tip });
 }
 const protectedRefusal = hits => fail('path_protected',
   `${hits.count} change(s) under .github/workflows, .github/actions or .github/dependabot.yml: ${hits.shown.join(', ')}`);
@@ -673,6 +690,11 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
       const baseRef = args.base ?? `origin/${defaultName}`;
       const baseCommit = await revParse(repoPath, baseRef, env);
       if (!baseCommit) return fail('unknown_base');
+      // F1 (D9): a remote conversation starts only from the remote's default branch. Another
+      // branch could carry a workflow change that the push check, measured from the base,
+      // would never see.
+      if (isRemotePrincipal(rt.principal) && args.base !== undefined
+        && baseCommit !== await revParse(repoPath, `refs/remotes/origin/${defaultName}`, env)) return fail('base_not_allowed');
 
       const path = join(root, project.name, branch.replaceAll('/', '-'));
       try { await lstat(path); return fail('path_exists'); } catch { /* free */ }
@@ -1035,7 +1057,14 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
     const net = { ...unpinned, env: { ...unpinned.env, ...located.pins } };
     const remote = await remoteBranches(root, net);
     if (!remote) return fail('push_failed', 'ls-remote');
-    if (isProtectedBranch(row.branch, [remote.head, await defaultBranch(root, env)])) return fail('protected_branch');
+    const defaultName = await defaultBranch(root, env);
+    if (isProtectedBranch(row.branch, [remote.head, defaultName])) return fail('protected_branch');
+    // F1 (D9): also measured from the merge-base with the remote's default branch, whatever the
+    // worktree's recorded base was.
+    const sinceDefault = await protectedSinceDefault(root, head, [remote.head, defaultName], env,
+      { commit: remote.head ? remote.heads.get(remote.head) : null });
+    if (!sinceDefault) return fail('git_failed', 'protected path check');
+    if (sinceDefault.count) return protectedRefusal(sinceDefault);
     const variants = sameIgnoringCase([...remote.heads.keys()], row.branch).filter(name => name !== row.branch);
     if (variants.length) return fail('push_rejected', 'remote_case_variant');
     // The remote branch must not exist yet, or be at a commit this worktree pushed: a push

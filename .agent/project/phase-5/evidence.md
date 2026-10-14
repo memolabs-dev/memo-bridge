@@ -18,19 +18,36 @@ Repositories: memo-bridge `feat/phase-5-chatgpt-remote` (v0.6.0), lab-infra
 
 | Command | Result |
 |---|---|
-| `npm test` | 330 pass, 0 fail |
+| `npm test` | 330 pass, 0 fail; after the verifier fixes 339 pass, 0 fail (`tests/jobs.test.mjs` included, no hang on this run) |
 | `npm run build` | ok (`plugin/server/dist/index.mjs`, `job-runner.mjs`) |
 | `npm run smoke` | `{"ok":true,"tools":48,"roundTrip":true,...}` |
 | `npm run smoke:remote` (`tests/remote-e2e.test.mjs`, `tests/remote-boot.test.mjs`) | 7 pass |
 | `npm run test:hub` | 61 pass |
 | `npm run test:runner` (includes `test:deploy`) | 122 pass; deploy unittest 113 OK |
 | `node scripts/remote-toolsize.mjs` | read: 22 tools, 14 867 bytes (~3 717 tokens); write: 36 tools, 30 691 bytes (~7 673 tokens) |
-| lab-infra `python3 -I ansible/roles/memo-bridge-ingress/test_memo_bridge_public.py` | 54 OK |
+| lab-infra `python3 -I ansible/roles/memo-bridge-ingress/test_memo_bridge_public.py` | 54 OK; after the verifier fixes 58 OK |
 | lab-infra `python3 -I ansible/roles/memo-bridge/test_memo_runner.py` | 49 OK |
-| lab-infra `./scripts/tests.sh` | 112 green, 0 red |
+| lab-infra `./scripts/tests.sh` | 112 green, 0 red (rerun after the verifier fixes: 112 green) |
 | lab-infra `ansible-playbook --syntax-check playbook.yml` (dummy vault password file) | ok |
 | Contract: lab-infra `remote.json.j2` rendered by the lab-infra test renderer (writes disabled and enabled), parsed by memo-bridge `parseRemoteJson` | both ok; listener 127.0.0.1:9445, audience `https://bridge.memolabs.dev/mcp`, JWKS `http://127.0.0.1:1411/...`, projects `['memo-bridge']`, soft deadline 40 000 ms |
 | lab-infra `ansible-playbook --check --diff` against lab (by the lab-infra implementer, before integration) | ok=45 changed=1 failed=0 (the one change is the existing middlewares file, basic-auth secrets not loaded) |
+
+## Verifier findings fixed (2026-10-14, review verdict BLOCK)
+
+Each fix has a regression test that was run against the pre-fix source (file restored from
+`HEAD` in place, test run, fixed file put back) and failed there.
+
+| Finding | Fix | Regression test | Fails without the fix |
+|---|---|---|---|
+| F1 HIGH: workflow change through `worktree_create{base}` (D9, REQ-P5-10) | remote principal: `base` must resolve to `origin/<default>` (`base_not_allowed`); push: protected paths also measured from the merge-base with the remote's default branch (tip from `ls-remote`, else the tracking ref; fails closed), for every principal; `github_create_pr` (remote): same check from the merge-base with the default branch GitHub reports, `path_protected` journaled as denied | `tests/remote-write-guard.test.mjs`: `F1 create`, `F1 push`, `F1 pull request` | yes, 3/3 |
+| F2 HIGH: lab-infra default made mTLS optional (REQ-P5-01, AC-P5-01) | lab-infra `memo_bridge_mtls_client_auth: RequireAndVerifyClientCert` (group_vars and role default); the ingress role refuses a public route with `VerifyClientCertIfGiven` unless `memo_bridge_mtls_measurement_until` is a date within 14 days; runbook and architecture updated | lab-infra `test_fix_f2_mtls_required_by_default_and_enforced_while_public`, `test_fix_f2_mtls_assert_evaluated_by_ansible` (runs the assert with local ansible-playbook 2.21.4: Require ok, IfGiven refused without a date, ok with +5 days, refused with +30 days and with yesterday) | yes, 3 failures (with the updated route-template test) |
+| F3 MEDIUM: remote principal held `coordinator:audit` once writes are enabled (REQ-P5-09) | `gateRemotePrincipal` always strips `coordinator:audit` from `oidc:` principals: `audit_events` / `audit_operation` show only their own events | `tests/policy-remote.test.mjs`: `fix F3 ...`, updated grant assertions | yes, 2 failures |
+| F4 MEDIUM: `jobs_submit` / `job_cancel` skipped the session binding (REQ-P5-11) | the job service applies `sessionBindingDecision` on the workspace's `client_session` (refusal `session_mismatch` journaled, `session_warning` in warn mode) and journals the hub `request_id` | `tests/remote-job-binding.test.mjs` (2 tests) | yes, 2/2 |
+| F5 LOW: lab-infra runner guard disagreed with the hub layer-2 check | guard now lists names with `list-unit-files` and `list-units --all`, describes each with `show --all`, refuses root units that are active or enabled (same sets as `bridge/write-gate.mjs`), fails closed on a missing unit | lab-infra `RunnerGuardTests` (9 tests, live sample: drop root, enabled, stopped) | yes, 7 failures including `test_fix_f5_enabled_stopped_root_runner_is_refused_like_the_hub` |
+| F6 LOW: `accepted` promised safe retries for non-idempotent ops | only `task_claim`, `worktree_push`, `github_create_pr`, `jobs_submit` (`RETRY_SAFE_OPS`) get an injected `client_request_id` and may answer `accepted`; other mutating ops wait for their outcome | `tests/remote-deadline.test.mjs`: `fix F6 ...` | yes |
+
+Plausible findings P1 to P7 are not fixed in code (none is HIGH or CRITICAL as reported); they
+are listed in `state.json` under the open follow-ups.
 
 ### End-to-end path (TODO-P5-11, `tests/remote-e2e.test.mjs`)
 

@@ -18,11 +18,15 @@ const jobId = z.string().max(40).describe('Job id returned by jobs_submit (job_â
 // `options` is passed to createJobService (runnerPath, maxJobsâ€¦); the entry point normally omits it.
 export function registerJobTools(server, getRuntime, options = {}) {
   let service; let serviceRuntime;
-  const call = method => async args => {
+  // extra.meta: the hub's per-request metadata ({request_id, client_session}) for a forwarded
+  // call; absent on stdio. jobs_submit and job_cancel check the D8 session binding with it.
+  const call = method => async (args, extra) => {
     try {
       const rt = await getRuntime();
       if (!service || serviceRuntime !== rt) { service = createJobService(rt, options); serviceRuntime = rt; }
-      return result(await service[method](args ?? {}));
+      const ctx = { meta: extra?.meta && typeof extra.meta === 'object' ? extra.meta : null };
+      const out = await service[method](args ?? {}, ctx);
+      return result(out?.ok && ctx.sessionWarning ? { ...out, session_warning: ctx.sessionWarning } : out);
     } catch (error) {
       // Only our own short codes reach the model; paths and engine messages do not.
       const code = String(error?.message ?? '');

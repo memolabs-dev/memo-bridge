@@ -353,3 +353,57 @@ test('github_create_pr: client_request_id replays the first result, and the sess
   const warn = githubServer(f, fakeGh().gh, { projects: ['demo'] });
   assert.equal((await warn('github_create_pr', { workspace_id: ws, worktree_id: id, title: 'y' }, meta(S2))).session_warning, 'session_mismatch');
 });
+
+// ---------------------------------------------------------------------------------------------
+// Phase 5 fix F1 (D9, REQ-P5-10): a workflow change carried by another branch never reaches
+// origin or a pull request through the `base` argument.
+
+function featureWithWorkflowChange(f) {
+  git(f.repo, 'checkout', '-q', '-b', 'feature');
+  execFileSync('sh', ['-c', 'printf "on: push\\njobs: {evil: {}}\\n" > .github/workflows/ci.yml'], { cwd: f.repo });
+  git(f.repo, 'commit', '-q', '-am', 'ci: bump');
+  git(f.repo, 'push', '-q', 'origin', 'feature');
+  git(f.repo, 'checkout', '-q', 'main');
+}
+
+test('F1 create: a remote principal may start only from the default branch, never from another branch or commit', async t => {
+  const f = await fixture(t, { principal: CHAT });
+  featureWithWorkflowChange(f);
+  const ws = await f.addWorkspace();
+  for (const base of ['origin/feature', git(f.repo, 'rev-parse', 'feature')]) {
+    assert.equal((await f.call('worktree_create', { workspace_id: ws, issue: ISSUE, base })).error, 'base_not_allowed', base);
+  }
+  const ok = await f.call('worktree_create', { workspace_id: ws, issue: ISSUE, base: 'origin/main' });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+});
+
+test('F1 push: protected changes are measured from the merge-base with origin/<default>, not only from the recorded base', async t => {
+  const f = await fixture(t, { principal: LOCAL });
+  featureWithWorkflowChange(f);
+  const ws = await f.addWorkspace();
+  const created = await f.call('worktree_create', { workspace_id: ws, issue: ISSUE, base: 'origin/feature' });
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const id = created.worktree.worktree_id;
+  await f.call('worktree_write_file', { worktree_id: id, path: 'notes.txt', content: 'n\n' });
+  assert.equal((await f.call('worktree_commit', { worktree_id: id, message: 'docs: notes' })).ok, true);
+  const res = await f.call('worktree_push', { worktree_id: id });
+  assert.equal(res.error, 'path_protected', JSON.stringify(res));
+  assert.throws(() => git(f.origin, 'rev-parse', '--verify', `refs/heads/${created.worktree.branch}`), 'nothing reached origin');
+});
+
+test('F1 pull request: a remote PR whose head carries a protected change since the default branch is refused', async t => {
+  const f = await fixture(t, { principal: CHAT });
+  const { ws, id, path, branch } = await f.ready();
+  // A protected change reaches the pushed head outside the tools (simulated: pushed by hand and
+  // recorded as pushed by this workspace); the PR check must still see it.
+  execFileSync('sh', ['-c', 'printf "on: push\\njobs: {evil: {}}\\n" > .github/workflows/ci.yml'], { cwd: path });
+  git(path, 'commit', '-q', '-am', 'ci: outside');
+  git(path, 'push', '-q', 'origin', `HEAD:refs/heads/${branch}`);
+  const sha = git(path, 'rev-parse', 'HEAD');
+  await writeFile(join(f.rt.stateDir, 'worktrees', `${id}.json`), JSON.stringify({ head: sha, written: {}, pushed: [sha] }));
+  assert.deepEqual(await pushedCommits(f.rt, id), [sha]);
+  const { gh, calls } = fakeGh();
+  const res = await githubServer(f, gh, { projects: ['demo'] })('github_create_pr', { workspace_id: ws, worktree_id: id, title: 'feat: x' });
+  assert.equal(res.error, 'path_protected', JSON.stringify(res));
+  assert.ok(!calls.some(c => c.method === 'POST'), 'no pull request was created');
+});
