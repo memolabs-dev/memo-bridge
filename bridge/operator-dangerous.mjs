@@ -40,10 +40,16 @@ export const APPROVAL_TTL_MS = 10 * 60_000;
 // Standing approvals (operator-grants.mjs) carry ids with this prefix; single-use ones never do.
 export const STANDING_ID_PREFIX = 'ap_st_';
 export const isStandingApproval = id => typeof id === 'string' && id.startsWith(STANDING_ID_PREFIX);
-// May a signed approval id stand for this call (spec D-R5)? A standing id only for a grantable
-// operator_run or operator_script below T3; any single-use id as before.
+// Permanent grants (issue #48) live in the host policy file and carry ids with this prefix: the
+// agent checks them against its own policy (operator-grants.mjs permanentCovers).
+export const PERMANENT_ID_PREFIX = 'ap_pm_';
+export const isPermanentApproval = id => typeof id === 'string' && id.startsWith(PERMANENT_ID_PREFIX);
+// A standing or a permanent grant: never for a hard call, never for root.
+export const isGrantApproval = id => isStandingApproval(id) || isPermanentApproval(id);
+// May a signed approval id stand for this call (spec D-R5)? A standing or permanent id only for a
+// grantable operator_run or operator_script below T3; any single-use id as before.
 export function approvalInScope(approval, op, args, tier) {
-  if (!isStandingApproval(approval)) return true;
+  if (!isGrantApproval(approval)) return true;
   if (tier === 3 || !['operator_run', 'operator_script'].includes(op)) return false;
   const danger = classifyCall(op, args);
   return danger === null || danger.hard === false;

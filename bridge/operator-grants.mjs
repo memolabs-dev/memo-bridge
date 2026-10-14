@@ -19,9 +19,15 @@
 // Ids are ap_st_<random>: the agent and the root helper read the prefix and refuse a standing id
 // on a hard call or on T3 (D-R5). What a grant cannot be: `/` as a prefix, a hard-listed program,
 // sudo, su, doas, pkexec, or longer than 12 h.
-import { randomBytes } from 'node:crypto';
+//
+// Permanent grants (issue #48, owner decision 2026-10-14 21:29) have the same coverage, with no
+// TTL and no principal: they live in the host policy file (operator-policy.mjs permanent_grants),
+// set by the owner through lab-infra or the Mac installer, never through a tool. The agent reads
+// them from its own file and checks every ap_pm_ id against them (permanentCovers); the hub reads
+// them from operator_policy to know when it need not ask Telegram.
+import { createHash, randomBytes } from 'node:crypto';
 import { basename } from 'node:path';
-import { classifyCall, DESTRUCTIVE_PROGRAMS, STANDING_ID_PREFIX, isStandingApproval } from './operator-dangerous.mjs';
+import { classifyCall, DESTRUCTIVE_PROGRAMS, PERMANENT_ID_PREFIX, STANDING_ID_PREFIX, isStandingApproval } from './operator-dangerous.mjs';
 import { DEFAULT_HOMES, normalizePath } from './operator-locks.mjs';
 
 export const GRANT_PREFIX = STANDING_ID_PREFIX;
@@ -36,6 +42,42 @@ const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
 
 export const isStandingId = isStandingApproval;
 
+// May a standing or permanent grant name this program? Never a privilege tool, never the hard list.
+export const programGrantable = name => !NEVER.has(name) && !DESTRUCTIVE_PROGRAMS.has(name) && !/^mkfs(\.|$)/.test(name);
+
+// The danger of a call a grant may cover, or null: operator_run or operator_script, never as_root,
+// with a cwd, grantable (not hard) and naming at least one program.
+export function grantableCall(op, args) {
+  if (!COVERED_OPS.has(op) || args?.as_root === true || typeof args?.cwd !== 'string') return null;
+  const danger = classifyCall(op, args);
+  return !danger || danger.hard || danger.programs.length === 0 ? null : danger;
+}
+
+// The stable id of a permanent grant: ap_pm_ and a hash of its host, programs and prefixes, so the
+// hub and the agent name the same entry without sharing state.
+export function permanentGrantId(host, programs, prefixes) {
+  const text = JSON.stringify([host, [...programs].sort(), [...prefixes].sort()]);
+  return `${PERMANENT_ID_PREFIX}${createHash('sha256').update(`memo-bridge/permanent-grant|${text}`).digest('base64url').slice(0, 22)}`;
+}
+
+// The id of the permanent grant covering this call, or null. grants: [{grant_id, host, programs,
+// cwd_prefixes}] as operator-policy.mjs parses them (absolute prefixes). Same rules as a standing
+// grant, without TTL or principal.
+export function permanentCovers(grants, { host, op, args }, homes = DEFAULT_HOMES) {
+  if (!Array.isArray(grants) || grants.length === 0) return null;
+  const danger = grantableCall(op, args);
+  if (!danger) return null;
+  const cwd = normalizePath(host, args.cwd, homes);
+  if (!cwd || cwd.unresolved) return null;
+  for (const g of grants) {
+    if (g?.host !== host || !Array.isArray(g.programs) || !Array.isArray(g.cwd_prefixes)) continue;
+    const prefixes = g.cwd_prefixes.map(p => normalizePath(host, p, homes)).filter(p => p && !p.unresolved && p.key !== '/');
+    if (!prefixes.some(p => under(cwd.key, p.key))) continue;
+    if (danger.programs.every(p => g.programs.includes(p) && programGrantable(p))) return g.grant_id;
+  }
+  return null;
+}
+
 // Validate a grant request. {ok, programs, prefixes, hours, reason} or a refusal.
 export function checkGrantRequest({ host, programs, cwd_prefixes: prefixes, ttl_hours: hours = GRANT_LIMITS.defaultHours, reason = null },
   { homes = DEFAULT_HOMES } = {}) {
@@ -45,7 +87,7 @@ export function checkGrantRequest({ host, programs, cwd_prefixes: prefixes, ttl_
   for (const raw of programs) {
     const name = typeof raw === 'string' ? basename(raw) : '';
     if (!PROGRAM_RE.test(name)) return fail('invalid_arguments', { detail: 'programs: bare program names' });
-    if (NEVER.has(name) || DESTRUCTIVE_PROGRAMS.has(name) || /^mkfs(\.|$)/.test(name)) return fail('program_not_grantable', { program: name });
+    if (!programGrantable(name)) return fail('program_not_grantable', { program: name });
     if (!names.includes(name)) names.push(name);
   }
   if (!Array.isArray(prefixes) || prefixes.length === 0 || prefixes.length > GRANT_LIMITS.prefixes) return fail('invalid_arguments', { detail: 'cwd_prefixes: 1 to 4 absolute paths' });
@@ -126,9 +168,8 @@ export function createGrantStore({ now = Date.now, random = randomBytes, homes =
     },
     // The id of an active grant covering this call, or null.
     covers({ host, op, args, principal }) {
-      if (!COVERED_OPS.has(op) || args?.as_root === true || typeof args?.cwd !== 'string') return null;
-      const danger = classifyCall(op, args);
-      if (!danger || danger.hard || danger.programs.length === 0) return null;
+      const danger = grantableCall(op, args);
+      if (!danger) return null;
       const cwd = normalizePath(host, args.cwd, homes);
       if (!cwd || cwd.unresolved) return null;
       for (const g of items.values()) {

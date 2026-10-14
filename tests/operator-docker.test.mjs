@@ -129,6 +129,10 @@ test('RR-7 (helper): a standing approval id is refused for anything the root hel
   assert.equal((await r.helper.handle(r.sign('operator_run', { host: 'vps', argv: ['id'], as_root: true }, { approval: st }))).error, 'approval_scope');
   assert.equal((await r.helper.handle(r.sign('operator_script', { host: 'vps', interpreter: 'bash', content: 'id', as_root: true }, { approval: st }))).error, 'approval_scope');
   assert.equal((await r.helper.handle(r.sign('operator_docker', { host: 'vps', action: 'restart', container: 'traefik' }, { approval: st }))).error, 'approval_scope');
+  // Permanent grants (issue #48) never reach root either.
+  const pm = 'ap_pm_AAAAAAAAAAAAAAAAAAAAAA';
+  assert.equal((await r.helper.handle(r.sign('operator_run', { host: 'vps', argv: ['python3', '-c', '1'], cwd: '/srv', as_root: true }, { approval: pm }))).error, 'approval_scope');
+  assert.equal((await r.helper.handle(r.sign('operator_script', { host: 'vps', interpreter: 'python3', content: '1', cwd: '/srv', as_root: true }, { approval: pm }))).error, 'approval_scope');
   // Root scripts keep bash and python3 only.
   assert.equal((await r.helper.handle(r.sign('operator_script', { host: 'vps', interpreter: 'node', content: '1', as_root: true }, { approval: `ap_${'c'.repeat(24)}` }))).error,
     'interpreter_unavailable_as_root');
