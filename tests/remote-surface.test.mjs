@@ -13,8 +13,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { RemoteAccessError, createRemoteServerFactory, parseRemoteConfig, remotePrincipalFor, remoteToolNames } from '../bridge/remote-surface.mjs';
-import { REMOTE_TOOLS, REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE } from '../server/registry.mjs';
-import { CAPABILITIES, isPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
+import { REMOTE_OPERATOR_TOOLS, REMOTE_TOOLS, REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE } from '../server/registry.mjs';
+import { CAPABILITIES, REMOTE_DEFAULT_CEILING, isPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
 import { createHub } from '../bridge/hub.mjs';
 import { createAgent, createRuntimeOperations, probeOperations } from '../bridge/agent.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
@@ -64,7 +64,7 @@ test('remote config: required keys, strict known keys, unknown keys ignored', ()
   assert.equal(cfg.ownerSub, SUB);
   assert.equal(cfg.clientTypes.get(CHATGPT), 'chatgpt');
   assert.equal(cfg.remoteWrites, false, 'writes disabled by default');
-  assert.deepEqual([...cfg.ceiling].sort(), [...ALL].sort(), 'default ceiling: all, as the verifier');
+  assert.deepEqual([...cfg.ceiling].sort(), [...REMOTE_DEFAULT_CEILING].sort(), 'default ceiling: all but operator:*, as the verifier');
   assert.deepEqual([cfg.budgetBytes, cfg.listLimit, cfg.readPageBytes, cfg.jobTailLines, cfg.writeContentBytes, cfg.runtimeHost],
     [24 * 1024, 50, 16 * 1024, 200, 96 * 1024, 'vps']);
   assert.equal(parseRemoteConfig({ ...CONFIG, allowed_client_ids: { [CHATGPT]: 'chatgpt', 'pid-client': 'other' } }).clientTypes.get('pid-client'), 'other');
@@ -96,7 +96,9 @@ test('AC-P5-06/07: a read principal lists the read set; writes stay unlisted whi
     authInfo: auth({ scopes: ALL }) });
   const listed = await claims.list();
   assert.ok(listed.includes('task_claim') && !listed.includes('worktree_push') && !listed.includes('jobs_submit'));
-  assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), CONFIG), [...REMOTE_TOOLS_READ].sort());
+  // A principal minted with every capability (not through the ceiling) also lists the T0 operator tools.
+  assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), CONFIG), [...REMOTE_TOOLS_READ, ...REMOTE_OPERATOR_TOOLS].sort());
+  assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', REMOTE_DEFAULT_CEILING), CONFIG), [...REMOTE_TOOLS_READ].sort());
 });
 
 test('AC-P5-07: a forged write call with the gate closed never reaches the runtime', async () => {

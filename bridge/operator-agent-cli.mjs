@@ -1,0 +1,90 @@
+// Operator agent entry point (Phase 6, TODO-P6-05). One process per host:
+//   lab   memo-operator.service, user memo-operator (no sudo, no docker group), lab-infra role
+//         memo-operator (Lot 2, TODO-P6-12)
+//   Mac   a launchd user agent, user memo, over an SSH local forward to the hub (Lot 3)
+//
+// Environment:
+//   MEMO_OPERATOR_HOST     mac | vps                                               (required)
+//   MEMO_OPERATOR_CONFIG   directory holding hub-ca.crt (hub TLS CA) and           (required)
+//                          operator-hub.pub (the hub's operator signing public key, one or more
+//                          PEM blocks); operator-hub.pub must pass the same trust check as the
+//                          policy (owner root, or the owner on the Mac; not writable by others)
+//   MEMO_OPERATOR_POLICY   policy file (default /etc/memo-operator/policy.json on lab,
+//                          ~/.memo-operator/policy.json on the Mac)
+//   MEMO_OPERATOR_STATE    writable directory for the auto-freeze marker (default: the
+//                          directory of the policy's audit_file)
+//   MEMO_BRIDGE_AGENT_URL  hub agent endpoint (default wss://localhost:9443/agent)
+//   CREDENTIALS_DIRECTORY  systemd credentials: `agent-key`, this agent's Ed25519 identity
+//                          (lab). Otherwise MEMO_OPERATOR_CONFIG/agent.key (Mac).
+// The policy and the hub key are read once at start; a change needs a restart. Any problem
+// with them stops the process before it connects (fail closed).
+import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
+import { createAgent, localStatus } from './agent.mjs';
+import { OPERATOR_AGENT_IDS } from './ops.mjs';
+import { DEFAULT_POLICY_PATHS, loadOperatorPolicy, readTrustedFile } from './operator-policy.mjs';
+import { createOperatorVerifier } from './operator-signing.mjs';
+import { createOperatorGuard } from './operator-guard.mjs';
+import { createAuditChain, fileAuditStore } from './operator-audit.mjs';
+import { createOperatorTools } from './operator-tools.mjs';
+import { createOperatorOperations } from './operator-agent.mjs';
+
+const env = process.env;
+const host = env.MEMO_OPERATOR_HOST;
+const dir = env.MEMO_OPERATOR_CONFIG;
+if (!['mac', 'vps'].includes(host)) throw new Error('MEMO_OPERATOR_HOST must be mac or vps');
+if (!dir || !isAbsolute(dir)) throw new Error('MEMO_OPERATOR_CONFIG must be an absolute directory');
+const identity = OPERATOR_AGENT_IDS[host];
+const log = (event, details = {}) => console.error(JSON.stringify({ at: new Date().toISOString(), event, host: identity, ...details }));
+
+function readSmall(path, maxBytes = 64 * 1024) {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > maxBytes) throw new Error('file_invalid');
+    const buf = Buffer.alloc(info.size);
+    let at = 0;
+    while (at < info.size) { const n = readSync(fd, buf, at, info.size - at, at); if (n === 0) break; at += n; }
+    return buf.subarray(0, at).toString('utf8');
+  } finally { closeSync(fd); }
+}
+
+// Owner uids trusted for the policy and the hub key: root, plus the owner on the Mac, where the
+// agent runs as the owner (spec non-goals: no root there).
+const trustedUids = host === 'mac' ? [0, process.getuid()] : [0];
+const home = homedir();
+const policyPath = env.MEMO_OPERATOR_POLICY || DEFAULT_POLICY_PATHS[host].replace(/^~/, home);
+const policy = loadOperatorPolicy({ path: policyPath, expectedHost: host, trustedUids, home });
+const hubKeys = readTrustedFile(join(dir, 'operator-hub.pub'), { trustedUids })
+  .split(/(?=-----BEGIN PUBLIC KEY-----)/).map(s => s.trim()).filter(Boolean);
+const verifier = createOperatorVerifier({ publicKeys: hubKeys, host });
+const stateDir = env.MEMO_OPERATOR_STATE || dirname(policy.auditFile);
+const guard = createOperatorGuard(policy, { autoFrozenFile: join(stateDir, 'AUTO-FROZEN'), log });
+// Lot 1: the agent appends to its own journal file. Lot 2 routes the append through the root
+// helper on lab, which owns the file (spec D7; bridge/operator-audit.mjs header).
+const chain = createAuditChain({ store: fileAuditStore(policy.auditFile) });
+const tools = createOperatorTools(policy, { guard, chain });
+const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, log });
+
+const ca = readSmall(join(dir, 'hub-ca.crt'));
+const credentialsDir = env.CREDENTIALS_DIRECTORY;
+const keyFile = credentialsDir && isAbsolute(credentialsDir) && existsSync(join(credentialsDir, 'agent-key'))
+  ? join(credentialsDir, 'agent-key') : join(dir, 'agent.key');
+const privateKey = readSmall(keyFile, 16 * 1024);
+
+const agent = createAgent({
+  host: identity,
+  url: env.MEMO_BRIDGE_AGENT_URL || 'wss://localhost:9443/agent',
+  privateKey,
+  ca,
+  operations: {
+    // The hub's liveness probe: the same fixed facts as the probe agent, under this identity.
+    host_status: async () => ({ ...(await localStatus(host)), host: identity }),
+    ...handlers
+  },
+  log: (event, h, details = {}) => log(event, details)
+});
+log('operator_ready', { max_tier: policy.maxTierName, ops: Object.keys(handlers).length, chain_head: chain.head.slice(0, 16),
+  missing_roots: policy.missingRoots.length });
+process.on('SIGTERM', () => { agent.stop(); process.exit(0); });

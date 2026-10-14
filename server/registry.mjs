@@ -13,7 +13,7 @@
 //
 // The modules are imported dynamically: importing this file loads nothing of the runtime stack,
 // so the Mac probe agent (which imports bridge/ops.mjs) stays light.
-import { CAPABILITIES, OPERATION_CAPABILITY, authorize } from './coordinator/policy.mjs';
+import { CAPABILITIES, OPERATION_CAPABILITY, OPERATOR_OPERATION_CAPABILITY, authorize, operatorTier } from './coordinator/policy.mjs';
 
 // [module path relative to this file, register function]. Each register function takes
 // (server, getRuntime) and calls getRuntime() lazily, inside its handlers.
@@ -52,6 +52,17 @@ export const REMOTE_TOOLS_WRITE = Object.freeze([
 export const REMOTE_TOOLS = Object.freeze([...REMOTE_TOOLS_READ, ...REMOTE_TOOLS_WRITE]);
 const REMOTE_WRITE_SET = new Set(REMOTE_TOOLS_WRITE);
 export const isRemoteWriteTool = name => REMOTE_WRITE_SET.has(name);
+
+// Phase 6 operator tools on the public surface (spec §4). Listed for a principal holding the
+// operator capability of their tier: operator:read comes from the token scope, and only when the
+// remote.json ceiling lists it (policy.mjs REMOTE_DEFAULT_CEILING leaves it out). Tiers above T0
+// will also need remote_writes "enabled" (gate layer 1); Lot 1 has none.
+export const REMOTE_OPERATOR_TOOLS = Object.freeze(Object.keys(OPERATOR_OPERATION_CAPABILITY));
+const REMOTE_OPERATOR_SET = new Set(REMOTE_OPERATOR_TOOLS);
+export const isRemoteOperatorTool = name => REMOTE_OPERATOR_SET.has(name);
+export function operatorToolsFor(principal, { remoteWrites = false } = {}) {
+  return REMOTE_OPERATOR_TOOLS.filter(name => authorize(principal, name) && (operatorTier(name) === 0 || remoteWrites === true)).sort();
+}
 
 // Gate layer 1: writes are listed remotely only with remote_writes exactly "enabled".
 export const remoteWritesEnabled = config => config?.remote_writes === 'enabled';
@@ -95,6 +106,40 @@ export function collectToolDefinitions() {
   definitions.catch(() => { definitions = undefined; });
   // A fresh Map per caller: one surface can never change what another one lists.
   return definitions.then(defs => new Map(defs));
+}
+
+// Operator tool definitions (server/tools/operator-tools.mjs), apart from the runtime modules:
+// the runtime never serves them, so collectTools() leaves them out. Definitions only, cached.
+let operatorDefinitions;
+export function collectOperatorDefinitions() {
+  operatorDefinitions ??= import('./tools/operator-tools.mjs').then(mod => {
+    const defs = new Map();
+    mod.registerOperatorTools({
+      registerTool(name, config) {
+        if (defs.has(name)) throw new Error('duplicate_tool');
+        defs.set(name, Object.freeze({ description: config.description, inputSchema: config.inputSchema, annotations: config.annotations }));
+      }
+    }, () => { throw new Error('no_executor_here'); });
+    return defs;
+  });
+  operatorDefinitions.catch(() => { operatorDefinitions = undefined; });
+  return operatorDefinitions.then(defs => new Map(defs));
+}
+
+// The same self-check for the operator tools: collected, in the policy table, explicit hints,
+// readOnlyHint true exactly for T0.
+export function operatorRegistryProblems(defs) {
+  const problems = [];
+  for (const name of REMOTE_OPERATOR_TOOLS) {
+    const def = defs.get(name);
+    if (!def) { problems.push(`${name}: not collected`); continue; }
+    for (const hint of ['readOnlyHint', 'destructiveHint', 'openWorldHint']) {
+      if (typeof def.annotations?.[hint] !== 'boolean') problems.push(`${name}: ${hint} not explicit`);
+    }
+    if (def.annotations?.readOnlyHint !== (operatorTier(name) === 0)) problems.push(`${name}: readOnlyHint disagrees with policy`);
+  }
+  for (const name of defs.keys()) if (!REMOTE_OPERATOR_SET.has(name)) problems.push(`${name}: no policy entry`);
+  return problems;
 }
 
 // Registry self-check, run by the remote surface before it serves anything: every remote tool is
