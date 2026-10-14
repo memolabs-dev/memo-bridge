@@ -104,7 +104,7 @@ export function covers(lock, need) {
 
 // What one operator call touches: [{kind, key, shown, unresolved?}], or {error}. T0 calls touch
 // nothing. Commands are opaque (their argv can name any path): a run with a cwd is covered by a
-// path lock on that cwd, a run without one, a root run and a script need the host.
+// path lock on that cwd, a run without one, a root run and a script need the host. A user script follows the run rule.
 export function operatorTargets(op, args, { homes = DEFAULT_HOMES, uploads = null } = {}) {
   const host = args?.host;
   const path = raw => {
@@ -130,7 +130,16 @@ export function operatorTargets(op, args, { homes = DEFAULT_HOMES, uploads = nul
     case 'operator_run':
       if (args.as_root === true || typeof args.cwd !== 'string') return global;
       return all([path(args.cwd)]);
-    case 'operator_script': return global;
+    // Repatriation D-R6: a user script with a cwd is covered by a path lock on it, like a run.
+    case 'operator_script':
+      if (args.as_root === true || typeof args.cwd !== 'string') return global;
+      return all([path(args.cwd)]);
+    case 'operator_docker': {
+      // Reads touch nothing; restart, stop and start need a lock on the container.
+      if (!['restart', 'stop', 'start'].includes(args.action)) return [];
+      const container = lockTarget(host, 'container', args.container, homes);
+      return container ? [container] : { error: 'invalid_arguments' };
+    }
     case 'operator_service': {
       const unit = lockTarget(host, 'unit', args.unit, homes);
       return unit ? [unit] : { error: 'invalid_arguments' };

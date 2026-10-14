@@ -113,8 +113,14 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   // T2: as the agent user; operator_run with as_root is T3 (operatorCallTier)
   operator_run: CAPABILITIES.OPERATOR_EXEC,
   operator_service: CAPABILITIES.OPERATOR_EXEC,
-  // T3, through the root helper (lab; the Mac once installed)
-  operator_script: CAPABILITIES.OPERATOR_ROOT,
+  // Repatriation D-R6: a script runs as the agent user (T2), or as root with as_root (T3,
+  // through the root helper; operatorCallTier)
+  operator_script: CAPABILITIES.OPERATOR_EXEC,
+  // Repatriation D-R4: standing approvals, answered by the hub (list, request, revoke); T1 so
+  // they are listed with the other writes, never needing a lock (they change nothing on a host)
+  operator_grant: CAPABILITIES.OPERATOR_WRITE,
+  // Repatriation D-R11: Docker on lab through the root helper, declared actions only
+  operator_docker: CAPABILITIES.OPERATOR_EXEC,
   // Multi-session (D-MS4): locks, answered by the hub; T1 like the writes they announce
   operator_lock: CAPABILITIES.OPERATOR_WRITE,
   operator_unlock: CAPABILITIES.OPERATOR_WRITE,
@@ -131,11 +137,13 @@ export const isOperatorOperation = operation => typeof operation === 'string' &&
 export const operatorTier = operation => (isOperatorOperation(operation)
   ? OPERATOR_TIER_CAPABILITIES.indexOf(OPERATOR_OPERATION_CAPABILITY[operation]) : null);
 
-// The tier of one call: the op's tier, raised to T3 for operator_run with as_root (spec D1).
+// The tier of one call: the op's tier, raised to T3 for operator_run and operator_script with
+// as_root (spec D1, repatriation D-R6).
 export function operatorCallTier(operation, args) {
   const tier = operatorTier(operation);
   if (tier === null) return null;
-  return operation === 'operator_run' && args?.as_root === true ? 3 : tier;
+  if (['operator_run', 'operator_script'].includes(operation) && args?.as_root === true) return 3;
+  return tier;
 }
 
 // The capability an operation needs, from either table, or null for an unknown operation.

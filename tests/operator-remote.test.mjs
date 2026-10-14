@@ -100,9 +100,10 @@ test('Lot 2: the operator write, exec and root tools are listed only with the wr
     ['operator:exec', 'operator:read', 'operator:root', 'operator:write']);
   const all = await names(await open.client(scopes));
   for (const tool of REMOTE_OPERATOR_TOOLS) assert.ok(all.includes(tool), tool);
-  // A token with operator:exec but not operator:root lists operator_run (as_root is checked per call by the hub) but not operator_script.
+  // A token with operator:exec but not operator:root lists operator_run and operator_script (as_root is checked per call by
+  // the hub; repatriation D-R6 made a user script T2).
   const exec = await names(await open.client('coordinator:read operator:read operator:exec'));
-  assert.ok(exec.includes('operator_run') && !exec.includes('operator_script') && !exec.includes('operator_edit'));
+  assert.ok(exec.includes('operator_run') && exec.includes('operator_script') && !exec.includes('operator_edit'));
   // Default ceiling with the gate open: still no operator write tool.
   const plain = await service(t, { remoteWrites: 'enabled' });
   assert.equal((await names(await plain.client(scopes))).some(n => n.startsWith('operator_')), false);

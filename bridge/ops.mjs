@@ -37,7 +37,8 @@ export const OPERATOR_INTERNAL_OPS = Object.freeze(['operator_audit_head', 'oper
 // own timeout_s plus a margin (bridge/hub.mjs operatorTimeout); these are the floors.
 const OPERATOR_TIMEOUTS = Object.freeze({ operator_edit: 60_000, operator_upload_complete: 120_000, operator_copy: 300_000,
   operator_move: 120_000, operator_delete: 300_000, operator_run: 60_000, operator_script: 60_000, operator_service: 120_000,
-  operator_read_media: 120_000, operator_snapshot: 60_000, operator_transfer_source: 180_000 });
+  operator_read_media: 120_000, operator_snapshot: 60_000, operator_transfer_source: 180_000,
+  operator_docker: 90_000 });
 // Phase 6 (spec D2): each host also runs an operator agent, a separate process with its own
 // identity key (operator-mac.pub, operator-vps.pub in the hub's secrets), so it never replaces
 // the probe agent or the runtime on the hub's one-connection-per-identity table. Tools name the

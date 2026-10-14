@@ -73,7 +73,7 @@ test('operator_script: content goes to a root-only file, run by a fixed interpre
     seen = { argv, mode: statSync(script).mode & 0o777, content: readFileSync(script, 'utf8'), script };
     return { code: 0, stdout: 'ok', stderr: '' };
   } });
-  const out = await r.helper.handle(r.sign('operator_script', { host: 'vps', interpreter: 'bash', content: 'echo "$1"; id', args: ['a b'] }));
+  const out = await r.helper.handle(r.sign('operator_script', { host: 'vps', as_root: true, interpreter: 'bash', content: 'echo "$1"; id', args: ['a b'] }));
   assert.equal(out.ok, true);
   assert.deepEqual(seen.argv.slice(seen.argv.indexOf('--')), ['--', '/bin/bash', seen.script, 'a b']);
   assert.equal(seen.mode, 0o700);
@@ -100,9 +100,9 @@ test('the helper checks the signature, tier, approval and freeze itself; nothing
   assert.equal((await r.helper.handle(r.sign('operator_run', { host: 'vps', argv: ['id'], as_root: true }))).error, 'frozen');
   r.guard.clearAuto();
   // Dangerous mode: a script, or rm, without a signed approval id is refused.
-  assert.equal((await r.helper.handle(r.sign('operator_script', { host: 'vps', interpreter: 'bash', content: 'id' }))).error, 'approval_required');
+  assert.equal((await r.helper.handle(r.sign('operator_script', { host: 'vps', as_root: true, interpreter: 'bash', content: 'id' }))).error, 'approval_required');
   assert.equal((await r.helper.handle(r.sign('operator_run', { host: 'vps', argv: ['rm', '-rf', '/srv/x'], as_root: true }))).error, 'approval_required');
-  const approved = await r.helper.handle(r.sign('operator_script', { host: 'vps', interpreter: 'bash', content: 'id' }, { approval: 'ap_' + 'a'.repeat(24) }));
+  const approved = await r.helper.handle(r.sign('operator_script', { host: 'vps', as_root: true, interpreter: 'bash', content: 'id' }, { approval: 'ap_' + 'a'.repeat(24) }));
   assert.equal(approved.ok, true);
   // FROZEN on the host: refused.
   writeFileSync(r.policy.frozenFile, '');
