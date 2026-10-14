@@ -101,6 +101,10 @@ try {
   const names = (await client.listTools()).tools.map(x => x.name).sort();
   assert.deepEqual(names, EXPECTED, 'the exact tool list');
   assert.equal(new Set(names).size, names.length);
+  // Multi-session (D-MS9): the server instructions carry the start sequence and the stop codes.
+  const instructions = client.getInstructions() ?? '';
+  for (const rule of ['workspace_open', 'sessions_overview', 'task_next', 'operator_lock', 'operator_unlock', 'stale_lease',
+    'locked_by_other_session', 'workspace_other_session']) assert.ok(instructions.includes(rule), `instructions mention ${rule}`);
 
   // bridge_info reports exactly the registered tools.
   const info = await call('bridge_info');

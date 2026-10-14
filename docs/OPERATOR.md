@@ -39,6 +39,18 @@ Reads cover the read roots (`/` on lab, `~` on the Mac) minus the secret denylis
 group containers, `~/.memo-operator` and `/etc/memo-operator`. Command output and file content
 pass a token redactor and come back wrapped as untrusted data.
 
+## Default host and operator locks (multi-session)
+
+- `host` is optional: without it the hub uses `mac` when the `operator-mac` agent is connected,
+  else `vps`. `as_root`, `operator_script` and every call on the dangerous list must name it
+  (`host_required`, detail "Mac ou VPS ?"). Every result carries the `host` it ran on.
+- Locks (`operator_lock`, `operator_unlock`) live in the hub's memory for both hosts. A remote
+  conversation's T1 to T3 call names its `workspace_id` and needs a covering lock of that
+  workspace (`workspace_required`, `lock_required`); another workspace's overlapping lock answers
+  `locked_by_other_session`. The 9443 principals need no workspace and are refused only under
+  another workspace's lock. A hub restart drops the locks. Details: `docs/REMOTE_CHATGPT.md`,
+  "Ten conversations at once".
+
 ## Approval flow (`approval_mode: dangerous`, both hosts)
 
 1. A call on the dangerous list answers `pending_approval` with an `approval_id`: any script;

@@ -7,13 +7,24 @@ description: Observe Memo Labs hosts and projects, coordinate parallel AI work s
 
 Start with `bridge_info`: it lists every tool, the capabilities you hold and the limits. Use `list_hosts` to see which machines respond, `host_status` only with the exact IDs `mac` or `vps`, and `projects_list` to find canonical project names.
 
+## Several conversations at once
+
+Up to ten conversations of the owner use Memo Bridge at the same time, as the same principal. At the start of every conversation:
+
+1. `workspace_open` once, and pass its `workspace_id` to every later call.
+2. `sessions_overview`: every active workspace, its session tag (`you: true` is yours), project, task, lease and operator locks.
+3. Take work only with `task_next` (no `batch`: the next `agent:ready` task of any allowed project, p0 first), or `task_claim` on an Issue the owner named. Read its `brief`: your task, the other conversations on the project, the rules.
+4. Stay inside that task and its project. Never touch another conversation's task, branch, worktree or lock.
+5. Before any operator write, command or root call, `operator_lock` with your `workspace_id` on that path, unit or container (`global` for root calls, scripts and commands without `cwd`); `operator_unlock` when done.
+6. **Stop and tell the owner** on `stale_lease`, `locked_by_other_session`, `workspace_other_session` or `session_required`. Never retry another way.
+
 ## Working on a task end to end
 
 A task is a GitHub Issue, written `owner/repo#n`. Its reservation (claim) is shared by every machine and every AI client.
 
 1. **Workspace.** `workspace_open({project, client_type, client_label})` once per conversation. Pass its `workspace_id` explicitly to every later call.
-2. **Pick a task.** `tasks_list({project})` lists claimable Issues (labelled `agent:ready`, one priority, not blocked), best first. `task_status({issue})` shows who holds one.
-3. **Claim it.** `task_claim({workspace_id, issue})`. Keep `claim_id` and the **latest** `fence`.
+2. **Pick a task.** `task_next({workspace_id})` claims the best free one for you. To look first: `tasks_list({project})` lists claimable Issues (labelled `agent:ready`, one priority, not blocked), best first; `task_status({issue})` shows who holds one.
+3. **Claim it** (when the owner named the Issue). `task_claim({workspace_id, issue})`. Keep `claim_id` and the **latest** `fence`.
    - `lease_held`: someone else is on it; pick another task.
    - `issue_not_ready`, `project_mismatch`, `repo_not_allowed`: tell the user what is wrong.
    - Renew with `task_renew` before `expires_at`; each renewal returns a new fence to use from then on.
@@ -30,9 +41,10 @@ If you lost your context (compaction, crash, new conversation), call `workspace_
 
 ## Operator tools (remote connector only)
 
-The `operator_*` tools act on the machines themselves, not on repositories. They exist on the ChatGPT connector "Memo Bridge VPS" when the owner granted the `operator:*` scopes; this local plugin does not list them (Claude Code and Codex on the Mac already have a shell). Every call takes `host: "mac"` or `host: "vps"`.
+The `operator_*` tools act on the machines themselves, not on repositories. They exist on the ChatGPT connector "Memo Bridge VPS" when the owner granted the `operator:*` scopes; this local plugin does not list them (Claude Code and Codex on the Mac already have a shell). Every call takes `host: "mac"` or `host: "vps"`; without it the call runs on the Mac when its agent is connected, else on vps. `as_root`, `operator_script` and dangerous calls must name the host (`host_required`: ask the owner "Mac ou VPS ?"). Every result carries `host`: always say where the action ran.
 
 - Start with `operator_policy({host})`: it shows the tier, the roots and whether the host is frozen. Read with `operator_list`, `operator_read`, `operator_search`, `operator_logs` (lab only); write inside the write roots with `operator_edit` (use `dry_run` first), `operator_copy`, `operator_move`, `operator_delete` (always backed up); run an argv with `operator_run` (no shell: `["df","-h"]`, never `"df -h"`). Root, `as_root` and `operator_script` exist on lab only.
+- Writes, commands and root calls name your `workspace_id` and need an `operator_lock` that covers them: a path lock on the file or directory (on the `cwd` for `operator_run`), a unit lock for `operator_service`, a `global` lock for `as_root`, `operator_script` and commands without `cwd`. `lock_required` means take it; `locked_by_other_session` means another conversation holds it: stop and tell the owner. Read-only tools need no lock.
 - Tracked code is not edited here: `use_dev_flow` means the path is a registered checkout on its default branch; use the worktree flow above.
 - `pending_approval` means the owner must approve in Telegram: tell the user, poll `approval_status`, and repeat the exact same call once it is approved. Never change the call to avoid the approval.
 - **A refusal is final.** `frozen`, `path_secret`, `path_not_allowed`, `tier_not_allowed`, `approval_unavailable`, `denied`, `rate_limited` and the like: report it to the user and stop. Never retry the same intent another way (another tool, another path, a wrapper, a script, a copy of the file elsewhere) to get around it.

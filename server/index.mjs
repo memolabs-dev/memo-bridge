@@ -17,6 +17,7 @@ import { HOST_TOOLS, registerHostTools } from './tools/host-tools.mjs';
 import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
+import { MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
 
 const VERSION = '0.6.0';
 
@@ -40,7 +41,7 @@ const server = new McpServer({
 }, {
   instructions: 'Memo Bridge observes registered local projects, the Mac running this plugin and a VPS reachable via SSH alias lab, ' +
     'coordinates work between AI sessions, and runs that work on this machine. Flow for one task: workspace_open (pass its id ' +
-    'explicitly afterwards) -> tasks_list -> task_claim (keep claim_id and the latest fence; renew with task_renew) -> ' +
+    'explicitly afterwards) -> sessions_overview -> task_next, or tasks_list -> task_claim (keep claim_id and the latest fence; renew with task_renew) -> ' +
     'worktree_create with the issue -> worktree_read_file / worktree_write_file -> jobs_submit test|build|lint, then ' +
     'job_status / job_results -> worktree_commit -> worktree_push (records a checkpoint) -> github_create_pr -> task_complete -> ' +
     'workspace_close. After losing context call workspace_recover. Stop writing as soon as a call returns stale_lease or ' +
@@ -48,7 +49,7 @@ const server = new McpServer({
     'branch, never force-push, never merge and never deploy. Jobs run the repository\'s own test/build/lint scripts, which you ' +
     'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +
     'only, no private data or credentials) and stop when the claim ends; elsewhere they are refused unless the owner set ' +
-    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent.'
+    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent. ' + MULTI_SESSION_INSTRUCTIONS
 });
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
