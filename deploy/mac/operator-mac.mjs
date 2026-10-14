@@ -45,6 +45,8 @@ export const LABEL = 'dev.memolabs.memo-operator-agent';
 // The tunnel dev.memolabs.memo-bridge-tunnel listens on 127.0.0.1:9444 only; the hub
 // certificate names DNS:localhost and IP:127.0.0.1, and the live probe agent uses this form.
 export const AGENT_URL = 'wss://127.0.0.1:9444/agent';
+// The programs of the Mac's permanent grant (and lab's: lab-infra memo_operator_permanent_programs).
+export const PERMANENT_PROGRAMS = Object.freeze(['python3', 'node', 'bash', 'zsh', 'git', 'pnpm', 'npm', 'make']);
 export const RUNTIME_FILES = Object.freeze(['package.json', 'bridge/operator-job-supervisor.mjs', 'bridge/operator-agent-cli.mjs']);
 
 export function macLayout(home) {
@@ -150,7 +152,11 @@ export function macPolicy(home, { repositories = macRepositories(home), rootSock
     frozen_file: L.frozenFile,
     audit_file: L.auditFile,
     state_dir: L.stateDir,
-    repositories
+    repositories,
+    // Owner decision 2026-10-14 21:29 (memo-bridge issue #48): these programs run without a
+    // Telegram request with a cwd under ~/memolabs. Hard calls (rm, gh pr merge, force pushes...)
+    // and root calls still ask each time. Changed here only, never through a tool.
+    permanent_grants: [{ host: 'mac', programs: [...PERMANENT_PROGRAMS], cwd_prefixes: [h('memolabs')] }]
   };
 }
 
@@ -388,6 +394,7 @@ export async function writePolicy(home, { read = readProjectRegistry, now = Date
   const policy = loadOperatorPolicy({ path: L.policyFile, expectedHost: 'mac', trustedUids: [0, process.getuid()], home });
   return { step: 'policy', path: L.policyFile, state, backup, max_tier: policy.maxTierName, approval_mode: policy.approvalMode,
     root_helper: policy.rootHelper?.socket ?? null,
+    permanent_grants: policy.permanentGrants.map(g => ({ programs: [...g.programs], cwd_prefixes: [...g.cwd_prefixes] })),
     write_roots: [...policy.declaredRoots.write], missing_roots: [...policy.missingRoots], registered_projects: available };
 }
 

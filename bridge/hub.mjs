@@ -32,10 +32,10 @@ import { AGENT_IDS, HOSTS, HUB_LOCAL_OPS, HUB_PRINCIPALS, OPERATOR_AGENT_IDS, OP
   denialReason, isForwardable, isOperatorOp, servableBy } from './ops.mjs';
 import { OPERATOR_TIER_CAPABILITIES, authorize, isRemotePrincipal, operatorCallTier } from '../server/coordinator/policy.mjs';
 import { collectOperatorDefinitions } from '../server/registry.mjs';
-import { argsSha256, createOperatorSigner } from './operator-signing.mjs';
+import { APPROVAL_ID_RE, argsSha256, createOperatorSigner } from './operator-signing.mjs';
 import { createApprovalStore } from './operator-approvals.mjs';
-import { classifyCall, dangerReason, needsApproval, readOnlyCommand } from './operator-dangerous.mjs';
-import { createGrantStore } from './operator-grants.mjs';
+import { classifyCall, dangerReason, isPermanentApproval, needsApproval, readOnlyCommand } from './operator-dangerous.mjs';
+import { createGrantStore, grantableCall, permanentCovers } from './operator-grants.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
 import { DEFAULT_HOMES, LOCK_OPS, createOperatorLocks, mergeOverview } from './operator-locks.mjs';
@@ -134,6 +134,43 @@ export function createHub(options) {
   });
   // Repatriation D-R4: standing approvals, in memory like approvals and locks.
   const grants = createGrantStore({ ...(operator?.now ? { now: operator.now } : {}), homes: operator?.homes ?? DEFAULT_HOMES });
+  // Issue #48: permanent grants, owner-set in each host's policy file. The hub keeps the copy its
+  // operator agent reports in operator_policy (fetched on need, at most every 5 minutes and again
+  // after a reconnect), only to know when it need not ask Telegram: the agent checks each ap_pm_
+  // id against its own file, so a stale or forged copy can never widen a grant.
+  const permanentCache = new Map(); // host -> {conn, at, grants}
+  const PERMANENT_CACHE_MS = 5 * 60_000;
+  const clock = operator?.now ?? Date.now;
+  function permanentView(host, list) {
+    if (!Array.isArray(list)) return null;
+    const strings = v => Array.isArray(v) && v.length > 0 && v.length <= 16 && v.every(x => typeof x === 'string' && x.length <= 1024);
+    return list.filter(g => g && typeof g === 'object' && typeof g.grant_id === 'string' && APPROVAL_ID_RE.test(g.grant_id)
+      && isPermanentApproval(g.grant_id) && g.host === host && strings(g.programs) && strings(g.cwd_prefixes)).slice(0, 8)
+      .map(g => ({ grant_id: g.grant_id, host, programs: [...g.programs], cwd_prefixes: [...g.cwd_prefixes], source: 'permanent', expires_at: null }));
+  }
+  function rememberPermanent(host, list) {
+    const conn = agents.get(OPERATOR_AGENT_IDS[host]);
+    const view = permanentView(host, list);
+    if (conn && view) permanentCache.set(host, { conn, at: clock(), grants: view });
+    return view ?? [];
+  }
+  async function permanentGrants(host) {
+    const conn = agents.get(OPERATOR_AGENT_IDS[host]);
+    if (!signer || !conn) return [];
+    const cached = permanentCache.get(host);
+    if (cached && cached.conn === conn && clock() - cached.at < PERMANENT_CACHE_MS) return cached.grants;
+    const id = newId();
+    const args = { host };
+    const owner = HUB_PRINCIPALS[PRINCIPAL_IDS.owner];
+    const signature = signer.sign({ id, op: 'operator_policy', host, tier: 0, principal: owner.id, args });
+    const out = await sendAgent(OPERATOR_AGENT_IDS[host], 'operator_policy', { args, principal: owner, id, operator: signature });
+    if (out?.ok === false || !out?.policy || typeof out.policy !== 'object') return [];
+    return rememberPermanent(host, out.policy.permanent_grants ?? []);
+  }
+  async function allPermanentGrants() {
+    const lists = await Promise.all(Object.keys(OPERATOR_AGENT_IDS).map(host => permanentGrants(host).catch(() => [])));
+    return lists.flat();
+  }
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
@@ -173,11 +210,11 @@ export function createHub(options) {
     // sessions_overview: the runtime knows the workspaces, the hub the operator locks.
     if (op === 'sessions_overview') {
       const who = options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly];
-      return sendAgent(host, op, options).then(out => {
+      return sendAgent(host, op, options).then(async out => {
         const merged = mergeOverview(out, locks.overview(who, options.clientSession));
         if (merged?.ok !== true) return merged;
         const { ok: _ok, ...inbox } = notifier.check(who.id);
-        return { ...merged, standing_approvals: grants.list(who.id), notifications: inbox };
+        return { ...merged, standing_approvals: grants.list(who.id), permanent_grants: await allPermanentGrants(), notifications: inbox };
       });
     }
     // Issue #35: notify is the hub's, never the runtime's; the job is watched once it is accepted.
@@ -317,11 +354,22 @@ export function createHub(options) {
     if (Object.hasOwn(args, 'notify')) { const { notify: _n, ...rest } = args; args = rest; }
     const hash = argsSha256(args);
     let approval = null;
+    let approvalSource = null;
     const mode = approvalModes[host];
     if (needsApproval(mode, op, args, tier)) {
       const call = { host, op, argsSha256: hash, principal: principal.id };
-      // A single-use approval for this exact call first, then a standing approval (D-R4).
-      approval = approvals.consume(call) ?? grants.covers({ host, op, args, principal: principal.id });
+      // A single-use approval for this exact call first, then the host's permanent grants (#48),
+      // then a standing approval (D-R4).
+      approval = approvals.consume(call);
+      if (approval) approvalSource = 'single_use';
+      if (!approval && tier < 3 && grantableCall(op, args)) {
+        approval = permanentCovers(await permanentGrants(host), { host, op, args }, operator?.homes ?? DEFAULT_HOMES);
+        if (approval) approvalSource = 'permanent';
+      }
+      if (!approval) {
+        approval = grants.covers({ host, op, args, principal: principal.id });
+        if (approval) approvalSource = 'standing';
+      }
       if (!approval) {
         if (!bot) {
           record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'approval_unavailable'});
@@ -361,7 +409,12 @@ export function createHub(options) {
     data = op === 'operator_freeze_status' && data && data.ok !== false
       ? { ...data, hub_frozen: frozen, frozen_above_t0: Boolean(data.frozen_above_t0) || frozen } : data;
     // The standing approvals live here: operator_policy shows the ones of this host (D-R4).
-    if (op === 'operator_policy' && data && data.ok !== false) data = { ...data, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
+    if (op === 'operator_policy' && data && data.ok !== false) {
+      data = { ...data, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
+      if (data.policy && typeof data.policy === 'object') rememberPermanent(host, data.policy.permanent_grants ?? []);
+    }
+    // The agent refused our copy of a permanent grant (its file changed): ask it again next time.
+    if (approvalSource === 'permanent' && data?.ok === false && data.error === 'approval_scope') permanentCache.delete(host);
     if (notify && ['operator_run', 'operator_script'].includes(op) && data && typeof data === 'object' && data.ok !== false) {
       data = { ...data, notify: args.background === true && typeof data.job_id === 'string'
         ? notifier.watch({ kind: 'operator', host, job_id: data.job_id, label: op, principal, timeout_s: args.timeout_s, clientSession })
@@ -370,7 +423,8 @@ export function createHub(options) {
     // Hub journal (spec D7): tier, args hash and redacted args, approval, outcome, duration, output
     // hash. The wire id matches the host journal's request id when no request id travelled.
     record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
-      args_sha256: signature.args_sha256, args: journalArgs(args), approval_id: approval, ...(readOnly ? { read_only: true } : {}),
+      args_sha256: signature.args_sha256, args: journalArgs(args), approval_id: approval, ...(approvalSource ? { approval_source: approvalSource } : {}),
+      ...(readOnly ? { read_only: true } : {}),
       outcome: data?.ok === false ? 'refused' : 'ok',
       code: data?.ok === false && CODE_RE.test(String(data.error)) ? data.error : null,
       exit_code: Number.isInteger(data?.exit_code) ? data.exit_code : null, ms: Date.now() - started, output_sha256: sha256Hex(data ?? null) });
