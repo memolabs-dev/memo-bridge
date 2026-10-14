@@ -91,10 +91,16 @@ export function macPolicy(home, { repositories = macRepositories(home), rootSock
     max_tier: rootSocket ? 'root' : 'exec',
     approval_mode: 'dangerous',
     ...(rootSocket ? { root_helper: { socket: rootSocket } } : {}),
+    // Owner decision 2026-10-14 (repatriation D-R10, settles O-P6-5): the whole home is writable,
+    // minus the denylist below; writes under ~/Library/LaunchAgents ask the owner (sensitive path,
+    // bridge/operator-dangerous.mjs).
     roots: {
       read: [home],
-      write: [h('memolabs'), h('Desktop'), h('Downloads'), h('Documents'), '/tmp']
+      write: [home, '/tmp']
     },
+    // User runs find the owner's tools (D-R8): pnpm's home, ~/.local/bin, Homebrew. Root calls
+    // never use this PATH.
+    run_path: [h('Library/pnpm/bin'), h('.local/bin'), '/opt/homebrew/bin', '/opt/homebrew/sbin'],
     // Added to the built-in list of bridge/operator-paths.mjs (which already holds .ssh, .gnupg,
     // .env*, *.pem, *.key, id_*, *secret*, ~/Library/Keychains, .memo-operator, .netrc, .aws
     // credentials, gh, docker and kube configs). Repeated here where the brief names them, so
@@ -130,7 +136,16 @@ export function macPolicy(home, { repositories = macRepositories(home), rootSock
       `${h('Library/HTTPStorages')}/**`,
       `${h('Library/Messages')}/**`,
       `${h('Library/Mail')}/**`,
-      `${h('Library/Group Containers')}/**`
+      `${h('Library/Group Containers')}/**`,
+      // Repatriation D-R10, with the whole home writable: the agents' own pinned code (rewriting
+      // it would rewrite the policy checks), password stores, privacy database, other browsers.
+      `${h('.local/share/memo-bridge')}/**`,
+      `${h('.password-store')}/**`,
+      `${h('.config/op')}/**`,
+      `${support}/com.apple.TCC/**`,
+      `${support}/Vivaldi/**`,
+      `${support}/com.operasoftware.Opera/**`,
+      `${h('Library/Application Support/Code/User/globalStorage')}/**`
     ],
     frozen_file: L.frozenFile,
     audit_file: L.auditFile,
