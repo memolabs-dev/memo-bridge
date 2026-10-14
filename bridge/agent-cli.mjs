@@ -8,9 +8,15 @@
 //   on runtime.as(principalFromHub(id)). Secrets are read only from $CREDENTIALS_DIRECTORY,
 //   filled by LoadCredential= in the unit:
 //     agent-key   Ed25519 private key of the vps agent identity     (required, read here)
-//     ledger-gh   GitHub token for the lease ledger (spec D6)        (required; checked here, read
-//                 per call by the ledger client, server/coordinator/issue-lease.mjs)
-//     push-gh     GitHub token for pushes (spec D6, TODO-P4-11)       (optional here)
+//     app-key     PEM private key of the GitHub App memo-labs-automation (optional). With the
+//                 App settings MEMO_BRIDGE_GITHUB_APP_ID and MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID
+//                 (environment, not secret) it replaces both PATs: the runtime mints installation
+//                 tokens narrowed to one repository and the minimal permissions, on demand
+//                 (server/integrations/github-app.mjs)
+//     ledger-gh   GitHub token for the lease ledger (spec D6)        (fallback PAT; required when
+//                 the App is not configured, read per call by server/coordinator/issue-lease.mjs)
+//     push-gh     GitHub token for pushes (spec D6, TODO-P4-11)       (fallback PAT, optional)
+//   Startup requires either a usable app-key with valid App settings, or a valid ledger-gh.
 //   lab-infra (memo-bridge-runner.service) loads the agent key as `agent.key` and points
 //   MEMO_BRIDGE_AGENT_CONFIG at the credentials directory (%d); both names are accepted.
 //   With MEMO_BRIDGE_JOB_EXECUTOR=systemd the job supervisor (server/runners/supervisor.mjs)
@@ -64,14 +70,22 @@ if (mode === 'runtime') {
   if (!keyFile) throw new Error('agent-key credential missing');
   privateKey = readSmall(keyFile);
   const { createRuntime } = await import('../server/runtime.mjs');
-  const { LEDGER_CREDENTIAL, PUSH_CREDENTIAL, credentialPath, readTokenFile } = await import('../server/coordinator/issue-lease.mjs');
-  // Fail fast on a missing or malformed ledger token rather than on the first claim.
-  const ledger = await readTokenFile(credentialPath(env, LEDGER_CREDENTIAL));
-  if (ledger.error) throw new Error(`${LEDGER_CREDENTIAL} ${ledger.error}`);
-  const pushPresent = existsSync(credentialPath(env, PUSH_CREDENTIAL));
-  // The ledger client reads ledger-gh per call and hands it only to its python child, with a
+  const { LEDGER_CREDENTIAL, readTokenFile, credentialPath } = await import('../server/coordinator/credentials.mjs');
+  const { createGitHubCredentials } = await import('../server/integrations/github-app.mjs');
+  // GitHub credentials: the App when app-key and its settings are present, else the PATs.
+  // Checked offline here (no network): fail fast rather than on the first claim.
+  const githubCredentials = createGitHubCredentials({ env, log: (event, details) => log(event, details) });
+  const github = await githubCredentials.startupCheck();
+  if (github.ledger === 'missing') {
+    if (!['absent', 'configured'].includes(github.app)) throw new Error(`app-key ${github.app}`);
+    const ledger = await readTokenFile(credentialPath(env, LEDGER_CREDENTIAL));
+    throw new Error(`${LEDGER_CREDENTIAL} ${ledger.error ?? 'credential_missing'}`);
+  }
+  if (!['absent', 'configured'].includes(github.app)) log('github_app_unusable', { code: github.app, fallback: 'pat' });
+  const pushPresent = github.push !== 'missing';
+  // The ledger client gets its token per call and hands it only to its python child, with a
   // private gh configuration under the state directory (server/runtime.mjs).
-  base = createRuntime({ host: 'vps' });
+  base = createRuntime({ host: 'vps', githubCredentials });
   runtimeOps = await createRuntimeOperations({
     runtimeFor: principal => base.as(principal),
     principalFromWire: wire => base.principalFromHub(wireClaim(wire)),
@@ -83,6 +97,7 @@ if (mode === 'runtime') {
   const { startSupervisorFromEnv } = await import('../server/runners/supervisor.mjs');
   supervisor = await startSupervisorFromEnv(base, env, { log: (event, details = {}) => log(event, details) });
   log('runtime_ready', { ops: Object.keys(operations).length, push_credential: pushPresent,
+    github_auth: { app: github.app, ledger: github.ledger, push: github.push },
     executor: supervisor ? 'systemd' : 'local' });
 } else {
   privateKey = credentialFile('agent-key') && existsSync(credentialFile('agent-key'))

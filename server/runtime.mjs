@@ -17,6 +17,7 @@ import { CAPABILITIES, CLIENT_TYPES, WRITE_CAPABILITIES, authorize, hubGrantsFro
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
 import { createProjectSync } from './integrations/project-sync.mjs';
+import { createGitHubCredentials } from './integrations/github-app.mjs';
 
 export function currentHost() {
   return platform() === 'darwin' ? 'mac' : 'vps';
@@ -48,7 +49,7 @@ export function gateRemotePrincipal(p, policy) {
 
 export function createRuntime({ stateDir = defaultStateDir(), principal = localOwnerPrincipal(), ledger, now = Date.now,
   catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env, remotePolicy,
-  projectSync } = {}) {
+  projectSync, githubCredentials } = {}) {
   let store;
   const coordinators = new Map();
   const views = new Map();
@@ -58,7 +59,12 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   // ProtectSystem=strict and no PrivateTmp, /tmp is read-only for the runner (systemd.exec(5),
   // systemd 257, ProtectSystem=: "strict" mounts the entire hierarchy read-only except /dev,
   // /proc and /sys; only ReadWritePaths= such as /var/lib/memo-runner stay writable).
-  const sharedLedger = ledger ?? createIssueLeaseClient({ env, scratchDir: join(stateDir, 'ledger-gh') });
+  // One GitHub credentials provider per runtime (server/integrations/github-app.mjs): App
+  // installation tokens cached per repository and permission set, PAT files as fallback, and
+  // nothing at all on the Mac (no $CREDENTIALS_DIRECTORY). The ledger, the worktree runner and
+  // github_create_pr share it.
+  const credentials = githubCredentials ?? createGitHubCredentials({ env });
+  const sharedLedger = ledger ?? createIssueLeaseClient({ env, scratchDir: join(stateDir, 'ledger-gh'), credentials });
 
   const openStore = () => { store ??= openSqliteStore({ dir: stateDir }); return store; };
   // One GitHub Projects sync per runtime, shared by every principal's coordinator and by
@@ -93,6 +99,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
 
   const runtime = {
     now, host, stateDir, catalogOptions,
+    githubCredentials: credentials,
     remotePolicy: policy,
     store: openStore,
     ledger: sharedLedger,

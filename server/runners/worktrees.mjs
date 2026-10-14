@@ -30,14 +30,16 @@
 // Authorization and audit happen in server/tools/worktree-tools.mjs before these functions run.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { constants as fsConstants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectInfo } from '../catalog.mjs';
 import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
-import { PUSH_CREDENTIAL, credentialPath, credentialsRequired, parseIssueRef, readTokenFile } from '../coordinator/issue-lease.mjs';
+import { PUSH_CREDENTIAL, credentialsRequired } from '../coordinator/credentials.mjs';
+import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { createGitHubCredentials } from '../integrations/github-app.mjs';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
 import { runOnce } from '../coordinator/store.mjs';
 import { isProtectedRepoPath, isRemotePrincipal, protectedPaths, remotePolicyFromEnv, remoteProjectRefusal, requestMeta,
@@ -219,10 +221,17 @@ const out = r => r.stdout.toString('utf8').trim();
 // Credentials for Git's network calls (Phase 4, D6, TODO-P4-11).
 //
 // On the Mac ($CREDENTIALS_DIRECTORY unset) nothing changes: Git uses the owner's own setup.
-// On the VPS the runner runs with LoadCredential=push-gh (systemd.exec(5), systemd 257: the
+// On the VPS the token comes from the runtime's GitHub credentials provider
+// (server/integrations/github-app.mjs): a GitHub App installation token narrowed to the
+// origin repository with contents:write when the `app-key` credential and the App settings are
+// present, else the push-gh PAT (LoadCredential=push-gh; systemd.exec(5), systemd 257: the
 // copy in $CREDENTIALS_DIRECTORY is readable only by the unit's user and root). Then:
-// - fetch, ls-remote and push get GIT_ASKPASS=git-askpass.mjs and the credential's *path* in
-//   MEMO_BRIDGE_ASKPASS_CREDENTIAL; the helper answers GitHub HTTPS prompts only;
+// - fetch, ls-remote and push get GIT_ASKPASS=git-askpass.mjs and a credential file *path* in
+//   MEMO_BRIDGE_ASKPASS_CREDENTIAL; the helper answers GitHub HTTPS prompts only. With the
+//   PAT it is the credential itself; with an App token it is a file written for this call
+//   only (0600, in a 0700 directory of the state directory) and removed right after it
+//   (release()); a leftover from a crash is removed after ASKPASS_STALE_MS, and the token in
+//   it expires within an hour anyway;
 // - `-c credential.helper=` empties the helper list, so no other helper (system, global,
 //   URL-specific) can supply or store a credential (gitcredentials(7): an empty helper value
 //   resets the list; checked with git 2.54, url-specific helpers included; the VPS has git
@@ -276,17 +285,59 @@ export async function askpassProgram(env, { source = ASKPASS_PATH } = {}) {
   }
 }
 
-// {config, env} for one network call, or {error}. `env` is the runner's environment.
-export async function networkGit(env) {
+export const ASKPASS_STALE_MS = 2 * 60 * 60_000;
+const ASKPASS_FILE_RE = /^tok-[0-9a-f]{32}$/;
+
+// Write an App token for one Git call: a private directory (0700, ours), a new 0600 file.
+// Returns the path, or null (fail closed).
+async function writeAskpassToken(dir, token) {
+  if (!isAbsolute(dir ?? '')) return null;
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const info = await lstat(dir);
+    if (!info.isDirectory() || info.uid !== process.getuid?.() || (info.mode & 0o077)) return null;
+    for (const name of await readdir(dir)) {
+      if (!ASKPASS_FILE_RE.test(name)) continue;
+      const entry = await lstat(join(dir, name)).catch(() => null);
+      if (entry && Date.now() - entry.mtimeMs > ASKPASS_STALE_MS) await unlink(join(dir, name)).catch(() => {});
+    }
+    const file = join(dir, `tok-${randomBytes(16).toString('hex')}`);
+    await writeFile(file, `${token}\n`, { mode: 0o600, flag: 'wx' });
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+// owner/name of a repository's origin, read locally (no network); null when unknown.
+export async function originRepo(cwd, env) {
+  const r = await runGit(cwd, ['remote', 'get-url', 'origin'], { readOnly: true, env, maxBytes: 4096 });
+  if (r.code !== 0) return null;
+  const match = /[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(out(r));
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
+// {config, env, release?} for one network call, or {error}. `env` is the runner's environment,
+// `repo` the owner/name of the origin (it selects the App token), `credentials` the runtime's
+// provider (built from env when absent), `scratchDir` where an App token file is written
+// (default <MEMO_BRIDGE_STATE_DIR>/askpass). The caller runs release() once its network calls
+// are done; it exists only for an App token.
+export async function networkGit(env, { repo = null, credentials = null, scratchDir = null } = {}) {
   if (!credentialsRequired(env)) return { config: [], env };
-  const file = credentialPath(env, PUSH_CREDENTIAL);
-  const read = file ? await readTokenFile(file) : { error: 'credential_missing' };
-  if (read.error) return { error: fail('credential_unavailable', `${PUSH_CREDENTIAL} ${read.error}`) };
+  const got = await (credentials ?? createGitHubCredentials({ env })).token('push', repo);
+  if (got.error) return { error: fail('credential_unavailable', `${got.credential} ${got.error}`) };
+  if (!got.token) return { error: fail('credential_unavailable', `${PUSH_CREDENTIAL} credential_missing`) };
   const askpass = await askpassProgram(env);
   if (!askpass) return { error: fail('credential_unavailable', 'askpass_unavailable') };
+  const config = ['-c', 'credential.helper='];
+  if (got.source === 'pat') return { config, env: { ...gitBaseEnv(env), GIT_ASKPASS: askpass, [ASKPASS_CREDENTIAL_VAR]: got.file } };
+  const dir = scratchDir ?? (isAbsolute(env.MEMO_BRIDGE_STATE_DIR ?? '') ? join(env.MEMO_BRIDGE_STATE_DIR, 'askpass') : null);
+  const file = await writeAskpassToken(dir, got.token);
+  if (!file) return { error: fail('credential_unavailable', 'askpass_unavailable') };
   return {
-    config: ['-c', 'credential.helper='],
-    env: { ...gitBaseEnv(env), GIT_ASKPASS: askpass, [ASKPASS_CREDENTIAL_VAR]: file }
+    config,
+    env: { ...gitBaseEnv(env), GIT_ASKPASS: askpass, [ASKPASS_CREDENTIAL_VAR]: file },
+    release: () => unlink(file).catch(() => {})
   };
 }
 
@@ -494,8 +545,15 @@ export async function protectedSinceDefault(root, tip, names, env, { commit = nu
 const protectedRefusal = hits => fail('path_protected',
   `${hits.count} change(s) under .github/workflows, .github/actions or .github/dependabot.yml: ${hits.shown.join(', ')}`);
 
-export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
-  remotePolicy = typeof rt?.remotePolicy === 'function' ? rt.remotePolicy() : remotePolicyFromEnv(runnerEnv) } = {}) {
+export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explicitCredentials,
+  remotePolicy = typeof rt?.remotePolicy === 'function' ? rt.remotePolicy() : remotePolicyFromEnv(explicitEnv ?? process.env) } = {}) {
+  const runnerEnv = explicitEnv ?? process.env;
+  // The runtime's shared provider, unless the caller passed its own environment.
+  const credentials = explicitCredentials ?? (explicitEnv === undefined && rt?.githubCredentials
+    ? rt.githubCredentials : createGitHubCredentials({ env: runnerEnv }));
+  const askpassDir = isAbsolute(rt?.stateDir ?? '') ? join(rt.stateDir, 'askpass') : null;
+  const netFor = async (repoPath, gitEnv) => networkGit(runnerEnv, { credentials, scratchDir: askpassDir,
+    repo: credentialsRequired(runnerEnv) ? await originRepo(repoPath, gitEnv) : null });
   // Local Git calls never see the credentials directory; network calls get networkGit(runnerEnv).
   const env = gitBaseEnv(runnerEnv);
   const baseGitEnv = env; // methods below shadow `env` with the pinned one from locate()
@@ -665,10 +723,18 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
 
       // Documented network call: refresh remote-tracking refs so the base is current and a
       // branch that exists only on the remote is detected. Never prunes, never fetches tags.
-      const net = await networkGit(runnerEnv);
+      // Then the remote's own default branch and branches (ls-remote); both network calls share
+      // one credential, released right after them.
+      const net = await netFor(repoPath, env);
       if (net.error) return net.error;
-      const fetched = await runGit(repoPath, [...net.config, 'fetch', '--no-tags', '--quiet', 'origin'],
-        { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env: net.env });
+      let fetched; let remote = null;
+      try {
+        fetched = await runGit(repoPath, [...net.config, 'fetch', '--no-tags', '--quiet', 'origin'],
+          { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env: net.env });
+        if (fetched.code === 0) remote = await remoteBranches(repoPath, net);
+      } finally {
+        await net.release?.();
+      }
       if (fetched.code !== 0) return fail('fetch_failed', fetched.timedOut ? 'timeout' : `exit ${fetched.code}`);
       const defaultName = await defaultBranch(repoPath, env);
       if (!defaultName) return fail('default_branch_unknown');
@@ -676,8 +742,6 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
       const suffix = workspace.id.slice(3, 11).toLowerCase();
       const branch = args.branch ?? (issue ? `agent/${issue.number}-${suffix}` : `agent/ws-${suffix}`);
       if (!validBranch(branch)) return fail('invalid_input', 'branch');
-      // Documented network call: the remote's own default branch and branches.
-      const remote = await remoteBranches(repoPath, net);
       if (!remote) return fail('fetch_failed', 'ls-remote');
       if (isProtectedBranch(branch, [defaultName, remote.head])) return fail('protected_branch');
       // Any existing branch with the same name in another case is the same ref file on APFS.
@@ -1034,7 +1098,18 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
     }
   };
 
+  // The credential of a push lives from its first network call to its last; released here
+  // whatever the outcome.
   async function pushOnce(row, workspace) {
+    const nets = [];
+    try {
+      return await pushSteps(row, workspace, nets);
+    } finally {
+      for (const net of nets) await net.release?.();
+    }
+  }
+
+  async function pushSteps(row, workspace, nets) {
     const busy = await unitJobActive(row);
     if (busy) return busy.error;
     const located = await locate(row);
@@ -1052,8 +1127,9 @@ export function createWorktreeRunner(rt, { env: runnerEnv = process.env,
     if (touched.count) return protectedRefusal(touched);
     // Ask the remote itself (network): its default branch and its branches. The local
     // origin/HEAD can be missing or stale, and a narrow fetch refspec hides other branches.
-    const unpinned = await networkGit(runnerEnv);
+    const unpinned = await netFor(root, env);
     if (unpinned.error) return unpinned.error;
+    nets.push(unpinned);
     const net = { ...unpinned, env: { ...unpinned.env, ...located.pins } };
     const remote = await remoteBranches(root, net);
     if (!remote) return fail('push_failed', 'ls-remote');

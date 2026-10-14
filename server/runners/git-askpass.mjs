@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // GIT_ASKPASS helper for the VPS runner's own Git network calls (fetch, ls-remote, push).
 // worktrees.mjs sets GIT_ASKPASS to this file and MEMO_BRIDGE_ASKPASS_CREDENTIAL to the
-// absolute path of the push-gh credential ($CREDENTIALS_DIRECTORY/push-gh, systemd
-// LoadCredential=). Git runs it without a shell, with the prompt as its only argument, and reads
+// absolute path of a token file: the push-gh credential ($CREDENTIALS_DIRECTORY/push-gh,
+// systemd LoadCredential=), or a per-call file holding a GitHub App installation token
+// (server/runners/worktrees.mjs networkGit). Git runs it without a shell, with the prompt as its only argument, and reads
 // the answer from stdout (git prompt.c do_askpass; checked with git 2.54: GIT_ASKPASS is still
 // used when GIT_TERMINAL_PROMPT=0). The token is never in an environment variable or argv.
 //
@@ -16,7 +17,9 @@ import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs
 import { isAbsolute } from 'node:path';
 
 const PROMPT_RE = /^(Username|Password) for 'https:\/\/(?:[A-Za-z0-9._%+-]{1,100}@)?github\.com(?:\/[^']*)?': ?$/;
-const TOKEN_RE = /^[A-Za-z0-9_]{20,255}$/;
+// Same pattern as server/coordinator/credentials.mjs TOKEN_RE: PATs and installation tokens,
+// including GitHub's stateless JWT-shaped ghs_ tokens (dots and dashes, about 520 characters).
+const TOKEN_RE = /^[A-Za-z0-9_.-]{20,2048}$/;
 const MAX_BYTES = 4096;
 
 function token(path) {
