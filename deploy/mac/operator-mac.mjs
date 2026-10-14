@@ -8,6 +8,12 @@
 //   node deploy/mac/operator-mac.mjs policy  --home <abs>
 //   node deploy/mac/operator-mac.mjs runtime --home <abs> --from <built dir> [--commit <sha>]
 //   node deploy/mac/operator-mac.mjs plist   --home <abs> --node <abs> --out <dir>
+// Mac root helper (spec §13 Mac root follow-up; deploy/mac/install-operator-root.sh, run as the
+// owner's user, never as root):
+//   node deploy/mac/operator-mac.mjs hub-key-id  --from <pem>
+//   node deploy/mac/operator-mac.mjs root-plan   --home <abs> --node <abs> --uid <n> --gid <n>
+//   node deploy/mac/operator-mac.mjs root-policy --home <abs> --out <file>
+//   node deploy/mac/operator-mac.mjs root-plist  --home <abs> --uid <n> --gid <n> --out <file>
 //
 // Layout on the Mac (macLayout below):
 //   ~/.memo-operator/                 0700  configuration of the agent, denied to its own tools
@@ -33,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { generateAgentIdentity, keyFingerprint } from '../../bridge/crypto.mjs';
 import { loadOperatorPolicy, parseOperatorPolicy } from '../../bridge/operator-policy.mjs';
 import { readProjectRegistry } from '../../server/catalog.mjs';
+import { MAC_ROOT_LABEL, macRootLayout } from '../../bridge/operator-root-mac.mjs';
 
 export const LABEL = 'dev.memolabs.memo-operator-agent';
 // The tunnel dev.memolabs.memo-bridge-tunnel listens on 127.0.0.1:9444 only; the hub
@@ -72,16 +79,18 @@ export function macRepositories(home) {
   };
 }
 
-// The Mac policy (spec D1, D5, D8, O-P6-5 as briefed for Lot 3). T2 at most: no root on the Mac.
-export function macPolicy(home, { repositories = macRepositories(home) } = {}) {
+// The Mac policy (spec D1, D5, D8, O-P6-5 as briefed for Lot 3). T2, or T3 once the root helper
+// is installed (rootSocket: its socket path; spec §13 Mac root follow-up, R-MR-07).
+export function macPolicy(home, { repositories = macRepositories(home), rootSocket = null } = {}) {
   const L = macLayout(home);
   const h = rel => join(home, rel);
   const support = h('Library/Application Support');
   return {
     version: 1,
     host: 'mac',
-    max_tier: 'exec',
+    max_tier: rootSocket ? 'root' : 'exec',
     approval_mode: 'dangerous',
+    ...(rootSocket ? { root_helper: { socket: rootSocket } } : {}),
     roots: {
       read: [home],
       write: [h('memolabs'), h('Desktop'), h('Downloads'), h('Documents'), '/tmp']
@@ -130,6 +139,28 @@ export function macPolicy(home, { repositories = macRepositories(home) } = {}) {
   };
 }
 
+// The Mac root helper's own policy, root-owned at /Library/Application Support/MemoBridge/
+// operator-root/policy.json. Every path absolute (root's "~" would be /var/root). The read root
+// '/' only bounds the working directory of a root call; the denylist and the repository guard
+// still apply to it. Its FROZEN switch sits in the root directory; the owner's
+// ~/.memo-operator/FROZEN is obeyed too (plist MEMO_OPERATOR_USER_FROZEN).
+export function macRootPolicy(home, { layout = macRootLayout(), repositories = macRepositories(home) } = {}) {
+  const user = macPolicy(home, { repositories });
+  return {
+    version: 1,
+    host: 'mac',
+    max_tier: 'root',
+    approval_mode: 'dangerous',
+    roots: { read: ['/'], write: [] },
+    denylist: user.denylist,
+    frozen_file: layout.frozen,
+    audit_file: layout.audit,
+    state_dir: layout.stateDir,
+    repositories,
+    root_helper: { socket: layout.socket }
+  };
+}
+
 const xml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
 // The launchd job, every path absolute (launchd expands no "~"). launchd.plist(5) on this Mac:
@@ -170,6 +201,73 @@ export function renderPlist({ home, node, label = LABEL, url = AGENT_URL }) {
     '</plist>',
     ''
   ].join('\n');
+}
+
+// The LaunchDaemon (launchd.plist(5) on this Mac: UserName and GroupName apply in the system
+// domain; Umask is a decimal integer, 63 = 077; StandardErrorPath is created with that umask).
+// It runs the root-owned node copy on the root-owned bundle; nothing it names is under the home.
+export function renderRootPlist({ home, uid, gid, layout = macRootLayout() }) {
+  const L = macLayout(home);
+  if (!Number.isInteger(uid) || uid <= 0 || !Number.isInteger(gid) || gid <= 0) throw new Error('agent_uid_invalid');
+  const env = {
+    MEMO_OPERATOR_ROOT_DIR: layout.dir,
+    MEMO_OPERATOR_AGENT_UID: String(uid),
+    MEMO_OPERATOR_AGENT_GID: String(gid),
+    MEMO_OPERATOR_USER_FROZEN: L.frozenFile,
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin'
+  };
+  for (const p of [layout.node, layout.script, layout.helperLog]) if (!isAbsolute(p) || p.startsWith(`${home}/`)) throw new Error('plist_path_invalid');
+  const str = v => `\t\t<string>${xml(v)}</string>`;
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '\t<key>Label</key>', `\t<string>${xml(layout.label)}</string>`,
+    '\t<key>ProgramArguments</key>', '\t<array>', str(layout.node), str(layout.script), '\t</array>',
+    '\t<key>UserName</key>', '\t<string>root</string>',
+    '\t<key>GroupName</key>', '\t<string>wheel</string>',
+    '\t<key>EnvironmentVariables</key>', '\t<dict>',
+    ...Object.entries(env).flatMap(([k, v]) => [`\t\t<key>${xml(k)}</key>`, str(v)]),
+    '\t</dict>',
+    '\t<key>WorkingDirectory</key>', '\t<string>/</string>',
+    '\t<key>KeepAlive</key>', '\t<true/>',
+    '\t<key>RunAtLoad</key>', '\t<true/>',
+    '\t<key>ThrottleInterval</key>', '\t<integer>30</integer>',
+    '\t<key>Umask</key>', '\t<integer>63</integer>',
+    '\t<key>StandardOutPath</key>', `\t<string>${xml(layout.helperLog)}</string>`,
+    '\t<key>StandardErrorPath</key>', `\t<string>${xml(layout.helperLog)}</string>`,
+    '</dict>',
+    '</plist>',
+    ''
+  ].join('\n');
+}
+
+// What `sudo deploy/mac/install-operator-root.sh --install` does, in order, every target with its
+// owner and mode. Printed by the dry run and again before the install. Sources may sit in the
+// home (the node, the hub key); no target does.
+export function rootPlan({ home, node, uid, gid, layout = macRootLayout() }) {
+  const L = macLayout(home);
+  const dir = (path, mode) => ({ action: 'mkdir', path, owner: 'root:wheel', mode });
+  const file = (path, mode, from) => ({ action: 'install', path, owner: 'root:wheel', mode, from });
+  const steps = [
+    dir(layout.parent, '0755'), dir(layout.dir, '0755'), dir(join(layout.dir, 'bin'), '0755'), dir(join(layout.dir, 'bridge'), '0755'),
+    file(layout.node, '0555', node),
+    file(layout.script, '0444', 'bundle built as the user (scripts/build-operator.mjs --root)'),
+    file(layout.supervisor, '0444', 'bundle'),
+    file(layout.packageJson, '0444', 'bundle'),
+    file(join(layout.dir, 'VERSION'), '0444', 'git rev-parse HEAD'),
+    file(layout.policy, '0444', 'rendered as the user (root-policy)'),
+    file(layout.hubPub, '0444', L.hubPub),
+    dir(layout.stateDir, '0700'), dir(layout.logDir, '0700'),
+    { action: 'check', path: layout.script, owner: 'root', detail: `${layout.node} ${layout.script} --check` },
+    file(layout.plist, '0644', 'rendered as the user (root-plist)'),
+    { action: 'launchctl', path: layout.plist, owner: 'root', detail: `launchctl bootstrap system ${layout.plist}` },
+    { action: 'runtime', path: layout.socketDir, owner: 'root:wheel', mode: '0755', detail: 'made by the helper at each start' },
+    { action: 'runtime', path: layout.socket, owner: `${uid}:${gid}`, mode: '0600', detail: 'the agent user connects; nobody else' },
+    { action: 'runtime', path: layout.audit, owner: 'root:wheel', mode: '0600', detail: 'hash-chained root journal' }
+  ];
+  return steps.map(s => ({ step: 'plan', ...s }));
 }
 
 // Write a file atomically with a fixed mode: unchanged when content and mode already match,
@@ -250,12 +348,16 @@ export function installHubPub(home, from) {
 // The policy: built, checked against the schema, the registry read through the catalog's own
 // reader (D11 needs at least one registered checkout), written 0444, then loaded back exactly
 // as the agent will load it. A changed file keeps the previous one as policy.json.<ts>.bak.
-export async function writePolicy(home, { read = readProjectRegistry, now = Date.now } = {}) {
+// With the root helper's policy installed (root-owned, /Library/Application Support/MemoBridge/
+// operator-root/policy.json), the agent's policy grants root and names the helper's socket;
+// without it, exec. Rerun after installing or removing the root helper (R-MR-07).
+export async function writePolicy(home, { read = readProjectRegistry, now = Date.now, rootLayout = macRootLayout() } = {}) {
   const L = macLayout(home);
   ensureDir(L.conf, 0o700);
   ensureDir(L.stateDir, 0o700);
   ensureDir(L.logs, 0o700);
-  const raw = macPolicy(home);
+  const rootInstalled = (() => { try { return lstatSync(rootLayout.policy).isFile(); } catch { return false; } })();
+  const raw = macPolicy(home, { rootSocket: rootInstalled ? rootLayout.socket : null });
   parseOperatorPolicy(raw, { home });
   const catalog = await read({ projectsRoot: raw.repositories.projects_root, registryFile: raw.repositories.registry_file,
     layoutRoot: raw.repositories.layout_root });
@@ -270,6 +372,7 @@ export async function writePolicy(home, { read = readProjectRegistry, now = Date
   const state = writeFileMode(L.policyFile, text, 0o444);
   const policy = loadOperatorPolicy({ path: L.policyFile, expectedHost: 'mac', trustedUids: [0, process.getuid()], home });
   return { step: 'policy', path: L.policyFile, state, backup, max_tier: policy.maxTierName, approval_mode: policy.approvalMode,
+    root_helper: policy.rootHelper?.socket ?? null,
     write_roots: [...policy.declaredRoots.write], missing_roots: [...policy.missingRoots], registered_projects: available };
 }
 
@@ -314,7 +417,41 @@ async function main() {
     case 'policy': result = await writePolicy(home); break;
     case 'runtime': result = installRuntime(home, from, { commit: arg('commit') ?? null }); break;
     case 'plist': result = writePlist(home, { node: arg('node'), out: arg('out') }); break;
-    default: throw new Error('usage: operator-mac.mjs keygen|hub-ca|hub-pub|policy|runtime|plist --home <abs> ...');
+    case 'hub-key-id': {
+      // The hub key the root helper will trust, by key id (bridge/operator-signing.mjs operatorKeyId),
+      // so the owner can compare it with lab's before installing. Read only.
+      const blocks = pemBlocks(readFileSync(from, 'utf8'));
+      if (blocks.length === 0 || blocks.length > 4) throw new Error('hub_pub_invalid');
+      for (const pem of blocks) if (createPublicKey(pem).asymmetricKeyType !== 'ed25519') throw new Error('hub_pub_not_ed25519');
+      result = { step: 'hub-pub', path: from, key_ids: blocks.map(keyId) };
+      break;
+    }
+    case 'root-plan': {
+      const plan = rootPlan({ home, node: arg('node'), uid: Number(arg('uid')), gid: Number(arg('gid')) });
+      for (const line of plan) console.log(JSON.stringify(line));
+      result = { step: 'root-plan', steps: plan.length, label: MAC_ROOT_LABEL };
+      break;
+    }
+    case 'root-policy': {
+      const raw = macRootPolicy(home);
+      parseOperatorPolicy(raw, { home });
+      const out = arg('out');
+      // Without --out (the dry run): the policy itself, on one line.
+      if (out === undefined) { result = { step: 'root-policy', content: raw }; break; }
+      if (typeof out !== 'string' || !isAbsolute(out)) throw new Error('out_not_absolute');
+      result = { step: 'root-policy', path: out, state: writeFileMode(out, `${JSON.stringify(raw, null, 2)}\n`, 0o644), max_tier: raw.max_tier,
+        approval_mode: raw.approval_mode, socket: raw.root_helper.socket };
+      break;
+    }
+    case 'root-plist': {
+      const out = arg('out');
+      const text = renderRootPlist({ home, uid: Number(arg('uid')), gid: Number(arg('gid')) });
+      if (out === undefined) { result = { step: 'root-plist', content: text }; break; }
+      if (typeof out !== 'string' || !isAbsolute(out)) throw new Error('out_not_absolute');
+      result = { step: 'root-plist', path: out, state: writeFileMode(out, text, 0o644), label: MAC_ROOT_LABEL };
+      break;
+    }
+    default: throw new Error('usage: operator-mac.mjs keygen|hub-ca|hub-pub|policy|runtime|plist|root-plan|root-policy|root-plist --home <abs> ...');
   }
   console.log(JSON.stringify(result));
 }

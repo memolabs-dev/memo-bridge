@@ -13,8 +13,9 @@
 //                          ~/.memo-operator/policy.json on the Mac)
 //   MEMO_OPERATOR_STATE    writable directory for background runs, uploads and the auto-freeze
 //                          marker (default: the policy's state_dir)
-// With a root_helper section in the policy (lab), T3 calls and the host journal go through the
-// helper's socket (bridge/operator-root-helper.mjs): the agent cannot rewrite the journal.
+// With a root_helper section in the policy, T3 calls go through the helper's socket
+// (bridge/operator-root-helper.mjs); on lab the host journal does too, so the agent cannot
+// rewrite it. On the Mac the section is written only once the root helper is installed.
 // lab-infra must run this unit with KillMode=process so background runs outlive a restart.
 //   MEMO_BRIDGE_AGENT_URL  hub agent endpoint (default wss://localhost:9443/agent)
 //   CREDENTIALS_DIRECTORY  systemd credentials: `agent-key`, this agent's Ed25519 identity
@@ -58,7 +59,7 @@ function readSmall(path, maxBytes = 64 * 1024) {
 }
 
 // Owner uids trusted for the policy and the hub key: root, plus the owner on the Mac, where the
-// agent runs as the owner (spec non-goals: no root there).
+// agent runs as the owner (root there goes through the separate root helper).
 const trustedUids = host === 'mac' ? [0, process.getuid()] : [0];
 const home = homedir();
 const policyPath = env.MEMO_OPERATOR_POLICY || DEFAULT_POLICY_PATHS[host].replace(/^~/, home);
@@ -68,9 +69,11 @@ const hubKeys = readTrustedFile(join(dir, 'operator-hub.pub'), { trustedUids })
 const verifier = createOperatorVerifier({ publicKeys: hubKeys, host });
 const stateDir = env.MEMO_OPERATOR_STATE || policy.stateDir;
 const guard = createOperatorGuard(policy, { autoFrozenFile: join(stateDir, 'AUTO-FROZEN'), log });
-// On lab the root helper owns the journal (spec D7); on the Mac the agent appends to its own.
-const rootHelper = policy.rootHelper ? createRootHelperClient({ socketPath: policy.rootHelper.socket }) : null;
-const chain = rootHelper ? helperAuditChain(rootHelper) : createAuditChain({ store: fileAuditStore(policy.auditFile) });
+// On lab the root helper owns the journal (spec D7). On the Mac the agent appends to its own and
+// the root helper (LaunchDaemon dev.memolabs.memo-operator-root, optional) keeps a second,
+// root-owned chain for root calls (DEV-P6-36); T3 is forwarded only while its socket exists.
+const rootHelper = policy.rootHelper ? createRootHelperClient({ socketPath: policy.rootHelper.socket, checkSocket: host === 'mac' }) : null;
+const chain = rootHelper && host === 'vps' ? helperAuditChain(rootHelper) : createAuditChain({ store: fileAuditStore(policy.auditFile) });
 const jobs = createJobStore({ dir: join(stateDir, 'jobs') });
 const tools = { ...createOperatorTools(policy, { guard, chain }), ...createOperatorWriteTools(policy, { stateDir }),
   ...createOperatorExecTools(policy, { jobs }) };

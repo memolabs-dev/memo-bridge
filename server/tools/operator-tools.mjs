@@ -6,7 +6,8 @@
 // host named in `host` (bridge/hub.mjs requestOperator), signed (bridge/operator-signing.mjs),
 // and that agent checks everything again against its own local policy (bridge/operator-agent.mjs).
 // Lot 1 shipped the T0 (operator:read) tools; Lot 2 adds T1 (operator:write), T2
-// (operator:exec) and T3 (operator:root, lab only, through the root helper).
+// (operator:exec) and T3 (operator:root, through the root helper: lab, and the Mac once its root
+// helper is installed).
 import { z } from 'zod/v4';
 
 export const OPERATOR_HOSTS = Object.freeze(['mac', 'vps']);
@@ -99,7 +100,7 @@ export const OPERATOR_SCHEMAS = Object.freeze({
     env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]{0,63}$/), z.string().max(4096)).optional().describe('Only names the host policy allows.'),
     timeout_s: z.number().int().min(1).max(3600).optional().describe('Default 30, at most 600; up to 3600 with background.'),
     background: z.boolean().optional().describe('Return a job_id at once; read the result with operator_job_status.'),
-    as_root: z.boolean().optional().describe('Run as root on lab, through the root helper, in a transient unit (operator:root).') }),
+    as_root: z.boolean().optional().describe('Run as root through the host\'s root helper (lab; the Mac once installed), time-bounded (operator:root).') }),
   operator_service: z.object({ host, ref, workspace_id: workspaceId, unit: z.string().min(1).max(128), action: z.enum(['start', 'stop', 'restart', 'reload']) }),
   operator_script: z.object({ host, ref, workspace_id: workspaceId, interpreter: z.enum(['bash', 'python3']),
     content: z.string().min(1).max(SCRIPT_MAX_BYTES),
@@ -136,9 +137,9 @@ const DESCRIPTIONS = Object.freeze({
   operator_copy: 'Copy inside the host\'s write roots; a directory needs recursive. Secret files are not copied. Replacing a destination needs overwrite and keeps a backup.',
   operator_delete: 'Delete a file, or a directory with recursive, inside the host\'s write roots. A backup is always made first; if it fails nothing is deleted.',
   operator_chmod: 'Change the permission bits of a path inside the host\'s write roots (no setuid, setgid or sticky bit).',
-  operator_run: 'Run one program with arguments, without a shell (;, |, $() are plain bytes), as the agent user, or as root on lab with as_root. Output is redacted and bounded. Dangerous commands wait for the owner\'s approval in Telegram.',
+  operator_run: 'Run one program with arguments, without a shell (;, |, $() are plain bytes), as the agent user, or as root with as_root (lab, and the Mac when its root helper is installed). Output is redacted and bounded. Dangerous commands wait for the owner\'s approval in Telegram.',
   operator_service: 'Start, stop, restart or reload a systemd unit declared in the host policy (lab).',
-  operator_script: 'Run a bash or python3 script (at most 64 KiB) as root on lab, in a transient systemd unit with time and memory limits. Always needs the owner\'s approval when the host is in dangerous mode.',
+  operator_script: 'Run a bash or python3 script (at most 64 KiB) as root through the host\'s root helper (lab: a transient systemd unit with time and memory limits; the Mac: its own process group, killed at the timeout). Always needs the owner\'s approval when the host is in dangerous mode.',
   operator_lock: 'Take (or renew) an operator lock for your workspace before any operator write, command or root call: a path subtree, a systemd unit, a docker container, or global for the whole host. Other conversations are refused with locked_by_other_session on what you lock, and you are refused the same way on theirs: then stop and tell the owner. TTL 15 min by default, at most 2 h; release it with operator_unlock when done. Changes nothing on the host.',
   operator_unlock: 'Release your operator locks on a host: one lock_id, one kind and target, or all of them. Changes nothing on the host.'
 });

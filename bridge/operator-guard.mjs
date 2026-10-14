@@ -34,10 +34,12 @@ const exists = path => {
 
 // policy: the parsed policy (frozenFile, rateLimits). Options:
 //   autoFrozenFile  marker path (null: memory only)
+//   extraFrozenFiles  more FROZEN switches, each checked like policy.frozen_file (the Mac root
+//                   helper also obeys the owner's ~/.memo-operator/FROZEN)
 //   fileExists      (path) => boolean, injectable for tests
 //   writeMarker     (path, text) => void
 //   log             (event, details) => void
-export function createOperatorGuard(policy, { autoFrozenFile = null, now = Date.now, fileExists = exists,
+export function createOperatorGuard(policy, { autoFrozenFile = null, extraFrozenFiles = [], now = Date.now, fileExists = exists,
   writeMarker = (path, text) => writeFileSync(path, text, { mode: 0o600 }), removeMarker = path => unlinkSync(path), log = () => {} } = {}) {
   const refusals = [];
   const calls = { write: [], exec: [], root: [] };
@@ -51,7 +53,7 @@ export function createOperatorGuard(policy, { autoFrozenFile = null, now = Date.
       if (autoFrozenFile !== null && !autoFrozen && fileExists(autoFrozenFile)) autoFrozen = true;
       // The owner removed the marker (SSH): the in-memory flag follows.
       if (autoFrozenFile !== null && autoFrozen && !fileExists(autoFrozenFile)) autoFrozen = false;
-      return { file: fileExists(policy.frozenFile), auto: autoFrozen };
+      return { file: [policy.frozenFile, ...extraFrozenFiles].some(path => fileExists(path)), auto: autoFrozen };
     },
     // null when a call of this tier may run now, else the refusal code.
     admit(tier) {

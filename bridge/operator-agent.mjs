@@ -44,7 +44,8 @@ export const INTERNAL_SCHEMAS = Object.freeze({
 // chain       createAuditChain or helperAuditChain (sync or async; null: no journal, tests only)
 // tools       {op: async (args) => data}: the T0, T1 and T2 tools (the caller builds them so the
 //             guard and the chain they report on are the same objects)
-// rootHelper  createRootHelperClient (lab) or null (Mac: T3 answers root_unavailable_on_host)
+// rootHelper  createRootHelperClient, or null (T3 answers root_unavailable_on_host). On the Mac the
+//             client has available(): without the helper's socket, T3 answers the same code
 // tierOf      (op, args) -> tier (policy.mjs operatorCallTier; tests inject a T1 op)
 // schemas     op -> zod schema
 export function createOperatorOperations({ policy, verifier, guard, chain = null, tools, rootHelper = null, tierOf = operatorCallTier,
@@ -59,7 +60,7 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
     async operator_owner_unfreeze({ by }, ctx) {
       const cleared = guard.clearAuto();
       let helper = null;
-      if (rootHelper) {
+      if (rootHelper && (typeof rootHelper.available !== 'function' || rootHelper.available())) {
         helper = await rootHelper.request({ type: 'owner_unfreeze', id: ctx.id, op: 'operator_owner_unfreeze', args: ctx.args,
           principal: ctx.principal, operator: ctx.operator });
       }
@@ -115,7 +116,8 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
           data = await internal[op](parsed.data, { id: ctx.id, args, principal, operator: ctx.operator });
         } else if (toRoot) {
           // The helper checks the same signature and its own policy, runs, journals, bounds.
-          data = rootHelper
+          // On the Mac the helper is optional: forward only while its socket exists (available()).
+          data = rootHelper && (typeof rootHelper.available !== 'function' || rootHelper.available())
             ? await rootHelper.request({ type: 'call', id: ctx.id, op, args, principal, operator: ctx.operator, request_id: requestId })
             : { ok: false, error: 'root_unavailable_on_host' };
         } else {

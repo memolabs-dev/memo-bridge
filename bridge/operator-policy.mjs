@@ -8,7 +8,7 @@
 // Format, version 1 (unknown keys are refused at every level, a typo never weakens a rule):
 //   version         1
 //   host            "mac" | "vps"                      the agent's own host; must match the wire
-//   max_tier        "read" | "write" | "exec" | "root"  highest tier served (root on vps only)
+//   max_tier        "read" | "write" | "exec" | "root"  highest tier served (root needs root_helper)
 //   roots           {read: [abs], write: [abs]}        write roots are readable too
 //   units           ["traefik.service", ...]           systemd units for logs and status
 //   containers      ["traefik", ...]                   docker containers whose logs may be read
@@ -23,7 +23,8 @@
 //                   marker (default: the directory of audit_file)
 //   run_env_allow   ["NAME", ...] environment names a caller may set on operator_run, on top of
 //                   LANG, LC_ALL, TZ, TERM, NO_COLOR; loader and linker variables are refused
-//   root_helper     {socket: abs path} the root helper's Unix socket; required for "root" (vps)
+//   root_helper     {socket: abs path} the root helper's Unix socket; required for "root" (lab, and
+//                   the Mac once its root helper is installed)
 // Paths are absolute; "~/" is accepted on the Mac only and expands to the agent user's home.
 //
 // The file itself must be trustworthy before anything in it is believed: a regular file (no
@@ -106,8 +107,8 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
   const host = raw.host;
   const maxTier = TIERS.indexOf(raw.max_tier);
   if (maxTier < 0) throw invalid('max_tier');
-  // Root exists on lab only (spec non-goals: no root on the Mac).
-  if (host === 'mac' && maxTier > TIERS.indexOf('exec')) throw invalid('max_tier');
+  // Root needs a root helper on either host (below). On the Mac the helper is the LaunchDaemon
+  // dev.memolabs.memo-operator-root (owner decision 2026-10-14, spec §13 Mac root follow-up).
   const ctx = { host, home };
   onlyKeys(raw.roots, ['read', 'write'], 'roots');
   const pathOf = field => item => { policyPath(item, field, ctx); return true; };
@@ -138,7 +139,6 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
   const runEnvAllow = list(raw.run_env_allow, 'run_env_allow', n => typeof n === 'string' && ENV_NAME_RE.test(n) && !FORBIDDEN_ENV_RE.test(n));
   let rootHelper = null;
   if (raw.root_helper !== undefined) {
-    if (host !== 'vps') throw invalid('root_helper');
     onlyKeys(raw.root_helper, ['socket'], 'root_helper');
     rootHelper = Object.freeze({ socket: policyPath(raw.root_helper.socket, 'root_helper.socket', ctx) });
   }

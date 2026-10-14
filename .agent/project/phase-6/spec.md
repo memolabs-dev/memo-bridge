@@ -464,3 +464,74 @@ it disagrees with the text above; each entry says what changed and why.
   Mac): the owner's user can rewrite it; the hub's 15 min anchoring detects a rewrite of lines
   already anchored, as long as the agent's own code is not altered too (its bundle is 0444 but
   the owner's). lab-infra `make memo-operator-freeze` freezes the Mac too, through the hub file.
+
+### Mac root follow-up (owner decision 2026-10-14: "ajoute le root sur le Mac")
+
+This reverses the non-goal "Root on the Mac" of §1 and the T3 "lab only" of D1. Branch
+`feat/operator-mac-root`. Sources read on this Mac (macOS 27.0.1): `launchd.plist(5)`,
+`launchctl(1)`, `setrlimit(2)`, `tccutil(1)`, `install(1)`; groups read with `dscl`; one socket
+experiment (below).
+
+Requirements and acceptance (all automated unless marked):
+
+| ID | Requirement | Acceptance |
+|---|---|---|
+| R-MR-01 | A LaunchDaemon `dev.memolabs.memo-operator-root` runs the root helper as root from a root-owned copy (bundle, node, policy, hub key) under `/Library/Application Support/MemoBridge/operator-root`, never from the owner's home | AC-MR-01: the dry run lists every target, all root-owned, none under `$HOME`, plist `UserName root`, program = the root-owned node; the helper refuses to start when an ancestor of its directory is not root-owned or is group/other writable |
+| R-MR-02 | The helper accepts only calls signed by the hub operator key (root-owned copy), fresh, never replayed, T3 within its own root policy | AC-MR-02: unsigned, wrong key, replay, over-tier (a root policy at exec) each refused, nothing runs |
+| R-MR-03 | FROZEN in the root directory or `~/.memo-operator/FROZEN` stops every helper call | AC-MR-03: each file alone answers `frozen` |
+| R-MR-04 | argv without a shell; scripts (bash, python3, 64 KiB) from a root-only file | AC-MR-04: `["echo","a;id"]` prints `a;id`; script content runs from a 0700 file removed after |
+| R-MR-05 | Every call bounded: timeout kills the whole process group | AC-MR-05: a child that forks a grandchild is killed with it at the timeout |
+| R-MR-06 | The helper's own hash-chained journal, `/var/log/memo-operator/audit.jsonl`, root 0600 | AC-MR-06: lines chained, verify passes, an edited line breaks it, mode 0600 |
+| R-MR-07 | The Mac agent forwards `as_root` and `operator_script` only when the helper socket exists; its policy is `root` only when the root policy exists | AC-MR-07: socket absent, `root_unavailable_on_host` and no request; present, forwarded; `writePolicy` gives exec without the root policy, root with it |
+| R-MR-08 | Mac dangerous list: diskutil, csrutil, nvram, fdesetup, dscl writes, dseditgroup, sysadminctl, pfctl, tccutil, `/Library/LaunchDaemons`, the helper's own files, and `/private/etc` spellings | AC-MR-08: each asks; `dscl . -read` does not |
+| R-MR-09 | Install script: dry run by default, `--install` and `--uninstall` need root and refuse otherwise | AC-MR-09: dry run as the user writes nothing; `--install` without root exits non-zero before any change |
+| R-MR-10 | Docs: OPERATOR.md (root on the Mac, freeze, uninstall, risk), SECURITY.md, skill text | inspection |
+
+Work graph: TODO-MR-01 policy (mac root with a helper), TODO-MR-02 helper host-generic plus
+process group runner, TODO-MR-03 Mac helper entry and startup checks, TODO-MR-04 agent forward and
+socket check, TODO-MR-05 dangerous list, TODO-MR-06 bundle, policy and plist rendering, install
+script, TODO-MR-07 tests and mutation checks, TODO-MR-08 docs, spec, evidence, state. All P0 or
+P1; owner-only: the one `sudo` command and the runtime checks.
+
+Decisions and deviations:
+
+- DEV-P6-32 (D3 on the Mac). No systemd: each root call is spawned in its own process group
+  (`setsid`, Node `detached: true`); at the timeout the helper sends SIGKILL to the whole group,
+  and again when the program exits so nothing it left behind keeps running. A root program can
+  still leave its group on purpose (`setsid`, a launchd job); a cgroup would be needed to stop
+  that, and macOS has none. Stated in `docs/OPERATOR.md`.
+- DEV-P6-33 (memory). No memory limit on the Mac. `setrlimit(2)` on this Mac: `RLIMIT_DATA` only
+  bounds `sbrk(2)` (malloc uses mmap), `RLIMIT_RSS` only says the system "will prefer to take
+  memory from processes" over it when memory is tight; `launchd.plist(5)` `HardResourceLimits`
+  maps to the same `setrlimit(2)` values. Neither is a cap, and a `ulimit` would need a shell
+  wrapper around argv. The timeout is the bound.
+- DEV-P6-34 (socket access). No group holds only `memo`: `admin` is `root memo _mbsetupuser`,
+  `staff` is every local account's primary group (dscl, 2026-10-14). The socket directory
+  `/var/run/memo-operator` is created by the helper at each start (`/var/run` is emptied at boot),
+  root:wheel 0755; the socket itself is owned by the agent user, mode 0600. macOS enforces the
+  socket file's write permission on `connect(2)`: a 0000 socket answered EACCES to its own owner
+  (experiment on this Mac). Only root and `memo` can connect; every call still needs the hub
+  signature.
+- DEV-P6-35 (node). The daemon runs a root-owned copy of the node binary, 0555, in the root
+  directory. The install refuses a node that links anything outside `/usr/lib` and `/System`
+  (`otool -L`): Homebrew's node links `/opt/homebrew` libraries the owner's user can rewrite, the
+  official build (nvm) links system libraries only and runs with the hardened runtime.
+- DEV-P6-36 (journals). On the Mac the agent keeps its own journal
+  (`~/Library/Logs/memo-operator/audit.jsonl`); the helper writes a second, root-owned chain at
+  `/var/log/memo-operator/audit.jsonl` for root calls only. The hub's 15 min anchoring reads the
+  agent's chain; anchoring the root chain is deferred (P2).
+- DEV-P6-37 (approval). The Mac root policy refuses `approval_mode: off` (the helper does not
+  start), so a weaker policy cannot ship by mistake; `dangerous` is the owner's choice.
+- DEV-P6-38 (install). `sudo deploy/mac/install-operator-root.sh --install` builds the bundle and
+  renders the policy and plist as `$SUDO_USER`, never as root, then copies them root-owned with
+  `install -S`, runs the copied helper with `--check` as root, writes the plist and
+  `launchctl bootstrap system`. The root policy and the hub key copy are taken from what the
+  user's install produced; the script prints the hub key id so the owner can compare it with lab.
+- R-MR-11 (risk, High impact, Low likelihood, accepted by the owner 2026-10-14). A compromise of
+  the hub signing key (root on lab) now means root on the Mac, approvals included (the key
+  signs the approval id too). Mitigations: both FROZEN files, `/freeze`, uninstall in one command,
+  the root journal, and the hub's own journal on lab. Supersedes R-P6-02's "no root on Mac".
+- R-MR-12 (risk, Medium). A root program can leave its process group (`setsid`, launchd) and
+  outlive its timeout; no memory cap. Accepted: documented, journaled.
+- DEV-P6-39 (dangerous list). `/private/etc`, `/private/var` and `/private/tmp` spellings are
+  normalized before the sensitive path check (on macOS `/etc` is a symlink to `/private/etc`).
