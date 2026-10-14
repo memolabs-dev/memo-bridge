@@ -24,7 +24,8 @@
     "start:hub": "node bridge/hub-cli.mjs",
     "start:agent": "node bridge/agent-cli.mjs",
     "start:operator": "node bridge/operator-agent-cli.mjs",
-    "install:local": "pnpm run build && node scripts/install-local.mjs"
+    "install:local": "pnpm run build && node scripts/install-local.mjs",
+    "build:operator": "node scripts/build-operator.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
