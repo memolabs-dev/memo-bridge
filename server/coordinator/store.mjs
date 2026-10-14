@@ -9,10 +9,11 @@ import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { MEMORY_SCHEMA, memoryRepository } from './memory-store.mjs';
 import { CONTINUITY_SCHEMA, continuityRepository } from './continuity-store.mjs';
+import { delegationRepository, migrateV7 } from './delegation-store.mjs';
 
 // v5: context memory across conversations (server/coordinator/memory-store.mjs), additive.
 // v6: structured handoffs and learning counters (server/coordinator/continuity-store.mjs), additive.
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -281,7 +282,8 @@ export async function runOnce(store, { principal, op, clientRequestId, now = Dat
 }
 
 // project_id: task_next may move an idle workspace to the project of the task it takes (multi-session D-MS7).
-const WORKSPACE_COLUMNS = ['status', 'branch', 'updated_at', 'closed_at', 'client_session', 'project_id'];
+// delegation_id: a child workspace names its delegation (#47, delegation spec D1).
+const WORKSPACE_COLUMNS = ['status', 'branch', 'updated_at', 'closed_at', 'client_session', 'project_id', 'delegation_id'];
 const CLAIM_COLUMNS = ['fence_sha', 'expires_at', 'state', 'outcome', 'updated_at'];
 const WORKTREE_COLUMNS = ['status', 'issue_ref', 'updated_at', 'removed_at'];
 const JOB_COLUMNS = ['status', 'exit_code', 'pid', 'started_at', 'ended_at', 'summary', 'unit', 'status_reason'];
@@ -453,6 +455,7 @@ function migrate(db) {
       if (current < 4) migrateV4(db);
       if (current < 5) db.exec(MEMORY_SCHEMA);
       if (current < 6) db.exec(CONTINUITY_SCHEMA);
+      if (current < 7) migrateV7(db);
       if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
@@ -505,7 +508,7 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
     db.close();
     throw error;
   }
-  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db) };
+  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db), ...delegationRepository(db) };
   // One connection per process: serialize transactions so concurrent MCP calls in the same
   // process never interleave inside BEGIN/COMMIT. Cross-process exclusion is SQLite's lock.
   let queue = Promise.resolve();

@@ -30,7 +30,7 @@ async function v3Database(t) {
   const raw = new DatabaseSync(join(dir, 'coordinator.sqlite'));
   raw.exec(`BEGIN; DROP INDEX events_request;
     ALTER TABLE events DROP COLUMN via; ALTER TABLE events DROP COLUMN client_type; ALTER TABLE events DROP COLUMN request_id;
-    ALTER TABLE workspaces DROP COLUMN client_session;
+    ALTER TABLE workspaces DROP COLUMN client_session; ALTER TABLE workspaces DROP COLUMN delegation_id;
     INSERT INTO events (at, principal, workspace_id, issue_ref, op, outcome, code)
       VALUES (${T}, 'hub:owner', 'ws_AAAAAAAAAAAAAAAA', 'memolabs-dev/drop#7', 'task_claim', 'ok', NULL);
     PRAGMA user_version = 3; COMMIT;`);
@@ -41,7 +41,7 @@ async function v3Database(t) {
 }
 
 test('schema v4 (and v5 on top): a v3 database migrates in place, keeps every row, and the new columns work', async t => {
-  assert.equal(SCHEMA_VERSION, 6);
+  assert.equal(SCHEMA_VERSION, 7);
   const dir = await v3Database(t);
   const store = openSqliteStore({ dir });
   t.after(() => store.close());

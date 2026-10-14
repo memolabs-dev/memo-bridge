@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { coordinatorOn, sequentialLedger, tempStateDir } from './helpers/coordinator-fixture.mjs';
 import { HANDOFF_FIELDS, HANDOFF_LIMITS, HANDOFF_NOTE, parseHandoff } from '../server/coordinator/handoff.mjs';
+import { SCHEMA_VERSION } from '../server/coordinator/store.mjs';
 
 const ISSUE = 'memolabs-dev/drop#7';
 const FULL = Object.freeze({
@@ -132,7 +133,7 @@ test('AC3: a free-text checkpoint written before schema v6 is still returned aft
   raw.close();
   const again = coordinatorOn(dir, { ledger: ledger() });
   t.after(() => again.store.close());
-  assert.equal(again.store.settings().schema_version, 6);
+  assert.equal(again.store.settings().schema_version, SCHEMA_VERSION);
   const recover = await again.coordinator.workspaceRecover({ workspace_id: a.workspace_id });
   assert.equal(recover.checkpoints.length, 1);
   assert.equal(recover.checkpoints[0].note, 'old free text note');
