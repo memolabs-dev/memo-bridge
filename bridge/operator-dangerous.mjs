@@ -259,6 +259,120 @@ function hardOfWords(words) {
   return null;
 }
 
+// Read-only commands (repatriation D-R13, live bench 2026-10-14 19:57): a fixed list of programs
+// with argv that cannot write, start a program or change the system. They need no workspace, no
+// lock and no approval; they stay T2 for the signature, the rate limit and both journals, and
+// the agent checks every path-like argument against the read roots and the secret denylist
+// before running them (operator-exec.mjs readOnlyPaths). Anything outside these shapes is a
+// normal command again: sed -i, find -delete or -exec, git with a mutating verb, ss -K...
+// readOnlyCommand(argv) -> {program, paths: [argument strings to check]} or null.
+const ANY_ARGS = new Set(['ps', 'uptime', 'vm_stat', 'df', 'uname', 'sw_vers', 'free', 'whoami', 'id', 'nproc', 'pwd', 'which', 'whereis',
+  'pgrep', 'lsof', 'netstat', 'iostat', 'w', 'who', 'last', 'getconf', 'arch', 'locale', 'tty']);
+const FILE_READERS = new Set(['du', 'ls', 'stat', 'file', 'wc', 'head', 'tail', 'cat', 'grep', 'egrep', 'fgrep', 'rg', 'tree', 'jq', 'md5', 'md5sum',
+  'shasum', 'sha256sum', 'realpath', 'readlink', 'diff', 'cmp', 'column', 'sort', 'cut', 'nl', 'strings', 'hexdump', 'od']);
+// Options whose value is a file the program opens for writing, or a program it runs.
+const READER_BAD_OPTS = /^(-o|--output(=.*)?|--pre(=.*)?|--pre-glob(=.*)?|--from-file(=.*)?|-C|--compile|-O|--open-files-in-pager(=.*)?)$/;
+const FIND_BAD = new Set(['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls']);
+const GIT_READ = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'blame', 'describe', 'shortlog', 'grep', 'cat-file', 'ls-tree',
+  'rev-list', 'merge-base', 'whatchanged', 'reflog', 'branch', 'remote', 'tag', 'stash', 'worktree', 'config']);
+const GH_READ = Object.freeze({ pr: ['view', 'list', 'checks', 'diff', 'status'], issue: ['view', 'list', 'status'], run: ['view', 'list'],
+  repo: ['view', 'list'], release: ['view', 'list'], workflow: ['view', 'list'], search: null, label: ['list'], cache: ['list'] });
+const SYSTEMCTL_READ = new Set(['status', 'show', 'list-units', 'list-unit-files', 'list-timers', 'list-sockets', 'is-active', 'is-enabled',
+  'is-failed', 'cat', 'list-dependencies']);
+const JOURNAL_BAD = /^--(rotate|vacuum|flush|sync|relinquish-var|smart-relinquish-var|setup-keys|update-catalog)/;
+const positional = list => list.filter(a => !a.startsWith('-'));
+
+function gitReadOnly(argv) {
+  const rest = argv.slice(1);
+  let i = 0; const paths = [];
+  for (; i < rest.length; i++) {
+    const a = rest[i];
+    // -c can name programs (core.pager, core.fsmonitor, diff.external): never on the read path.
+    if (a === '-c' || a.startsWith('--exec-path') || a.startsWith('--config-env')) return null;
+    if (a === '-C' || a === '--git-dir' || a === '--work-tree') { paths.push(rest[++i] ?? ''); continue; }
+    if (a.startsWith('--git-dir=') || a.startsWith('--work-tree=')) { paths.push(a.slice(a.indexOf('=') + 1)); continue; }
+    if (a === '--no-pager' || a === '-P' || a === '--no-optional-locks' || a === '--literal-pathspecs') continue;
+    if (a.startsWith('-')) return null;
+    break;
+  }
+  const sub = rest[i];
+  const args = rest.slice(i + 1);
+  if (!GIT_READ.has(sub)) return null;
+  if (args.some(a => ['--ext-diff', '--textconv', '--filters', '--output', '-O'].includes(a) || a.startsWith('--output=') || a.startsWith('--exec')
+    || a.startsWith('--open-files-in-pager'))) return null;
+  const pos = positional(args);
+  switch (sub) {
+    case 'branch': if (args.some(a => /^-[a-zA-Z]*[dDmMcCfu]/.test(a) && !a.startsWith('--') || ['--delete', '--move', '--copy', '--force', '--set-upstream-to',
+      '--unset-upstream', '--edit-description', '--create-reflog', '--track', '--no-track'].some(f => a.startsWith(f)))) return null;
+      if (pos.length && !args.some(a => ['--list', '-l', '--contains', '--merged', '--no-merged', '--points-at'].includes(a))) return null;
+      break;
+    case 'remote': if (pos.length && !['show', 'get-url'].includes(pos[0])) return null; break;
+    case 'tag': if (!args.some(a => ['-l', '--list', '-n', '--contains', '--points-at', '--merged'].includes(a) || /^-n\d*$/.test(a)) && pos.length) return null;
+      if (args.some(a => ['-d', '--delete', '-a', '-s', '-f', '--force', '-m', '-F'].includes(a))) return null; break;
+    case 'stash': if (!['list', 'show'].includes(pos[0])) return null; break;
+    case 'worktree': if (pos[0] !== 'list') return null; break;
+    case 'reflog': if (pos.length && !['show'].includes(pos[0])) return null; break;
+    case 'config': if (!args.some(a => ['--get', '--get-all', '--list', '-l', '--get-regexp', '--show-origin'].includes(a))) return null;
+      if (args.some(a => ['--add', '--unset', '--unset-all', '--replace-all', '--edit', '-e', '--rename-section', '--remove-section'].includes(a))) return null; break;
+    default: break;
+  }
+  return { program: 'git', paths };
+}
+
+export function readOnlyCommand(argv) {
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some(a => typeof a !== 'string')) return null;
+  const program = basename(argv[0]);
+  const args = argv.slice(1);
+  if (ANY_ARGS.has(program)) return program === 'lsof' && args.some(a => a.startsWith('+')) ? null : { program, paths: [] };
+  if (FILE_READERS.has(program)) {
+    if (args.some(a => READER_BAD_OPTS.test(a))) return null;
+    if (program === 'sort' && args.some(a => a === '-o' || a.startsWith('--output'))) return null;
+    return { program, paths: args.filter(a => !a.startsWith('-')).concat(args.filter(a => /^--?[A-Za-z-]+=/.test(a)).map(a => a.slice(a.indexOf('=') + 1))) };
+  }
+  if (program === 'find') return args.some(a => FIND_BAD.has(a)) ? null : { program, paths: args.filter(a => !a.startsWith('-')).slice(0, 1) };
+  if (program === 'top') return args.includes('-l') || args.includes('-b') ? { program, paths: [] } : null;
+  if (program === 'hostname') return args.every(a => ['-s', '-f', '-d', '-i', '-I', '--short', '--fqdn'].includes(a)) ? { program, paths: [] } : null;
+  if (program === 'date') return args.every(a => a.startsWith('+') || ['-u', '-R', '--utc', '--iso-8601'].includes(a)) ? { program, paths: [] } : null;
+  if (program === 'sysctl') return args.some(a => a.includes('=') || ['-w', '-p', '--load', '--system', '-f'].includes(a)) ? null : { program, paths: [] };
+  if (program === 'system_profiler') return positional(args).some(a => /DataType$/.test(a)) ? { program, paths: [] } : null;
+  if (program === 'git') return gitReadOnly(argv);
+  if (program === 'gh') {
+    const pos = positional(args.filter((a, i) => !GH_VALUE_FLAGS.has(args[i - 1])));
+    if (pos[0] === 'api') {
+      const r = ghHard(argv);
+      if (r) return null;
+      const fieldy = args.some(a => GH_FIELD_FLAGS.has(a) || a === '--input' || a.startsWith('--field=') || a.startsWith('--raw-field=') || a.startsWith('--input='));
+      const method = args.find((a, i) => args[i - 1] === '-X' || args[i - 1] === '--method') ?? (args.find(a => /^-X./.test(a))?.slice(2))
+        ?? args.find(a => a.startsWith('--method='))?.slice(9);
+      return !fieldy && (!method || method.toUpperCase() === 'GET') ? { program, paths: [] } : null;
+    }
+    if (args.some(a => a === '--web' || a === '-w')) return null; // opens a browser: starts a program
+    if (!Object.hasOwn(GH_READ, pos[0] ?? '')) return null;
+    const verbs = GH_READ[pos[0]];
+    return verbs === null || verbs.includes(pos[1]) ? { program, paths: [] } : null;
+  }
+  if (program === 'launchctl') return ['list', 'print', 'print-disabled', 'blame', 'procinfo'].includes(args[0]) ? { program, paths: [] } : null;
+  if (program === 'systemctl') {
+    const pos = positional(args);
+    return (pos.length === 0 || SYSTEMCTL_READ.has(pos[0])) && !args.some(a => a === '--now') ? { program, paths: [] } : null;
+  }
+  if (program === 'journalctl') return args.some(a => JOURNAL_BAD.test(a)) ? null : { program, paths: [] };
+  if (program === 'docker') {
+    const pos = positional(args);
+    const ok = ['ps', 'logs', 'inspect', 'images', 'version', 'info', 'top', 'port', 'df'].includes(pos[0]) || (pos[0] === 'stats' && args.includes('--no-stream'))
+      || (pos[0] === 'compose' && ['ps', 'ls', 'logs', 'config', 'images'].includes(pos[1])) || (pos[0] === 'system' && pos[1] === 'df');
+    return ok && !args.some(a => ['-H', '--host', '-c', '--context', '--config'].includes(a)) ? { program, paths: [] } : null;
+  }
+  if (program === 'ip') {
+    const pos = positional(args);
+    return ['addr', 'a', 'address', 'route', 'r', 'link', 'l', 'neigh', 'rule'].includes(pos[0]) && (pos.length === 1 || ['show', 'list', 'ls'].includes(pos[1]))
+      && !args.includes('-batch') ? { program, paths: [] } : null;
+  }
+  if (program === 'ss') return args.some(a => a === '-K' || a === '--kill' || /^-[a-zA-Z]*K/.test(a) || a.startsWith('-F') || a.startsWith('--filter')) ? null : { program, paths: [] };
+  if (program === 'ifconfig') return args.length <= 1 || (args.length === 1 && !args[0].startsWith('-')) ? { program, paths: [] } : null;
+  return null;
+}
+
 // Containers whose stop or restart cuts the owner off (D-R11): the proxy, the bridge, OAuth.
 export const CRITICAL_CONTAINER_RE = /^(traefik|memo-.*|pocket-id.*)$/i;
 
@@ -274,6 +388,8 @@ export function classifyCall(op, args = {}) {
     const shellish = argv.some(a => SHELL_STRING.has(basename(a)));
     const hard = hardOfWords(argv) ?? (shellish ? hardOfWords(argv.flatMap(a => a.split(WORD_SPLIT).filter(Boolean))) : null);
     if (hard) return { reason: hard, hard: true, programs: [] };
+    // A read-only command (D-R13) is not dangerous, even when its program is a wrapper (git).
+    if (args.as_root !== true && readOnlyCommand(argv)) return null;
     // The program itself; behind a command prefix (env, timeout, nice, xargs...) every later
     // wrapper or remote name too, conservatively (`timeout 5 ssh lab id` needs timeout and ssh).
     const programs = [];

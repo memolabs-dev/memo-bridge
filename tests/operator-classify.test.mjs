@@ -39,7 +39,8 @@ test('RR-2 git: force or deleting pushes, pushes to main, reset --hard, clean -f
     ['git', 'filter-branch'], ['git', 'reflog', 'expire', '--all'], ['git', 'update-ref', '-d', 'refs/heads/x'], ['git', 'stash', 'clear'],
     ['env', 'git', 'push', '--force'], ['xargs', 'git', 'reset', '--hard'], ['bash', '-c', 'git push -f origin x'], ['ssh', 'lab', 'git -C /srv/x reset --hard']];
   for (const argv of hard) assert.equal(run(argv)?.hard, true, argv.join(' '));
-  for (const argv of [['git', 'status'], ['git', 'push', 'origin', 'feat/x'], ['git', 'push', '-u', 'origin', 'feat/x'], ['git', 'commit', '-m', 'msg'],
+  // Read-only git (status, log, diff...) is not dangerous at all (D-R13, tests/operator-readonly.test.mjs).
+  for (const argv of [['git', 'push', 'origin', 'feat/x'], ['git', 'push', '-u', 'origin', 'feat/x'], ['git', 'commit', '-m', 'msg'],
     ['git', 'reset', '--soft', 'HEAD~1'], ['git', 'branch', '-d', 'x'], ['git', 'clean', '-n']]) {
     assert.deepEqual(run(argv), { reason: 'wrapper:git', hard: false, programs: ['git'] }, argv.join(' '));
   }
@@ -75,7 +76,7 @@ test('RR-10 ssh, scp, rsync: remote programs are grantable dangers; local rsync 
 test('docker: rm, prune and compose down -v are hard; operator_docker stop or restart of the proxy or the bridge is hard', () => {
   for (const argv of [['docker', 'rm', '-f', 'x'], ['docker', 'system', 'prune', '-a'], ['docker', 'volume', 'rm', 'v'],
     ['docker', 'compose', 'down', '-v'], ['docker', '--context', 'lab', 'rmi', 'img']]) assert.equal(run(argv)?.hard, true, argv.join(' '));
-  assert.deepEqual(run(['docker', 'ps']), { reason: 'wrapper:docker', hard: false, programs: ['docker'] });
+  assert.deepEqual(run(['docker', 'restart', 'x']), { reason: 'wrapper:docker', hard: false, programs: ['docker'] });
   assert.deepEqual(classifyCall('operator_docker', { action: 'restart', container: 'traefik' }), { reason: 'docker:restart', hard: true, programs: [] });
   assert.equal(classifyCall('operator_docker', { action: 'stop', container: 'memo-bridge-auth-pocket-id-1' })?.hard, true);
   assert.equal(classifyCall('operator_docker', { action: 'restart', container: 'beszel' }), null);
@@ -89,7 +90,7 @@ test('scripts: a user script is grantable by its interpreter, a root script is h
 
 test('D-R5 approvalInScope: a standing id never stands for a hard call, a root call or another op', () => {
   const st = 'ap_st_AAAAAAAAAAAAAAAAAAAAAA';
-  assert.equal(approvalInScope(st, 'operator_run', { argv: ['git', 'status'] }, 2), true);
+  assert.equal(approvalInScope(st, 'operator_run', { argv: ['git', 'commit', '-m', 'x'] }, 2), true);
   assert.equal(approvalInScope(st, 'operator_run', { argv: ['git', 'push', '-f'] }, 2), false);
   assert.equal(approvalInScope(st, 'operator_run', { argv: ['git', 'status'], as_root: true }, 3), false);
   assert.equal(approvalInScope(st, 'operator_delete', { path: '/x', recursive: true }, 1), false);

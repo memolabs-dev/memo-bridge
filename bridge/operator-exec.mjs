@@ -13,6 +13,7 @@ import { lstat, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { UNIT_RE } from './operator-policy.mjs';
+import { readOnlyCommand } from './operator-dangerous.mjs';
 import { createDenylist, catalogProjects, repositoryGuard, resolveOperatorPath } from './operator-paths.mjs';
 import { SAFE_ENV, runArgv } from './operator-tools.mjs';
 import { untrusted } from './operator-output.mjs';
@@ -72,6 +73,34 @@ export async function checkCwd(policy, raw, { denylist, projects }) {
   return { ok: true, path: at.path };
 }
 
+// Read-only commands (repatriation D-R13): every path-like argument must be readable under the
+// policy (read roots, secret denylist, symlinks resolved), relative ones from cwd. A missing
+// file is the program's to report. Returns null or a refusal.
+const PATH_REFUSALS = new Set(['path_secret', 'path_not_allowed', 'invalid_path', 'permission_denied']);
+export async function readOnlyPaths(policy, paths, cwd, { denylist, projects }) {
+  for (const raw of paths.slice(0, 64)) {
+    if (typeof raw !== 'string' || raw === '') continue;
+    const candidate = raw.startsWith('/') || raw === '~' || raw.startsWith('~/') ? raw : join(cwd, raw);
+    const at = await resolveOperatorPath(policy, candidate, { access: 'r', denylist, projects });
+    if (!at.ok && PATH_REFUSALS.has(at.error)) return fail(at.error, { path: raw.slice(0, 200) });
+  }
+  return null;
+}
+// Read-only git runs with configuration that can name programs switched off (core.fsmonitor,
+// core.pager), no optional index writes, and no external diff or textconv drivers.
+const GIT_DIFFING = new Set(['diff', 'show', 'log', 'whatchanged']);
+export function hardenReadOnlyGit(argv, env) {
+  const rest = argv.slice(1);
+  let i = 0;
+  for (; i < rest.length; i++) {
+    if (['-C', '--git-dir', '--work-tree'].includes(rest[i])) { i++; continue; }
+    if (!rest[i].startsWith('-')) break;
+  }
+  const out = GIT_DIFFING.has(rest[i]) ? [argv[0], ...rest.slice(0, i + 1), '--no-ext-diff', '--no-textconv', ...rest.slice(i + 1)] : [...argv];
+  return { argv: out, env: { ...env, GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'false',
+    GIT_CONFIG_KEY_1: 'core.pager', GIT_CONFIG_VALUE_1: 'cat' } };
+}
+
 export function createOperatorExecTools(policy, { run = runArgv, jobs, projects = catalogProjects(policy.repositories),
   platform = process.platform, now = Date.now, baseEnv = userRunEnv(policy), random = randomBytes,
   scriptDir = join(policy.stateDir, 'scripts') } = {}) {
@@ -96,10 +125,16 @@ export function createOperatorExecTools(policy, { run = runArgv, jobs, projects 
   return {
     async operator_run(args) {
       if (args.as_root === true) return fail('root_unavailable_on_host');
-      const checked = checkRun(args, policy, { baseEnv });
+      let checked = checkRun(args, policy, { baseEnv });
       if (!checked.ok) return checked;
       const cwd = await checkCwd(policy, args.cwd, { denylist, projects });
       if (!cwd.ok) return cwd;
+      const ro = readOnlyCommand(checked.argv);
+      if (ro) {
+        const refused = await readOnlyPaths(policy, ro.paths, cwd.path, { denylist, projects });
+        if (refused) return refused;
+        if (ro.program === 'git') checked = { ...checked, ...hardenReadOnlyGit(checked.argv, checked.env) };
+      }
       return execute('operator_run', checked, cwd.path);
     },
 

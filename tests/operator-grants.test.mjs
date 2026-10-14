@@ -39,35 +39,35 @@ test('RR-4 store: a grant covers its programs, under its prefixes, on its host, 
   const id = req.grant.id;
   assert.match(id, /^ap_st_[A-Za-z0-9_-]{22}$/);
   const call = (argv, extra = {}) => g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:owner', args: { argv, cwd: '/Users/memo/memolabs/os/app', ...extra } });
-  assert.equal(call(['git', 'status']), null, 'pending covers nothing');
+  assert.equal(call(['git', 'commit', '-am', 'x']), null, 'pending covers nothing');
   assert.equal(g.decide(id, 'approve').ok, true);
-  assert.equal(call(['git', 'status']), id);
+  assert.equal(call(['git', 'commit', '-am', 'x']), id);
   assert.equal(call(['pnpm', 'test']), id);
   assert.equal(call(['ssh', 'lab', 'uptime']), id);
-  assert.equal(call(['git', 'status'], { cwd: '/Users/MEMO/Memolabs/x' }), id, 'case folded on the Mac');
-  assert.equal(call(['git', 'status'], { cwd: '~/memolabs/x' }), id);
-  assert.equal(call(['git', 'status'], { cwd: '/Users/memo/Documents' }), null, 'another directory');
-  assert.equal(call(['git', 'status'], { cwd: '/Users/memo/memolabs-evil' }), null, 'a sibling prefix is not inside');
-  assert.equal(call(['git', 'status'], { cwd: undefined }), null, 'no cwd, no grant');
+  assert.equal(call(['git', 'commit', '-am', 'x'], { cwd: '/Users/MEMO/Memolabs/x' }), id, 'case folded on the Mac');
+  assert.equal(call(['git', 'commit', '-am', 'x'], { cwd: '~/memolabs/x' }), id);
+  assert.equal(call(['git', 'commit', '-am', 'x'], { cwd: '/Users/memo/Documents' }), null, 'another directory');
+  assert.equal(call(['git', 'commit', '-am', 'x'], { cwd: '/Users/memo/memolabs-evil' }), null, 'a sibling prefix is not inside');
+  assert.equal(call(['git', 'commit', '-am', 'x'], { cwd: undefined }), null, 'no cwd, no grant');
   assert.equal(call(['bash', '-c', 'id']), null, 'bash is not named');
   assert.equal(call(['timeout', '5', 'ssh', 'lab', 'id']), null, 'timeout is not named');
   assert.equal(call(['git', 'push', '--force']), null, 'hard: force push');
   assert.equal(call(['gh', 'pr', 'merge', '1']), null, 'hard: merge');
   assert.equal(call(['ssh', 'lab', 'rm', '-rf', '/srv']), null, 'hard: rm');
-  assert.equal(call(['git', 'status'], { as_root: true }), null, 'never T3');
-  assert.equal(g.covers({ host: 'vps', op: 'operator_run', principal: 'oidc:owner', args: { argv: ['git', 'status'], cwd: '/Users/memo/memolabs' } }), null, 'other host');
-  assert.equal(g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:other', args: { argv: ['git', 'status'], cwd: '/Users/memo/memolabs' } }), null, 'other principal');
+  assert.equal(call(['git', 'commit', '-am', 'x'], { as_root: true }), null, 'never T3');
+  assert.equal(g.covers({ host: 'vps', op: 'operator_run', principal: 'oidc:owner', args: { argv: ['git', 'fetch'], cwd: '/Users/memo/memolabs' } }), null, 'other host');
+  assert.equal(g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:other', args: { argv: ['git', 'fetch'], cwd: '/Users/memo/memolabs' } }), null, 'other principal');
   assert.equal(g.covers({ host: 'mac', op: 'operator_script', principal: 'oidc:owner', args: { interpreter: 'python3', content: 'x', cwd: '/Users/memo/memolabs' } }), id);
   assert.equal(g.covers({ host: 'mac', op: 'operator_script', principal: 'oidc:owner', args: { interpreter: 'bash', content: 'x', cwd: '/Users/memo/memolabs' } }), null);
   assert.equal(g.covers({ host: 'mac', op: 'operator_delete', principal: 'oidc:owner', args: { path: '/Users/memo/memolabs/x', recursive: true } }), null);
   assert.equal(g.list('oidc:owner').length, 1);
   clock.t += 8 * 3600_000 + 1;
-  assert.equal(call(['git', 'status']), null, 'expired after its TTL');
+  assert.equal(call(['git', 'commit', '-am', 'x']), null, 'expired after its TTL');
   // The owner's own grant: active at once, any principal; revocable.
   const own = g.grantByOwner({ host: 'mac', programs: ['git'], cwd_prefixes: ['/Users/memo/work'], ttl_hours: 2 });
-  assert.equal(g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:other', args: { argv: ['git', 'log'], cwd: '/Users/memo/work/a' } }), own.grant.id);
+  assert.equal(g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:other', args: { argv: ['git', 'pull'], cwd: '/Users/memo/work/a' } }), own.grant.id);
   assert.equal(g.revoke(own.grant.id).ok, true);
-  assert.equal(g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:other', args: { argv: ['git', 'log'], cwd: '/Users/memo/work/a' } }), null);
+  assert.equal(g.covers({ host: 'mac', op: 'operator_run', principal: 'oidc:other', args: { argv: ['git', 'pull'], cwd: '/Users/memo/work/a' } }), null);
   // What can never be granted.
   assert.equal(checkGrantRequest({ host: 'mac', programs: ['git'], cwd_prefixes: ['/'] }, { homes: HOMES }).error, 'prefix_too_broad');
   for (const p of ['sudo', 'rm', 'dd', 'mkfs.ext4', 'su']) {
@@ -186,10 +186,10 @@ test('RR-5, RR-6: one Telegram approval, then git and python3 under the prefix r
   const sentAfterGrant = s.tg.sent.length;
   // Now: no message, the calls run, the journals carry the grant id.
   const a = await s.call('operator_run', { argv: ['git', '--version'], cwd: proj });
-  const b = await s.call('operator_run', { argv: ['git', 'status'], cwd: proj });
+  const b = await s.call('operator_run', { argv: ['git', 'var', 'GIT_AUTHOR_IDENT'], cwd: proj });
   const c = await s.call('operator_script', { interpreter: 'python3', content: 'print(6*7)', cwd: proj });
   assert.equal(a.ok, true, JSON.stringify(a));
-  assert.equal(b.ok, true);
+  assert.equal(b.ok, true, JSON.stringify(b));
   assert.deepEqual([c.ok, c.untrusted_content?.stdout], [true, '42\n'], JSON.stringify(c));
   assert.equal(s.tg.sent.length, sentAfterGrant, 'no Telegram message while the grant covers the calls');
   const hubLines = s.audit.filter(e => e.event === 'operator_call' && e.outcome === 'ok' && ['operator_run', 'operator_script'].includes(e.op));
@@ -239,7 +239,7 @@ test('RR-7 (D-R5): the agent refuses a standing approval id on a hard call even 
   assert.deepEqual(await send({ host: 'vps', argv: ['git', 'push', '--force'], cwd: host.p('srv/rw') }, st), { ok: false, error: 'approval_scope' });
   assert.deepEqual(await send({ host: 'vps', argv: ['rm', '-f', host.p('srv/rw/x')] }, st), { ok: false, error: 'approval_scope' });
   assert.equal(ran, 0);
-  assert.equal((await send({ host: 'vps', argv: ['git', 'status'], cwd: host.p('srv/rw') }, st)).ok, true);
+  assert.equal((await send({ host: 'vps', argv: ['git', 'fetch'], cwd: host.p('srv/rw') }, st)).ok, true);
   assert.equal((await send({ host: 'vps', argv: ['git', 'push', '--force'], cwd: host.p('srv/rw') }, 'ap_AAAAAAAAAAAAAAAAAAAAAAAA')).ok, true, 'a single-use id still works');
   assert.equal(ran, 2);
 });
