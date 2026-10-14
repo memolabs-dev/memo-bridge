@@ -1,0 +1,14 @@
+{
+  "phase": "SPECIFICATION",
+  "scope": "Phase 6 operator access on the Mac (user memo) and the VPS lab (root through a helper), branch feat/phase-6-operator",
+  "updated": "2026-10-14",
+  "estimate_hours": 56,
+  "lots": {"1": "VPS read, signing, audit, kill switch", "2": "VPS write, exec, root helper, Telegram approval, lab-infra role", "3": "Mac agent, docs, verification"},
+  "requirements": {"total": 15, "covered": 15},
+  "acceptance": {"total": 13, "verified": 0, "failed": 0, "pending": 13},
+  "todos": {"p0_open": 13, "p1_open": 2, "p2_open": 0},
+  "owner_decisions_open": ["O-P6-1 approval_mode", "O-P6-2 Telegram bot", "O-P6-3 Pocket ID scopes", "O-P6-5 Mac rw roots"],
+  "risks": {"critical_open": 2, "critical_ids": ["R-P6-01", "R-P6-03"], "high_open": 3},
+  "unknowns_blocking": ["U-P6-01", "U-P6-02", "U-P6-03"],
+  "ready_for_manual_acceptance": false
+}
