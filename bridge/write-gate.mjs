@@ -13,6 +13,7 @@
 // - the D7 layer 2 probe: the hub refuses to open writes while a GitHub Actions runner unit
 //   runs as root (lab-infra #161).
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isRemotePrincipal } from '../server/coordinator/policy.mjs';
 
@@ -31,7 +32,8 @@ export { isRemotePrincipal };
 // ---------------------------------------------------------------------------------------------
 // Remote policy (remote.json, rendered by lab-infra, root 0644, read by the hub and the runner).
 
-export const SESSION_BINDING_MODES = Object.freeze(['warn', 'block']);
+// enforce (multi-session spec D-MS3): strict for remote principals, see sessionBindingDecision.
+export const SESSION_BINDING_MODES = Object.freeze(['warn', 'block', 'enforce']);
 export const SOFT_DEADLINE = Object.freeze({ default: 40_000, min: 1_000, max: 120_000 });
 const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 // lab-infra lists the remote projects as GitHub repositories (owner/repo, a subset of the
@@ -51,7 +53,7 @@ function projectName(entry) {
 
 // Validate the parts of remote.json the runtime uses (lab-infra templates/remote.json.j2):
 //   projects            project names or owner/repo entries (REQ-P5-09)
-//   session_binding     warn | block (D8)
+//   session_binding     warn | block | enforce (D8, multi-session D-MS3)
 //   remote_writes       enabled | disabled (D7)
 //   oidc.owner_sub      the owner's sub: the runtime grants oidc:<owner_sub> from this file
 //   budgets.soft_deadline_sec, or soft_deadline_ms
@@ -132,13 +134,32 @@ export function protectedPaths(paths, max = 10) {
 
 // ---------------------------------------------------------------------------------------------
 // Session binding (D8). `bound` is the hash recorded on the workspace, `presented` the hash of
-// the caller's `_meta["openai/session"]` as computed by the hub. Only two present, different
-// hashes count as a mismatch: an absent session is never a reason to refuse (U-P5-05).
-
+// the caller's `_meta["openai/session"]` as computed by the hub.
+//  - warn (default), block: only two present, different hashes count as a mismatch; an absent
+//    session is never a reason to refuse (U-P5-05). block refuses with session_mismatch.
+//  - enforce (multi-session D-MS3), for a remote principal: the presented session must be there
+//    (session_required otherwise: fail safe) and equal to the bound one; an unbound workspace is
+//    another conversation's (workspace_other_session). For any other principal (stdio, the 9443
+//    hub principals, which never carry a session) enforce behaves as block: unchanged.
 export const CLIENT_SESSION_RE = /^[0-9a-f]{32}$/;
-export function sessionBindingDecision(bound, presented, mode = 'warn') {
-  if (!CLIENT_SESSION_RE.test(bound ?? '') || !CLIENT_SESSION_RE.test(presented ?? '') || bound === presented) return { ok: true };
-  return mode === 'block' ? fail('session_mismatch') : { ok: true, warning: 'session_mismatch' };
+export function sessionBindingDecision(bound, presented, mode = 'warn', { remote = false } = {}) {
+  const b = CLIENT_SESSION_RE.test(bound ?? '') ? bound : null;
+  const p = CLIENT_SESSION_RE.test(presented ?? '') ? presented : null;
+  if (mode === 'enforce' && remote) {
+    if (!p) return fail('session_required');
+    return b === p ? { ok: true } : fail('workspace_other_session');
+  }
+  if (!b || !p || b === p) return { ok: true };
+  return mode === 'block' || mode === 'enforce' ? fail('session_mismatch') : { ok: true, warning: 'session_mismatch' };
+}
+// The refusals of the session binding, for the callers' denied-code lists.
+export const SESSION_REFUSALS = Object.freeze(['session_mismatch', 'workspace_other_session', 'session_required']);
+
+// A short tag for one conversation (multi-session D-MS2), safe to show to every model: derived
+// from the session hash with its own prefix, never the hint, never the binding hash itself.
+export function sessionTag(hash) {
+  if (!CLIENT_SESSION_RE.test(hash ?? '')) return null;
+  return `s${createHash('sha256').update(`memo-bridge/session-tag|${hash}`).digest('hex').slice(0, 6)}`;
 }
 
 // Per-request metadata the hub attaches to a forwarded call (bridge/forward.mjs): the session

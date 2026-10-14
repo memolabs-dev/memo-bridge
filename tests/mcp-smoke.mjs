@@ -67,7 +67,7 @@ const BASE_TOOLS = ['bridge_info', 'host_status', 'list_hosts', 'project_git_sta
 const OBSERVER_TOOLS = ['observe_agents', 'observe_focus', 'observe_guardian', 'observe_live_state'];
 const COORDINATOR_TOOLS = ['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close', 'workspace_recover',
   'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
-  'batch_create', 'task_next', 'batch_status'];
+  'batch_create', 'task_next', 'batch_status', 'sessions_overview'];
 const WORKTREE_TOOLS = ['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files', 'worktree_read_file',
   'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove'];
 const JOB_TOOLS = ['jobs_submit', 'jobs_list', 'job_status', 'job_events', 'job_results', 'job_cancel'];
@@ -101,6 +101,10 @@ try {
   const names = (await client.listTools()).tools.map(x => x.name).sort();
   assert.deepEqual(names, EXPECTED, 'the exact tool list');
   assert.equal(new Set(names).size, names.length);
+  // Multi-session (D-MS9): the server instructions carry the start sequence and the stop codes.
+  const instructions = client.getInstructions() ?? '';
+  for (const rule of ['workspace_open', 'sessions_overview', 'task_next', 'operator_lock', 'operator_unlock', 'stale_lease',
+    'locked_by_other_session', 'workspace_other_session']) assert.ok(instructions.includes(rule), `instructions mention ${rule}`);
 
   // bridge_info reports exactly the registered tools.
   const info = await call('bridge_info');

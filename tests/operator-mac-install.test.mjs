@@ -201,7 +201,7 @@ test('live: the installed bundle connects as operator-mac through a real hub and
   assert.equal(note.ok, true);
   assert.match(note.untrusted_content.content, /hello from the Mac/);
   assert.deepEqual(await hub.requestOperator('mac', 'operator_read', { args: { host: 'mac', path: '~/.memo-operator/agent.key' }, principal: OWNER }),
-    { ok: false, error: 'path_secret' });
+    { ok: false, error: 'path_secret', host: 'mac' });
   // The host journal is where the policy says, private, chained.
   assert.equal(mode(L.auditFile) & 0o077, 0);
   assert.equal(readFileSync(L.auditFile, 'utf8').trim().split('\n').length, 3);

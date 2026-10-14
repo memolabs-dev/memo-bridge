@@ -48,6 +48,18 @@ Every tool name is also the policy operation (`server/coordinator/policy.mjs`, `
 
 A session that lost its context (compaction, crash, new conversation) calls `workspace_recover({workspace_id})` first. It never writes, not even to repair the local mirror.
 
+## sessions_overview and task_next without a batch (multi-session)
+
+- `sessions_overview({workspace_id?})` (read): the principal's active workspaces, newest first,
+  at most 20, with `session_tag`, project, held task and its local lease state, last activity and
+  `you`; through the hub, also the operator locks. Local store only.
+- `task_next({workspace_id, project?})` without `batch`: the next `agent:ready` Issue across the
+  allowed projects (remote: `remote.json` `projects`; local: every catalog repository), p0 first,
+  then oldest, claimed through `task_claim`'s path. A workspace with no live claim and no active
+  worktree moves to the task's project (`workspace_retarget` in the journal). Every answer carries
+  `brief` (task, project, other conversations on the project, rules).
+- `session_binding: "enforce"`: see `docs/REMOTE_CHATGPT.md`.
+
 ## tasks_list
 
 - **Claimable** means what the ledger's preflight (`scripts/issue_preflight.py`) accepts: an open Issue (not a pull request), labelled `agent:ready`, with exactly one of `priority:p0`, `priority:p1`, `priority:p2`, and none of `status:blocked`, `needs:human`, `type:epic`, `agent:working`.

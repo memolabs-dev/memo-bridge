@@ -30,6 +30,7 @@ import { collectOperatorDefinitions, collectToolDefinitions, isRemoteOperatorToo
 import { RESULT_LIMIT_BYTES } from './operator-output.mjs';
 import { MAX_RESULT_BYTES, PACKAGE_VERSION } from './protocol.mjs';
 import { OPS } from './ops.mjs';
+import { MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS } from '../server/instructions.mjs';
 
 // Remote-only bounds (spec REQ-P5-14). Stdio keeps its own, larger ones.
 export const REMOTE_LIMITS = Object.freeze({
@@ -178,6 +179,7 @@ const LIST_HINT = 'lower limit or add a filter';
 export const OPERATOR_BUDGET_BYTES = RESULT_LIMIT_BYTES + 1024;
 
 // Compact JSON within the budget, or result_too_large. A mutating op that ran keeps that fact.
+export { INSTRUCTIONS as REMOTE_INSTRUCTIONS };
 export function boundedResult(op, data, budgetBytes) {
   const text = JSON.stringify(data);
   const bytes = Buffer.byteLength(text);
@@ -195,7 +197,7 @@ const INSTRUCTIONS = 'Memo Bridge, remote surface for the owner\'s ChatGPT conve
   'the size budget comes back as result_too_large with a hint (page with next_offset, lower limit). Write tools are listed ' +
   'only when the owner enabled remote writes; the server enforces every rule whatever a tool description says. Operator ' +
   'tools (operator_*) act on the machines: a refusal (frozen, path_secret, use_dev_flow, pending_approval, denied) is final, ' +
-  'report it and never try to reach the same result another way.';
+  'report it and never try to reach the same result another way. ' + OPERATOR_HOST_INSTRUCTIONS + ' ' + MULTI_SESSION_INSTRUCTIONS;
 
 // Definitions checked once per process: the remote surface refuses to serve a registry whose
 // remote tools are not all collected, forwardable, in the right list and fully annotated.

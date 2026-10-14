@@ -33,7 +33,7 @@ export const TOOL_MODULES = Object.freeze([
 //    not hold; project_info, project_git_status and projects_audit (local paths, stdio only).
 export const REMOTE_TOOLS_READ = Object.freeze([
   'projects_list',
-  'workspace_status', 'workspace_list', 'workspace_recover',
+  'workspace_status', 'workspace_list', 'workspace_recover', 'sessions_overview',
   'tasks_list', 'task_status', 'batch_status',
   'worktrees_list', 'worktree_status', 'worktree_list_files', 'worktree_read_file', 'worktree_diff',
   'jobs_list', 'job_status', 'job_events', 'job_results',

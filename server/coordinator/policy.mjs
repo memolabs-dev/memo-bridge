@@ -31,6 +31,8 @@ export const OPERATION_CAPABILITY = Object.freeze({
   workspace_status: CAPABILITIES.READ,
   workspace_list: CAPABILITIES.READ,
   workspace_recover: CAPABILITIES.READ,
+  // Every conversation's workspace, task and operator locks (multi-session D-MS1)
+  sessions_overview: CAPABILITIES.READ,
   // Tasks (GitHub Issues + lease ledger)
   tasks_list: CAPABILITIES.READ,
   task_status: CAPABILITIES.READ,
@@ -107,7 +109,10 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   operator_run: CAPABILITIES.OPERATOR_EXEC,
   operator_service: CAPABILITIES.OPERATOR_EXEC,
   // T3, lab only, through the root helper
-  operator_script: CAPABILITIES.OPERATOR_ROOT
+  operator_script: CAPABILITIES.OPERATOR_ROOT,
+  // Multi-session (D-MS4): locks, answered by the hub; T1 like the writes they announce
+  operator_lock: CAPABILITIES.OPERATOR_WRITE,
+  operator_unlock: CAPABILITIES.OPERATOR_WRITE
 });
 export const isOperatorOperation = operation => typeof operation === 'string' && Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation);
 // The tier (0..3) of an operator op, or null.

@@ -54,7 +54,7 @@ import { jobConcurrencyLimit } from './hosts.mjs';
 import { signalJobGroup } from './processes.mjs';
 import { RECIPE_NAMES, detectRecipes } from './recipes.mjs';
 import { loadRunnerConfig } from './resources.mjs';
-import { remotePolicyFromEnv, requestMeta, sessionBindingDecision } from '../../bridge/write-gate.mjs';
+import { isRemotePrincipal, remotePolicyFromEnv, requestMeta, sessionBindingDecision } from '../../bridge/write-gate.mjs';
 
 // Moved to executor-local.mjs (the local executor); re-exported for job-runner.mjs, the
 // Coordinator, worktrees.mjs and the Phase 3 tests.
@@ -84,7 +84,8 @@ export const DEFAULT_RUNNER_PATH = fileURLToPath(new URL('./job-runner.mjs', imp
 
 // Results the model sees as refusals rather than faults; both are journaled.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_removed', 'wrong_host', 'no_live_claim', 'host_busy',
-  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'queue_full', 'session_mismatch']);
+  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'queue_full', 'session_mismatch', 'workspace_other_session',
+  'session_required']);
 
 const newJobId = () => `job_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -257,7 +258,8 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
   // the workspace is bound to. ctx.meta is the hub's per-request metadata, never tool arguments;
   // in 'warn' mode the call goes on and the tool result carries session_warning.
   function sessionCheck(workspace, ctx) {
-    const decision = sessionBindingDecision(workspace?.client_session, requestMeta(ctx?.meta).client_session, remotePolicy?.session_binding);
+    const decision = sessionBindingDecision(workspace?.client_session, requestMeta(ctx?.meta).client_session, remotePolicy?.session_binding,
+      { remote: isRemotePrincipal(rt.principal) });
     if (decision.ok && decision.warning && ctx) ctx.sessionWarning = decision.warning;
     return decision;
   }

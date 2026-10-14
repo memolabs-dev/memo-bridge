@@ -52,7 +52,7 @@ hub.
 
 ## The remote tool set
 
-Read stage (23 tools): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`,
+Read stage (24 tools): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`, `sessions_overview`,
 `tasks_list`, `task_status`, `batch_status`, `worktrees_list`, `worktree_status`, `worktree_list_files`,
 `worktree_read_file`, `worktree_diff`, `jobs_list`, `job_status`, `job_events`, `job_results`,
 `host_capabilities`, `github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`,
@@ -120,6 +120,73 @@ Rules that hold whatever the model sends:
 - Within one runtime, parallel `task_next` calls try different Issues first; across machines the
   ledger alone decides, and the loser moves on.
 
+## Ten conversations at once (multi-session, spec `.agent/project/multi-session/spec.md`)
+
+All conversations are the same principal (`oidc:<owner sub>`). What keeps them apart is the
+workspace, the conversation it is bound to, the lease ledger and the operator locks.
+
+**The sentence to paste in each worker conversation** (one line, nothing else to say):
+
+```
+Avec Memo Bridge, prends la prochaine tâche disponible : ouvre ton workspace, lis sessions_overview, prends ta tâche avec task_next, ne travaille que sur elle, prends un operator_lock avant toute action opérateur et arrête-toi sur stale_lease, locked_by_other_session ou workspace_other_session.
+```
+
+What each conversation does (the server instructions and the plugin skill say the same):
+
+1. `workspace_open` (any allowed project; `task_next` moves it if needed), then `sessions_overview`:
+   every active workspace of the owner, newest first, at most 20: id, client, `session_tag` (a
+   short tag of the conversation, never the ChatGPT hint), project, held task with its local
+   lease state (`held`, `expired`), last recorded activity and last call, `you: true` for its
+   own, and the operator locks of each. Local store and hub memory only: no ledger or GitHub call.
+2. `task_next({workspace_id})` without `batch`: the next `agent:ready` Issue of every project in
+   `remote.json` `projects` (or of `project`), p0, then p1, then p2, then oldest; Issues held by a
+   live claim of this runtime or being claimed by a parallel call are skipped, and the ledger
+   decides the rest (a lost race moves to the next Issue). A workspace that holds a task gets it
+   back (`already_held`). A workspace with no task and no worktree moves to the task's project
+   (`project_changed`, journaled `workspace_retarget`). The answer carries `brief`: the task, the
+   project, the other conversations on that project (tag and task) and the rules.
+3. Operator work: `operator_lock({host, workspace_id, kind, target, reason})` first. Kinds:
+   `path` (a subtree), `unit`, `container`, `global` (the whole host). TTL 15 min by default, at
+   most 2 h, renewed by locking again; `operator_unlock` releases one lock or all of them.
+
+Rules the server enforces, whatever the model sends:
+
+- Remote `operator_*` writes, commands and root calls must name `workspace_id`
+  (`workspace_required`) and be covered by a lock of that workspace (`lock_required`): a path
+  lock on the file (both ends of a move, the destination of a copy), on the `cwd` of
+  `operator_run`; a unit lock for `operator_service`; a `global` lock for `as_root`,
+  `operator_script` and a command without `cwd` (a command line can name any path). Read-only
+  tools need no lock. Another workspace's lock that overlaps the target answers
+  `locked_by_other_session` with its `session_tag`, workspace, target and reason. The hub
+  removes `workspace_id` before signing, so agents and owner approvals are unchanged.
+- `host` is optional on the operator tools (owner decision 2026-10-14): without it the hub uses
+  the Mac when `operator-mac` is connected, else `vps`. `as_root`, `operator_script` and any call
+  on the dangerous list must name it (`host_required`, "Mac ou VPS ?"). Every operator result
+  carries the `host` it ran on.
+- The 9443 hub principals (Claude Code or Codex on the Mac through the private hub) need no
+  workspace, and are refused only where another workspace holds a lock.
+- Locks live in the hub's memory, for both hosts. A hub restart drops them (approvals too); a
+  remote holder's next write then answers `lock_required` and it takes the lock again, or learns
+  that another conversation took it. `sessions_overview` shows `locks_since`.
+- Locks compare paths as text (`..` resolved, `~/` as `/Users/memo` on the Mac, case folded on
+  the Mac); they coordinate conversations, they do not replace the host policy, the signature or
+  the approvals.
+
+### Session binding `enforce`
+
+`session_binding: "enforce"` makes the binding strict for remote principals: a workspace opened
+in one conversation answers `workspace_other_session` to any coordinator call from another one
+(reads included), to worktree writes, jobs and `github_create_pr`. A call without the
+`openai/session` hint answers `session_required`, and so does `workspace_open` (fail safe: no
+hint, no work). `workspace_recover` from another conversation rebinds only a workspace with no
+recorded activity for 30 min (a refreshed page that changed the hint); otherwise
+`workspace_other_session`. `warn` and `block` behave as before; stdio and the 9443 principals are
+unchanged in every mode.
+
+Before switching lab-infra to `enforce`: with `warn`, open two conversations and check that
+`sessions_overview` shows a non-null `session_tag` for each, different from each other (U-P5-05).
+If ChatGPT sends no hint, `enforce` would refuse every remote workspace.
+
 ## Write gate (D7)
 
 1. Write tools are not listed unless `remote_writes` is exactly `"enabled"`. A call to an
@@ -149,7 +216,8 @@ is open; the owner then reconnects ChatGPT to obtain them.
   `host_not_remote_enabled` (Mac workspaces are Phase 5b).
 - Session binding (D8): `workspace_open` records a hash of `_meta["openai/session"]`; a write
   from another conversation is warned (`session_warning`, default `warn`) or refused
-  (`session_mismatch`, `block`), and journaled. `workspace_recover` rebinds explicitly.
+  (`session_mismatch`, `block`), and journaled. `workspace_recover` rebinds explicitly. With
+  `enforce`, see "Ten conversations at once" above.
 
 ## Bounds and slow operations (D10)
 
@@ -211,6 +279,9 @@ elided):
                   "unauthorized_per_min_per_ip": 30}
 }
 ```
+
+`session_binding` is `"warn"`, `"block"` or `"enforce"`; move to `"enforce"` once
+`sessions_overview` shows a `session_tag` for each conversation (see above).
 
 `max_token_age_sec` must be at least the access-token lifetime Pocket ID issues (R-P5-11,
 measured in AC-P5-19); 3600 is a placeholder until then.

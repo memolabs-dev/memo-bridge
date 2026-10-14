@@ -1,0 +1,13 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "Multi-session coordination for up to 10 ChatGPT conversations, plus the default operator host (branch feat/multi-session-coordination)",
+  "started": "2026-10-14T18:31:26+02:00",
+  "baseline": {"commit": "254c151", "pnpm_test": "451/451"},
+  "requirements": {"total": 14, "covered": 14},
+  "acceptance": {"total": 14, "verified": ["MS-R1", "MS-R2", "MS-R3", "MS-R4", "MS-R5", "MS-R6", "MS-R7", "MS-R8", "MS-R9", "MS-R10", "MS-R11", "MS-R12", "MS-R13", "MS-R14"], "pending_runtime": ["U-P5-05 hint presence before enforce", "10 live ChatGPT conversations"], "failed": []},
+  "verification": {"pnpm_test": "472/472", "build": "pass", "smoke": "pass (52 tools)", "smoke_remote": "7/7", "test_deploy": "OK", "mutations": "30/30 caught"},
+  "todos": {"done": ["MS-01", "MS-02", "MS-03", "MS-04", "MS-05", "MS-06", "MS-07", "MS-08"], "open": []},
+  "risks": {"critical_open": 0, "high_open": 2, "high_ids": ["enforce before U-P5-05 is measured (owner sequencing, documented)", "per-principal rate limits shared by 10 chats (lab-infra rate_limits)"]},
+  "owner_actions": ["deploy the release", "raise remote.json rate_limits", "check session_tag in sessions_overview under warn", "then session_binding enforce", "projects allowlist"],
+  "ready_for_manual_acceptance": true
+}

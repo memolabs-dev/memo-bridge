@@ -276,7 +276,8 @@ export async function runOnce(store, { principal, op, clientRequestId, now = Dat
   try { return await attempt; } finally { running.delete(key); }
 }
 
-const WORKSPACE_COLUMNS =['status', 'branch', 'updated_at', 'closed_at', 'client_session'];
+// project_id: task_next may move an idle workspace to the project of the task it takes (multi-session D-MS7).
+const WORKSPACE_COLUMNS = ['status', 'branch', 'updated_at', 'closed_at', 'client_session', 'project_id'];
 const CLAIM_COLUMNS = ['fence_sha', 'expires_at', 'state', 'outcome', 'updated_at'];
 const WORKTREE_COLUMNS = ['status', 'issue_ref', 'updated_at', 'removed_at'];
 const JOB_COLUMNS = ['status', 'exit_code', 'pid', 'started_at', 'ended_at', 'summary', 'unit', 'status_reason'];

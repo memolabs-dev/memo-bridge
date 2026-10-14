@@ -40,7 +40,7 @@ const LABEL_RE = /^[^,\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_not_active', 'wrong_host', 'claim_required',
   'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'repo_not_allowed', 'repo_not_registered',
   'default_branch_refused', 'branch_not_pushed', 'unknown_workspace', 'unknown_worktree', 'project_not_allowed',
-  'head_not_pushed_by_workspace', 'session_mismatch', 'path_protected']);
+  'head_not_pushed_by_workspace', 'session_mismatch', 'workspace_other_session', 'session_required', 'path_protected']);
 
 const repoArg = z.string().max(140).describe('owner/repo of a registered project (its GitHub origin), or memolabs-dev/.github.');
 const limitArg = z.number().int().min(LIMITS.list.min).max(LIMITS.list.max).optional()
@@ -249,7 +249,8 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   const { workspace, worktree, claim } = local;
   const notAllowed = remoteProjectRefusal(rt.principal, worktree.project_id, remotePolicy);
   if (notAllowed) return notAllowed;
-  const binding = sessionBindingDecision(workspace.client_session, meta?.client_session, remotePolicy?.session_binding);
+  const binding = sessionBindingDecision(workspace.client_session, meta?.client_session, remotePolicy?.session_binding,
+    { remote: isRemotePrincipal(rt.principal) });
   if (!binding.ok) return binding;
   const issue = parseIssueRef(worktree.issue_ref);
   if (!issue) return fail('claim_required', 'invalid Issue reference');

@@ -24,7 +24,7 @@ const MAX_SESSION_CHARS = 512;
 
 // Refusals counted as 'denied' in the journal; any other failure is an 'error'.
 export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 'write_gate_closed', 'mutating_disabled',
-  'project_not_allowed', 'path_protected', 'session_mismatch', 'protected_branch', 'push_rejected', 'lease_held',
+  'project_not_allowed', 'path_protected', 'session_mismatch', 'workspace_other_session', 'session_required', 'protected_branch', 'push_rejected', 'lease_held',
   'stale_lease', 'host_not_remote_enabled', 'head_not_pushed_by_workspace', 'default_branch_refused', 'workspace_closed',
   'no_live_claim', 'claim_required', 'unsupported_op',
   // Phase 6 operator refusals (host agent or hub).
@@ -34,7 +34,9 @@ export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 
   // Lot 2: approvals, writes, runs.
   'pending_approval', 'approval_unavailable', 'approval_required', 'approval_backlog', 'env_not_allowed', 'timeout_too_long',
   'root_protected', 'recursive_required', 'exists', 'owner_would_change', 'validation_failed', 'root_unavailable_on_host',
-  'invalid_program']));
+  'invalid_program',
+  // Multi-session: operator locks.
+  'workspace_required', 'lock_required', 'locked_by_other_session', 'lock_limit']));
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
