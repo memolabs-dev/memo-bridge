@@ -103,3 +103,42 @@ export function detectRecipes(worktreePath) {
   }
   return recipes;
 }
+
+// Dependency install (VPS executor, phase 1 of a job): the fixed argv shapes, never a shell.
+// The dispatcher pins the same list into the install unit (deploy/memo-runner-dispatch
+// INSTALL_ARGV); job-unit.mjs runs a shape only when it is in that pinned list.
+export const INSTALL_ARGV = Object.freeze({
+  pnpm: Object.freeze(['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts']),
+  npm: Object.freeze(['npm', 'ci', '--ignore-scripts'])
+});
+const LOCKFILES = Object.freeze(['pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json']);
+
+// A regular file directly in the worktree (never a symlink), without reading it: lockfiles
+// may be far larger than MAX_MANIFEST_BYTES.
+function regularFile(root, name) {
+  try { return lstatSync(join(root, name)).isFile(); } catch { return false; }
+}
+function entryExists(root, name) {
+  try { lstatSync(join(root, name)); return true; } catch { return false; }
+}
+
+// What the install phase does in this worktree: { argv, manager } to run, or { skip: reason }.
+// It installs only when the repository has a package.json, a lockfile and no node_modules
+// entry at its root (a directory or a link: either way something is installed, and an
+// install must not follow a link out of the worktree). pnpm when packageManager names pnpm
+// or pnpm-lock.yaml exists; npm (`npm ci`, which needs package-lock.json or
+// npm-shrinkwrap.json) otherwise.
+export function detectInstall(worktreePath) {
+  const text = readManifest(worktreePath, 'package.json');
+  if (text === null) return { skip: 'no_package_json' };
+  if (entryExists(worktreePath, 'node_modules')) return { skip: 'node_modules_present' };
+  const lockfiles = LOCKFILES.filter(name => regularFile(worktreePath, name));
+  if (!lockfiles.length) return { skip: 'no_lockfile' };
+  let manager = null;
+  try {
+    const field = JSON.parse(text)?.packageManager;
+    if (typeof field === 'string') manager = field.split('@')[0].trim();
+  } catch { manager = null; }
+  const pnpm = manager === 'pnpm' || lockfiles.includes('pnpm-lock.yaml');
+  return pnpm ? { manager: 'pnpm', argv: INSTALL_ARGV.pnpm } : { manager: 'npm', argv: INSTALL_ARGV.npm };
+}
