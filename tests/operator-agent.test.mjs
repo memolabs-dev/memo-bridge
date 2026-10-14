@@ -251,7 +251,7 @@ test('live: the hub signs, the operator agent verifies; reads work, secrets do n
   assert.equal(out.ok, true);
   assert.match(out.untrusted_content.content, /Ignore previous instructions/);
   assert.deepEqual(await hub.requestOperator('vps', 'operator_read', { args: { host: 'vps', path: host.p('srv/app/.env') }, principal: OWNER }),
-    { ok: false, error: 'path_secret' });
+    { ok: false, error: 'path_secret', host: 'vps' });
   const search = await hub.requestOperator('vps', 'operator_search', { args: { host: 'vps', path: host.p('home'), pattern: CANARY }, principal: OWNER });
   assert.deepEqual([search.ok, search.count], [true, 0]);
   // The host chain and the hub journal both hold the three calls, with the same args hash.
@@ -265,9 +265,9 @@ test('live: the hub signs, the operator agent verifies; reads work, secrets do n
   assert.deepEqual(hubLines.map(e => e.request_id), hostLines.map(l => l.request_id), 'the wire id ties both journals');
   assert.ok(hubLines.every(e => /^[0-9a-f]{64}$/.test(e.output_sha256)));
   // Not authorized, wrong host argument, unknown op, a non-operator op through requestOperator.
-  assert.deepEqual(await hub.requestOperator('vps', 'operator_policy', { args: { host: 'vps' }, principal: READER }), { ok: false, error: 'forbidden' });
+  assert.deepEqual(await hub.requestOperator('vps', 'operator_policy', { args: { host: 'vps' }, principal: READER }), { ok: false, error: 'forbidden', host: 'vps' });
   assert.deepEqual(await hub.requestOperator('vps', 'operator_policy', { args: { host: 'mac' }, principal: OWNER }), { ok: false, error: 'invalid_arguments' });
-  assert.deepEqual(await hub.requestOperator('mac', 'operator_policy', { args: { host: 'mac' }, principal: OWNER }), { ok: false, error: 'host_offline' });
+  assert.deepEqual(await hub.requestOperator('mac', 'operator_policy', { args: { host: 'mac' }, principal: OWNER }), { ok: false, error: 'host_offline', host: 'mac' });
   assert.deepEqual(await hub.requestOperator('vps', 'tasks_list', { args: { host: 'vps' }, principal: OWNER }), { ok: false, error: 'unsupported_op' });
 });
 

@@ -236,7 +236,7 @@ test('AC-P6-05: a dangerous call waits for the owner; confirm:true and another a
   // as_root needs operator:root on top of operator:exec (the call's tier is T3).
   const execOnly = makePrincipal('oidc:owner', [CAPABILITIES.OPERATOR_READ, CAPABILITIES.OPERATOR_EXEC]);
   assert.deepEqual(await s.hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', workspace_id: WS, argv: ['id'], as_root: true }, principal: execOnly }),
-    { ok: false, error: 'forbidden' });
+    { ok: false, error: 'forbidden', host: 'vps' });
   assert.equal((await s.hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', workspace_id: WS, argv: ['id'] }, principal: execOnly })).ok, true);
   // Deny.
   const denied = await s.call('operator_run', { argv: ['rm', s.host.p('srv/rw/third.txt')] });
@@ -248,12 +248,12 @@ test('AC-P6-05: without a bot dangerous calls fail closed; a host stricter than 
   const noBot = await stack(t, { withBot: false });
   const file = noBot.host.p('srv/rw/keep.txt');
   writeFileSync(file, 'x');
-  assert.deepEqual(await noBot.call('operator_run', { argv: ['rm', file] }), { ok: false, error: 'approval_unavailable' });
+  assert.deepEqual(await noBot.call('operator_run', { argv: ['rm', file] }), { ok: false, error: 'approval_unavailable', host: 'vps' });
   assert.equal(existsSync(file), true);
   const lax = await stack(t, { hubModes: { vps: 'off' } });
   const file2 = lax.host.p('srv/rw/keep.txt');
   writeFileSync(file2, 'x');
-  assert.deepEqual(await lax.call('operator_run', { argv: ['rm', file2] }), { ok: false, error: 'approval_required' });
+  assert.deepEqual(await lax.call('operator_run', { argv: ['rm', file2] }), { ok: false, error: 'approval_required', host: 'vps' });
   assert.equal(existsSync(file2), true);
 });
 
@@ -265,7 +265,7 @@ test('AC-P6-04 (Telegram): /freeze from the owner chat refuses above T0 at the h
   s.tg.queue.push({ update_id: 11, message: { chat: { id: OWNER_CHAT }, from: { id: OWNER_CHAT }, text: '/freeze' } });
   await s.bot.pollOnce();
   assert.equal(s.hub.operatorFrozen(), true);
-  assert.deepEqual(await s.call('operator_run', { argv: ['df'] }), { ok: false, error: 'frozen' });
+  assert.deepEqual(await s.call('operator_run', { argv: ['df'] }), { ok: false, error: 'frozen', host: 'vps' });
   assert.equal((await s.call('operator_policy', {})).ok, true, 'T0 still answers');
   // The host froze itself meanwhile (auto-freeze marker): the owner's /unfreeze clears both.
   writeFileSync(s.host.p('state/AUTO-FROZEN'), '{}');

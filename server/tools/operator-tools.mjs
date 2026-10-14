@@ -26,7 +26,11 @@ export const SCRIPT_MAX_BYTES = 64 * 1024;
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const writes = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const destructive = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
-const host = z.enum(OPERATOR_HOSTS).describe('mac (the owner\'s Mac, as user memo) or vps (lab).');
+// Optional (owner decision 2026-10-14): without it the hub uses the Mac when its operator agent
+// is connected, else vps; root calls, scripts and calls on the dangerous list must name it
+// (host_required). Every result says which host it ran on.
+const host = z.enum(OPERATOR_HOSTS).optional()
+  .describe('mac (the owner\'s Mac, as user memo) or vps (lab). Default: mac when connected, else vps. Required for as_root, operator_script and dangerous calls.');
 // A correlation id the caller chooses; journaled on the hub and on the host, never interpreted.
 const ref = z.string().min(1).max(128).regex(/^[\x20-\x7E]+$/).optional().describe('Optional correlation id, journaled.');
 const path = z.string().min(1).max(4096).describe('Absolute path on that host ("~/" on the Mac).');

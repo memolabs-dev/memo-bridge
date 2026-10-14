@@ -167,9 +167,38 @@ export function createHub(options) {
   // tool's own host argument by the caller), signed for exactly these arguments. The principal
   // must already be authorized for the op (remote surface or 9443 listing); the agent checks the
   // tier against its local policy again.
-  async function requestOperator(host, op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
+  // Owner decision 2026-10-14: `host` is optional on the operator tools. Without it the Mac is
+  // used when its operator agent is connected, else vps; a root call, a script or a call on the
+  // dangerous list must name it (host_required). Every result carries the host it ran on.
+  function resolveOperatorHost(op, args) {
+    if (args?.host !== undefined) return { host: args.host };
+    if (op === 'operator_script' || (op === 'operator_run' && args?.as_root === true) || operatorCallTier(op, args) === 3 ||
+      dangerReason(op, args ?? {}) !== null) {
+      return { error: { ok: false, error: 'host_required', detail: 'Mac ou VPS ? This call needs host "mac" or "vps", named explicitly.' } };
+    }
+    const mac = agents.get(OPERATOR_AGENT_IDS.mac);
+    return { host: mac && mac.ws.readyState === WebSocket.OPEN ? 'mac' : 'vps', defaulted: true };
+  }
+  async function requestOperator(host, op, options = {}) {
     if (!signer) return fail('operator_disabled');
     if (!isOperatorOp(op) || OPS[op].internal) return fail('unsupported_op');
+    const given = options.args ?? {};
+    if ((host === undefined || host === null) && given.host === undefined) {
+      const resolved = resolveOperatorHost(op, given);
+      if (resolved.error) {
+        record('operator_refused', null, { principal: options.principal?.id ?? null, op, reason: 'host_required' });
+        return resolved.error;
+      }
+      host = resolved.host;
+      options = { ...options, args: { ...given, host } };
+    }
+    const out = await operatorCall(host, op, options);
+    // The chat always says where the action ran.
+    return out && typeof out === 'object' && !Array.isArray(out) && out.host === undefined && Object.hasOwn(OPERATOR_AGENT_IDS, host) &&
+      options.args?.host === host
+      ? { ...out, host } : out;
+  }
+  async function operatorCall(host, op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
     if (!Object.hasOwn(OPERATOR_AGENT_IDS, host) || args?.host !== host) return fail('invalid_arguments');
     // The call's tier: operator_run with as_root is T3 and needs operator:root (spec D1).
     const tier = operatorCallTier(op, args);
