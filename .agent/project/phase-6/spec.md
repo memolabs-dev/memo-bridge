@@ -367,3 +367,54 @@ it disagrees with the text above; each entry says what changed and why.
   Lot 3 reuses that tunnel for `operator-mac` (`MEMO_BRIDGE_AGENT_URL=wss://localhost:9444/agent`)
   instead of a new one. U-P6-01 is answered for the transport; the second launchd job for the
   operator agent remains Lot 3 work. The live setup was not touched.
+
+### Lot 2 deviations (2026-10-14)
+
+- DEV-P6-15 (D9, §4 uploads). Upload chunks are 64 KiB, not 256 KiB: the wire request bound is
+  128 KiB (`bridge/protocol.mjs`) and so is the public body bound; 64 KiB in base64 fits both.
+  The 512 MiB maximum is kept.
+- DEV-P6-16 (D5). Approvals live in the hub, in memory (a hub restart drops pending ones). The
+  host policy stays the authority: the hub's per-host modes (`MEMO_BRIDGE_OPERATOR_APPROVAL`,
+  default `dangerous` on both hosts) must be at least as strict, else the host itself refuses
+  with `approval_required`, since the approval id is part of the signed statement. An approval
+  is also bound to the principal. `pending_approval` is answered as
+  `{ok:false, error:'pending_approval', approval_id, expires_at}`.
+- DEV-P6-17 (D10). Background runs of the agent user outlive an agent restart only with
+  `KillMode=process` on `memo-operator.service` (lab-infra, TODO-P6-12). Root background runs
+  live in the root helper: they survive an agent restart, and a helper restart reports them
+  `lost`.
+- DEV-P6-18 (D1 T3). Root writes outside the write roots go through `operator_run as_root` or
+  `operator_script`; the T1 tools take no `as_root`.
+- DEV-P6-19 (D5 list). Reading of the list: a destructive name (rm, dd, mkfs, wipefs, firewall
+  tools, userdel, passwd, reboot, kill...) anywhere in argv; a shell, interpreter or command
+  wrapper (bash, python3, env, xargs, find, sudo, sed, awk, docker, git, package managers) as
+  the program, since an argv classifier cannot see what they run; a sensitive path (`/etc/ssh`,
+  `/etc/sudoers*`, `/etc/pam.d`, `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`)
+  anywhere in argv or after `=`; systemctl stop, disable or mask of ssh, traefik, memo-bridge-*
+  or memo-operator*; systemctl reboot and the like; every recursive delete (the file count is
+  not known from the arguments); every script. `all_root` adds every T3 call.
+- DEV-P6-20 (O-P6-2). The owner chat id is configured (`MEMO_BRIDGE_TELEGRAM_CHAT_ID`) instead
+  of learned from the first `/start`, which would trust whoever writes to the bot first. The
+  owner is the private chat whose `chat.id` and `from.id` both equal that id. The token is the
+  systemd credential `telegram-bot`.
+- DEV-P6-21 (D7 anchoring). The root helper has no link to the hub. The hub pulls each chain
+  head through the agent every 15 min with an internal op, `operator_audit_head`, and compares
+  the hash of the last line it anchored; a shorter chain or a changed line freezes the hub.
+  Internal ops (`operator_audit_head`, `operator_owner_unfreeze`) are signed like any op, are
+  never tools, and `requestOperator` refuses them.
+- DEV-P6-22 (D3). Transient root units get `RuntimeMaxSec=<timeout>s`, `MemoryMax=2G`,
+  `TasksMax=512`, no `ProtectSystem` (root calls exist to change the system). Scripts are
+  written to a 0700 file in the helper's state directory and removed after a foreground run;
+  background scripts stay until a cleanup (later list).
+- DEV-P6-23. The 9443 hub lists operator T1 to T3 tools only with
+  `MEMO_BRIDGE_HUB_MUTATING_OPS=owner`, like every other write on that listener.
+- DEV-P6-24 (D3). The helper does not read the peer's credentials on its socket (Node has no
+  `SO_PEERCRED`); who may connect is decided by the socket directory (root:memo-operator 0750,
+  lab-infra) and what may run by the hub signature, which the helper checks itself.
+- F-P6-02 (environment finding, 2026-10-14 around 16:20 CEST). `~/projects` no longer exists
+  on the Mac (moved by another session); the governance checkout now sits at
+  `~/memolabs/os/integrations/github`, with an unresolved merge in `scripts/land.py` that is not
+  ours. The default `MEMO_BRIDGE_GOVERNANCE_ROOT` (and the catalog's projects root) still point
+  at `~/projects`: without the variable, 17 coordinator tests fail and the smoke round trip is
+  skipped. With `MEMO_BRIDGE_GOVERNANCE_ROOT=~/memolabs/os/integrations/github` the suite is
+  green. Not changed here (out of scope); flagged for the owner.
