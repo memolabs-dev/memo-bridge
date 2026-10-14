@@ -55,7 +55,7 @@ The runtime store stays the owner of the queue (D4). It writes a start request o
 
 Other refusals:
 
-- `host_busy`: a `memo-job@*.service` is active, activating, deactivating or reloading, or has a pending job, or another one started earlier in the same run.
+- `host_busy`: a `memo-job@*.service` or `memo-job-install@*.service` is active, activating, deactivating or reloading, or has a pending job, or another one started earlier in the same run.
 - `busy_check_failed`: systemctl could not answer, so the dispatcher fails closed.
 - `already_dispatched`: a previous `dispatch.json` says `starting`, `started` or `cancelled_before_start`. A retry never starts a second unit.
 - `dropin_not_loaded`, `start_failed`, `prepare_failed`.
@@ -85,20 +85,35 @@ All of this goes under `/var/lib/memo-runner/jobs/<id>/`, which the dispatcher c
 | `cancel.json` | root:memo-runner 0640 | `{"version":1,"id","reason","requested_at"}`, written before `systemctl stop`. The first reason is kept |
 | `out/` | memo-job:memo-runner 0750 | The job's own output (`out/job.log` for the executor). The job writes it, and memo-runner reads it as untrusted data |
 | `/run/systemd/system/memo-job@<id>.service.d/50-dispatch.conf` | root 0644 | See below. record-result removes it |
+| `/run/systemd/system/memo-job-install@<id>.service.d/50-dispatch.conf` | root 0644 | The install phase's drop-in. record-result `--phase=install` removes it |
+| `cache/` | memo-job:memo-job 0750 | Created by the install unit (`ExecStartPre=+`, lab-infra): this job's corepack, pnpm store and npm cache. Writable in the install phase only |
 
-The drop-in carries the per-job settings that a template cannot express with `%i`:
+The drop-ins carry the per-job settings that a template cannot express with `%i`. A job has two units: `memo-job@<id>` (the recipe) `Requires=` and comes `After=` `memo-job-install@<id>` (the dependency install), so the dispatcher starts only `memo-job@<id>` and systemd runs the install first. Recipe:
 
 ```ini
 [Service]
 WorkingDirectory=<worktree>
 ReadWritePaths=<worktree> /var/lib/memo-runner/jobs/<id>/out
 RuntimeMaxSec=<timeout_seconds>
-Environment=MEMO_JOB_ID=<job_id> MEMO_JOB_DISPATCH_ID=<id> MEMO_JOB_RECIPE=<recipe> MEMO_JOB_ALLOWED_ARGV=npm:test,make:test MEMO_JOB_WORKTREE=<worktree> MEMO_JOB_OUT=<out> MEMO_JOB_TIMEOUT_SECONDS=<n>
+PrivateNetwork=yes
+Environment=MEMO_JOB_ID=<job_id> MEMO_JOB_DISPATCH_ID=<id> MEMO_JOB_RECIPE=<recipe> MEMO_JOB_ALLOWED_ARGV=npm:test,make:test MEMO_JOB_WORKTREE=<worktree> MEMO_JOB_OUT=<out> MEMO_JOB_TIMEOUT_SECONDS=<n> MEMO_JOB_NETWORK=private
 ```
 
-`MEMO_JOB_ALLOWED_ARGV` joins tokens with `:` and shapes with `,`. Every value is checked against `[A-Za-z0-9._/@-]`, so nothing needs quoting and no `%` specifier or `$` expansion can appear. The drop-in never sets `ExecStart=`, `User=` or any sandboxing option. Those live only in the lab-infra template.
+Install (`TimeoutStartSec=` because the unit is `Type=oneshot`, where `RuntimeMaxSec=` has no effect; the argv shapes are the fixed install list, `INSTALL_ARGV`, equal to `server/runners/recipes.mjs`):
 
-Before it starts the unit, the dispatcher runs `systemctl show --property=DropInPaths --value memo-job@<id>.service` and checks that systemd sees the drop-in. If it does not, the dispatcher issues one `daemon-reload` and checks again. If systemd still does not see it, the request is refused as `dropin_not_loaded`.
+```ini
+[Service]
+WorkingDirectory=<worktree>
+ReadWritePaths=<worktree> /var/lib/memo-runner/jobs/<id>/out
+TimeoutStartSec=600
+Environment=... MEMO_JOB_ALLOWED_ARGV=npm:ci:--ignore-scripts,pnpm:install:--frozen-lockfile:--ignore-scripts ...
+```
+
+`PrivateNetwork=yes` is the one sandboxing option a drop-in sets: systemd.exec(5) says the option "might be impossible" to implement, so the dispatcher pins it (and `MEMO_JOB_NETWORK=private`, which makes the job-runner refuse the recipe if it sees any device but `lo`) whatever the template says. The IP allow and deny lists stay in the template. See docs/RUNNER_VPS.md, "Two phases".
+
+`MEMO_JOB_ALLOWED_ARGV` joins tokens with `:` and shapes with `,`. Every value is checked against `[A-Za-z0-9._/@-]`, so nothing needs quoting and no `%` specifier or `$` expansion can appear. The drop-in never sets `ExecStart=`, `User=` or any sandboxing option other than `PrivateNetwork=yes`. Those live only in the lab-infra template.
+
+Before it starts the unit, the dispatcher runs `systemctl show --property=DropInPaths --value` for `memo-job-install@<id>.service` and `memo-job@<id>.service` and checks that systemd sees both drop-ins. If it does not, the dispatcher issues one `daemon-reload` and checks again. If systemd still does not see it, the request is refused as `dropin_not_loaded`.
 
 **Deviation from spec §3:** `jobs/` and `jobs/<id>/` are 0751, not 0750. memo-job is not in the memo-runner group, and it must traverse both folders to reach `out/` by its exact path. The `x` bit for others allows that without letting it list them. `dispatch.json`, `cancel.json` and `status.json` stay 0640. The alternative is a `BindPaths=` of `out/` in the job template.
 
@@ -170,6 +185,9 @@ lab-infra declares the units (`ansible/roles/memo-bridge/templates/`, branch `fe
 | `memo-job@.service` | `AssertPathExists=/run/systemd/system/memo-job@%i.service.d/50-dispatch.conf` | a unit without its drop-in never starts. `DROPIN_NAME` here must stay `50-dispatch.conf` |
 | `memo-job@.service` | `ExecStart=/usr/bin/node /opt/memo-bridge/app/server/runners/job-runner.mjs --executor=systemd %i` | the unit mode of the job-runner (`server/runners/job-unit.mjs`): it checks the `MEMO_JOB_*` values against the instance and its working directory, re-detects the recipe and runs it only if it is one of `MEMO_JOB_ALLOWED_ARGV`, then appends the output to `jobs/<id>/out/job.log` itself (no `StandardOutput=append:`, which would write the same file twice) |
 | `memo-job@.service` | `ExecStopPost=+/usr/local/lib/memo-runner/record-result %i`, `KillMode=control-group`, `TimeoutStopSec=30`, `RuntimeMaxSec=` (ceiling; the drop-in lowers it) | decision D5, REQ-P4-16 |
+| `memo-job@.service` | `Requires=memo-job-install@%i.service`, `After=memo-job-install@%i.service`, `PrivateNetwork=yes`, `IPAddressDeny=any`, `IPAddressAllow=localhost` | the recipe runs only after a successful install, on its own loopback |
+| `memo-job-install@.service` | `Type=oneshot`, `AssertPathExists=/run/systemd/system/memo-job-install@%i.service.d/50-dispatch.conf`, `ExecStartPre=+install -d -o memo-job -g memo-job -m 0750 <root>/jobs/%i/cache`, `ReadWritePaths=<root>/jobs/%i/out <root>/jobs/%i/cache`, `ExecStart=/usr/bin/node .../job-runner.mjs --executor=systemd --phase=install %i`, `ExecStopPost=+/usr/local/lib/memo-runner/record-result --phase=install %i`, the network policy memo-job@ had before | phase 1: dependencies with the internet, no install scripts |
+| `memo-dev.slice` | `IPAddressDeny=` without `localhost` | a slice deny is combined with every unit's (systemd.resource-control(5)) and would block the recipe's private loopback; the install unit denies `localhost` itself |
 | `memo-bridge-runner.service` | `MEMO_BRIDGE_JOB_EXECUTOR=systemd`, `MEMO_BRIDGE_SPOOL_DIR=<root>/spool`, `MEMO_BRIDGE_JOBS_DIR=<root>/jobs` | the runtime refuses to start when these disagree with `<root>` (`MEMO_BRIDGE_RUNNER_ROOT`, default `/var/lib/memo-runner`), since the dispatcher only knows that layout |
 
 Use `%i`, not `%I`, in the template, because `%I` would unescape `-` in a dispatch id into `/`.
