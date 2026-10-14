@@ -42,14 +42,23 @@ test('dangerous list (spec D5): what asks, what does not', () => {
     ['operator_run', { argv: ['find', '/srv', '-delete'] }], ['operator_run', { argv: ['python3', '-c', 'print(1)'] }],
     ['operator_service', { unit: 'ssh.service', action: 'stop' }], ['operator_service', { unit: 'traefik.service', action: 'stop' }],
     ['operator_delete', { path: '/srv/x', recursive: true }], ['operator_edit', { path: '/etc/pam.d/sshd' }],
-    ['operator_move', { src: '/srv/a', dst: '/etc/passwd' }], ['operator_chmod', { path: '/etc/sudoers' }]
+    ['operator_move', { src: '/srv/a', dst: '/etc/passwd' }], ['operator_chmod', { path: '/etc/sudoers' }],
+    // Lot 3, the Mac (DEV-P6-25): AppleScript, launchd, open and the keychain CLI; the agent's own control files.
+    ['operator_run', { argv: ['osascript', '-e', 'do shell script "id"'] }], ['operator_run', { argv: ['/bin/launchctl', 'bootstrap', 'gui/501', 'x'] }],
+    ['operator_run', { argv: ['open', '-a', 'Terminal'] }], ['operator_run', { argv: ['security', 'find-generic-password', '-w'] }],
+    ['operator_run', { argv: ['mv', '/tmp/p.json', '/Users/memo/.memo-operator/policy.json'] }],
+    ['operator_run', { argv: ['chmod', '644', '/Users/memo/.MEMO-OPERATOR/policy.json'] }],
+    ['operator_run', { argv: ['cp', 'x.plist', '/Users/memo/Library/LaunchAgents/evil.plist'] }],
+    ['operator_run', { argv: ['tee', '/etc/memo-operator/policy.json'] }],
+    ['operator_edit', { path: '/Users/memo/Library/LaunchAgents/x.plist' }], ['operator_copy', { src: '/tmp/a', dst: '/Users/memo/.memo-operator/FROZEN' }]
   ];
   for (const [op, args] of yes) assert.notEqual(dangerReason(op, args), null, `${op} ${JSON.stringify(args)}`);
   const no = [
     ['operator_run', { argv: ['df', '-h'] }], ['operator_run', { argv: ['systemctl', 'status', 'ssh'] }],
     ['operator_run', { argv: ['systemctl', 'restart', 'beszel-agent.service'] }], ['operator_run', { argv: ['cat', '/etc/hostname'] }],
     ['operator_service', { unit: 'traefik.service', action: 'restart' }], ['operator_delete', { path: '/srv/rw/file' }],
-    ['operator_edit', { path: '/srv/rw/app.conf' }], ['operator_read', { path: '/etc/shadow' }]
+    ['operator_edit', { path: '/srv/rw/app.conf' }], ['operator_read', { path: '/etc/shadow' }],
+    ['operator_run', { argv: ['ls', '/Users/memo/memolabs'] }], ['operator_edit', { path: '/Users/memo/memolabs/notes/memo-operator.md' }]
   ];
   for (const [op, args] of no) assert.equal(dangerReason(op, args), null, `${op} ${JSON.stringify(args)}`);
   assert.equal(needsApproval('off', 'operator_script', {}, 3), false);
