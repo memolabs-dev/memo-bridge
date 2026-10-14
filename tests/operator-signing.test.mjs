@@ -20,14 +20,14 @@ test('AC-P6-03: a valid request passes once; replay, changed args, expiry and un
   const { signer, verifier, clock } = signingPair();
   const env = signer.sign(REQ);
   assert.equal(env.key_id, signer.keyId);
-  assert.deepEqual(verifier.verify(env, ctx()), { ok: true, tier: 0, keyId: signer.keyId });
+  assert.deepEqual(verifier.verify(env, ctx()), { ok: true, tier: 0, keyId: signer.keyId, approval: null });
   assert.deepEqual(verifier.verify(env, ctx()), { ok: false, error: 'replayed' }, 'same nonce twice');
 
   // One argument byte changed after signing.
   const env2 = signer.sign(REQ);
   assert.deepEqual(verifier.verify(env2, ctx({ args: { ...REQ.args, path: '/etc/shadow' } })), { ok: false, error: 'args_mismatch' });
   // The envelope's own fields edited: the signature breaks.
-  for (const field of [['tier', 3], ['op', 'operator_run'], ['host', 'mac'], ['exp', env2.exp + 1], ['args_sha256', 'f'.repeat(64)], ['principal', 'oidc:other']]) {
+  for (const field of [['tier', 3], ['op', 'operator_run'], ['host', 'mac'], ['exp', env2.exp + 1], ['args_sha256', 'f'.repeat(64)], ['principal', 'oidc:other'], ['approval', 'ap_' + 'z'.repeat(24)]]) {
     assert.deepEqual(verifier.verify({ ...signer.sign(REQ), [field[0]]: field[1] }, ctx()), { ok: false, error: 'signature_invalid' }, field[0]);
   }
   // Rides on another request id, op or principal than it was signed for.

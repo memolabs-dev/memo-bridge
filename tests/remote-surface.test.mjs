@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { RemoteAccessError, createRemoteServerFactory, parseRemoteConfig, remotePrincipalFor, remoteToolNames } from '../bridge/remote-surface.mjs';
 import { REMOTE_OPERATOR_TOOLS, REMOTE_TOOLS, REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE } from '../server/registry.mjs';
-import { CAPABILITIES, REMOTE_DEFAULT_CEILING, isPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
+import { CAPABILITIES, REMOTE_DEFAULT_CEILING, isPrincipal, makePrincipal, operatorTier } from '../server/coordinator/policy.mjs';
 import { createHub } from '../bridge/hub.mjs';
 import { createAgent, createRuntimeOperations, probeOperations } from '../bridge/agent.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
@@ -97,7 +97,11 @@ test('AC-P5-06/07: a read principal lists the read set; writes stay unlisted whi
   const listed = await claims.list();
   assert.ok(listed.includes('task_claim') && !listed.includes('worktree_push') && !listed.includes('jobs_submit'));
   // A principal minted with every capability (not through the ceiling) also lists the T0 operator tools.
-  assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), CONFIG), [...REMOTE_TOOLS_READ, ...REMOTE_OPERATOR_TOOLS].sort());
+  // (T0 only: the operator write tiers follow the write gate, closed here.)
+  assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), CONFIG),
+    [...REMOTE_TOOLS_READ, ...REMOTE_OPERATOR_TOOLS.filter(t => operatorTier(t) === 0)].sort());
+  assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), { ...CONFIG, remote_writes: 'enabled' }),
+    [...REMOTE_TOOLS, ...REMOTE_OPERATOR_TOOLS].sort());
   assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', REMOTE_DEFAULT_CEILING), CONFIG), [...REMOTE_TOOLS_READ].sort());
 });
 

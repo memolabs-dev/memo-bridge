@@ -51,7 +51,7 @@ test('policy schema: unknown keys, bad values and impossible grants are refused 
   for (const raw of bad) assert.throws(() => parseOperatorPolicy(raw), /invalid_operator_policy/, JSON.stringify(raw));
   // "~/" is a Mac form, expanded with the agent's home.
   const mac = parseOperatorPolicy(basePolicy({ host: 'mac', max_tier: 'exec', roots: { read: ['~/x'] }, denylist: ['~/private/**'],
-    frozen_file: '~/.memo-operator/FROZEN' }), { home: '/Users/owner', realpath: p => p });
+    frozen_file: '~/.memo-operator/FROZEN', repositories: { projects_root: '~/projects' } }), { home: '/Users/owner', realpath: p => p });
   assert.deepEqual([...mac.readRoots], ['/Users/owner/x']);
   assert.equal(mac.frozenFile, '/Users/owner/.memo-operator/FROZEN');
 });

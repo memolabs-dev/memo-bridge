@@ -28,6 +28,42 @@ Node 22+, pnpm 12.10.1. Every command ran from the worktree root. No deployment,
 | EV-P6-21 | regression | automated | existing tests updated on purpose: `oidc-verifier`, `policy-remote`, `public-listener`, `remote-surface` | the default ceiling now excludes `operator:*` (DEV-P6-03); a closed gate keeps `operator:read` when the ceiling holds it; `remoteToolNames` with every capability adds the T0 operator tools |
 | EV-P6-22 | U-P6-01 | inspection | `docs/HUB_SECURITY.md` lines 99 to 130, coordinator's hub journal note | Mac transport exists (launchd SSH tunnel 127.0.0.1:9444 to lab 9443); recorded as F-P6-01 |
 
+## Lot 2 (TODO-P6-08 to 11), branch `feat/phase-6-lot2`, 2026-10-14
+
+Commands run with `MEMO_BRIDGE_GOVERNANCE_ROOT=/Users/memo/memolabs/os/integrations/github`
+(F-P6-02: `~/projects` was moved by another session during Lot 2).
+
+| ID | AC / TODO | Method | Command | Result |
+|---|---|---|---|---|
+| EV-P6-23 | regression, all Lot 2 | automated | `pnpm test` | 440 tests, 440 pass (413 after the rebase on origin/main, plus 27 new operator tests) |
+| EV-P6-24 | environment | automated | `pnpm test` without the variable | 423 pass, 17 fail, all coordinator tests reading `issue_preflight.py` under the missing `~/projects/memolabs-org-gh` (F-P6-02); none in operator code |
+| EV-P6-25 | build, smoke | automated | `pnpm run build`, `pnpm run smoke` | build ok; smoke `{"ok":true,"tools":51,"roundTrip":true,...}` (stdio unchanged, DEV-P6-10) |
+| EV-P6-26 | AC-P6-01 | automated | `tests/operator-exec.test.mjs` "AC-P6-01" | `operator_run argv ["echo","a;id"]` prints `a;id`; `$(id)`, `|`, backticks and newlines come back as bytes; `"echo a; id"` as a program is `program_not_found` |
+| EV-P6-27 | AC-P6-02 (full) | automated | `tests/operator-write.test.mjs` "AC-P6-02" (2 tests), `operator-tools.test.mjs` | validator names outside the 9 presets refused by the schema; `json` runs in process; process presets get a fixed argv whose only variable slot is the agent's own temporary file; a failing or missing validator leaves the file untouched; `.git/config` refused for edit and chmod (`git_internal`) |
+| EV-P6-28 | AC-P6-13 (write tools) | automated | `tests/operator-write.test.mjs`, `operator-exec.test.mjs` | edit and delete in a default-branch checkout, and `operator_run` with that cwd, answer `use_dev_flow`; a write tier without `repositories` refuses to load |
+| EV-P6-29 | TODO-P6-08 | automated | `tests/operator-write.test.mjs` (8 tests) | edit modes, dry run and diff write nothing; backup before replace with the old content; mode kept; no temp file left; uploads check chunk size and SHA-256, back up the replaced file; copy leaves secrets behind and keeps symlinks as links; move and delete back up first; a failed backup refuses the delete; write roots protected; chmod refuses special bits |
+| EV-P6-30 | AC-P6-12 (background) | automated | `tests/operator-exec.test.mjs` "AC-P6-12 (background)" | `job.json` is on disk before the answer; a new store and tool set (simulated restart) read the stored result (exit 0, output); a dead supervisor gives `lost`; a timeout gives `timed_out` |
+| EV-P6-31 | AC-P6-09 (executor part) | automated | `tests/operator-root.test.mjs` "AC-P6-09 (executor)", "operator_script" | the executor receives `systemd-run --quiet --collect --wait --pipe --unit=memo-op-<hex> ... --property=RuntimeMaxSec=20s --property=MemoryMax=2G --property=TasksMax=512 --working-directory=/ --setenv=LANG=C -- id -u`; scripts run as `/bin/bash <0700 file> <args>`, file removed after. Real systemd on lab: runtime-pending |
+| EV-P6-32 | R-P6-04, R-P6-05 (helper) | automated | `tests/operator-root.test.mjs` "the helper checks..." | unsigned, tampered args, wrong tier, replay: refused by the helper's own verifier; five such refusals auto-freeze the helper; dangerous mode refuses a script or rm without a signed approval id; FROZEN refuses; only admitted calls reach the executor; every call in the helper journal |
+| EV-P6-33 | AC-P6-07 (helper ownership) | automated | `tests/operator-root.test.mjs` "over the socket" | over a real Unix socket the agent forwards T3 and appends its journal lines through the helper; the agent's chain object has no file; rewrite, truncate and unknown verbs are `invalid_request`; malformed lines refused; chain verifies; journal file 0600. Root ownership on lab: runtime-pending |
+| EV-P6-34 | AC-P6-05 | automated | `tests/operator-approval.test.mjs` "AC-P6-05" (2 tests) | real hub and agent: `rm` answers `pending_approval`, one Telegram message with Approve, Deny and 15 min buttons (callback_data within 64 bytes); asking again reuses it; `confirm:true` opens a separate approval; a stranger's button press is ignored; after the owner approves another file's rm is still pending; the exact call runs once, then asks again; deny holds; no bot gives `approval_unavailable`; a hub set to `off` with a host in `dangerous` gives `approval_required` from the host; `as_root` without `operator:root` is `forbidden` |
+| EV-P6-35 | AC-P6-04 (Telegram), AC-P6-11 (owner unfreeze) | automated | `tests/operator-approval.test.mjs` "AC-P6-04 (Telegram)" | `/freeze` from a stranger is ignored; from the owner chat it refuses T2 at the hub while T0 answers; the owner's `/unfreeze` clears the hub flag and the host's auto-freeze marker through the signed internal op; internal ops are `unsupported_op` through `requestOperator` |
+| EV-P6-36 | AC-P6-07 (anchoring) | automated | `tests/operator-approval.test.mjs` "AC-P6-07 (anchoring)" | the hub anchors the head; growth is accepted; a host journal rewritten as a new consistent chain is reported `operator_chain_tampered` and freezes the hub |
+| EV-P6-37 | TODO-P6-11 (Telegram client) | automated | `tests/operator-approval.test.mjs` "Telegram client" | errors carry method and status, never the token; requests go to `https://api.telegram.org/bot<token>/<method>` by POST; the `telegram-bot` credential is read like the other systemd credentials (missing, invalid, valid) |
+| EV-P6-38 | R-P6-11 | automated | `tests/operator-exec.test.mjs` "rate limits per tier" | T2 and T3 have their own per-minute budgets; tiers counted apart; defaults 120, 60, 20 |
+| EV-P6-39 | remote listing | automated | `tests/operator-remote.test.mjs` "Lot 2", `tests/remote-surface.test.mjs` | operator write, exec and root tools are listed only with remote_writes enabled, the ceiling and the scope; exec without root lists `operator_run` but not `operator_script` |
+| EV-P6-40 | mutation checks Lot 2 | automated | `node <scratchpad>/mutate2.mjs` (32 mutations) | 31 killed by their own test file; L30 (registry write-gate filter) survives `operator-remote.test.mjs` because the principal already loses write capabilities upstream (layer 2), and is killed by `tests/remote-surface.test.mjs` (re-run separately) |
+| EV-P6-41 | CLIs | runtime | `operator-agent-cli.mjs` with a read-only Mac policy at max_tier exec; `operator-root-cli.mjs` as the user | agent ready with 24 ops (22 tools, 2 internal); the root helper refuses to start unless uid 0 |
+| EV-P6-42 | docs read | inspection | systemd-run(1), systemd.service(5), systemd.resource-control(5), systemd.exec(5) on man7.org (262~devel), Telegram Bot API | quotes in `bridge/operator-root-helper.mjs` and `bridge/operator-telegram.mjs` headers; lab runs systemd 257 (U-P6-03 still open for the runtime check) |
+
+## Runtime checks pending (need lab or the owner)
+
+- AC-P6-09: a real `systemd-run` on lab: `id -u` prints 0, the unit is gone after the call,
+  RuntimeMaxSec and MemoryMax applied (`systemctl show` during a run).
+- AC-P6-07: `/var/log/memo-operator/audit.jsonl` owned by root 0600, `memo-operator` cannot
+  write it (`sudo -u memo-operator sh -c 'echo x >> ...'` fails).
+- AC-P6-04 and AC-P6-05 with the real bot (O-P6-2), polkit for `operator_service` (TODO-P6-12).
+
 ## Not verified in Lot 1 (owned by later lots)
 
 - AC-P6-01 (`operator_run`), AC-P6-05 (approval), AC-P6-09 (root helper), AC-P6-10 (owner,

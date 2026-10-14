@@ -14,34 +14,37 @@
   },
   "acceptance": {
     "total": 13,
-    "verified": 4,
-    "partially_verified": 4,
-    "failed": 0,
-    "pending": 5,
-    "verified_ids": [
+    "verified": [
+      "AC-P6-01",
+      "AC-P6-02",
       "AC-P6-03",
+      "AC-P6-05",
       "AC-P6-06",
       "AC-P6-11",
-      "AC-P6-13"
+      "AC-P6-13",
+      "AC-P6-12"
     ],
-    "partial_ids": {
-      "AC-P6-04": "FROZEN file and hub flag done; Telegram /freeze Lot 2",
-      "AC-P6-07": "chain and hub journal done; log not writable by memo-operator Lot 2",
-      "AC-P6-12": "bounding done; background run after restart Lot 2",
-      "AC-P6-02": "no caller string executed by any Lot 1 tool, .git/config refused; validator presets arrive with operator_edit in Lot 2"
+    "automated_part_verified_runtime_pending": {
+      "AC-P6-04": "Telegram through a fake client; real bot pending O-P6-2",
+      "AC-P6-07": "chain, helper-owned journal, anchoring; root ownership on lab pending",
+      "AC-P6-09": "systemd-run argv asserted; real systemd on lab pending"
     },
-    "pending_ids": [
-      "AC-P6-01",
-      "AC-P6-05",
-      "AC-P6-08",
-      "AC-P6-09",
-      "AC-P6-10"
-    ]
+    "pending": [
+      "AC-P6-08 (owner, ChatGPT)",
+      "AC-P6-10 (owner, ChatGPT)"
+    ],
+    "failed": 0
   },
   "todos": {
-    "p0_open": 6,
-    "p1_open": 2,
-    "p2_open": 0
+    "p0_open": 3,
+    "p1_open": 1,
+    "p2_open": 0,
+    "open_ids": [
+      "TODO-P6-12",
+      "TODO-P6-13",
+      "TODO-P6-14",
+      "TODO-P6-15"
+    ]
   },
   "owner_decisions_open": [
     "O-P6-2 Telegram bot",
@@ -57,8 +60,7 @@
     "high_open": 3
   },
   "unknowns_blocking": [
-    "U-P6-02",
-    "U-P6-03"
+    "U-P6-03 (runtime check only)"
   ],
   "ready_for_manual_acceptance": false,
   "owner_decisions_closed": {
@@ -129,7 +131,7 @@
     },
     "TODO-P6-06": {
       "status": "DONE",
-      "note": "chain head anchoring in the hub moved to Lot 2 with the root helper (DEV-P6-06)",
+      "note": "chain head anchoring done in Lot 2 (DEV-P6-21)",
       "evidence": [
         "EV-P6-13",
         "EV-P6-20"
@@ -146,16 +148,46 @@
       ]
     },
     "TODO-P6-08": {
-      "status": "TODO"
+      "status": "DONE",
+      "evidence": [
+        "EV-P6-27",
+        "EV-P6-28",
+        "EV-P6-29",
+        "EV-P6-40"
+      ]
     },
     "TODO-P6-09": {
-      "status": "TODO"
+      "status": "DONE",
+      "note": "lab-infra must set KillMode=process (DEV-P6-17)",
+      "evidence": [
+        "EV-P6-26",
+        "EV-P6-30",
+        "EV-P6-38",
+        "EV-P6-40"
+      ]
     },
     "TODO-P6-10": {
-      "status": "TODO"
+      "status": "DONE",
+      "note": "runtime checks on lab pending (AC-P6-09, AC-P6-07 ownership)",
+      "evidence": [
+        "EV-P6-31",
+        "EV-P6-32",
+        "EV-P6-33",
+        "EV-P6-40",
+        "EV-P6-41",
+        "EV-P6-42"
+      ]
     },
     "TODO-P6-11": {
-      "status": "TODO"
+      "status": "DONE",
+      "note": "real bot pending owner action O-P6-2",
+      "evidence": [
+        "EV-P6-34",
+        "EV-P6-35",
+        "EV-P6-36",
+        "EV-P6-37",
+        "EV-P6-40"
+      ]
     },
     "TODO-P6-12": {
       "status": "TODO"
@@ -171,15 +203,39 @@
     }
   },
   "unknowns_resolved": {
-    "U-P6-01": "transport exists: launchd SSH tunnel 127.0.0.1:9444 to lab 9443 (F-P6-01); reuse in Lot 3"
+    "U-P6-01": "transport exists: launchd SSH tunnel 127.0.0.1:9444 to lab 9443 (F-P6-01); reuse in Lot 3",
+    "U-P6-02": "new bot, owner chat id configured (DEV-P6-20)"
   },
   "later": [
-    "Lot 2 must require a repositories section in the policy before any write tool ships (DEV-P6-12)",
     "stdio registration of operator tools (Lot 3, DEV-P6-10)",
     "docs/HUB_SECURITY.md and SECURITY.md: operator identities, operator key, freeze file (TODO-P6-14)",
     "lab-infra: operator-signing.key, operator-*.pub, remote.json oidc.ceiling with operator:read (TODO-P6-12)",
     "regex search runs on the agent event loop; a pathological pattern that passes the nested-quantifier check can still stall one agent (consider a worker with a timeout)",
     "hub freeze flag set in memory is lost on hub restart; the freeze file is the durable switch",
-    "hub journal operator_call keeps redacted args: confirm journald retention is acceptable for the owner"
-  ]
+    "hub journal operator_call keeps redacted args: confirm journald retention is acceptable for the owner",
+    "background root scripts stay in the helper state directory until a cleanup job exists",
+    "pending approvals and the in-memory hub freeze flag are lost on a hub restart (the freeze file is durable)",
+    "catalog and governance defaults still point at ~/projects, which no longer exists (F-P6-02)",
+    "search and regex edit run on the agent event loop; consider a worker with a timeout",
+    "lab-infra: KillMode=process, RuntimeDirectory for the socket, polkit rule, telegram-bot credential, MEMO_BRIDGE_TELEGRAM_CHAT_ID, MEMO_BRIDGE_OPERATOR_APPROVAL (TODO-P6-12)"
+  ],
+  "lot_2": {
+    "status": "automated verification passed; one bounded self-review done; runtime checks pending",
+    "branch": "feat/phase-6-lot2",
+    "commits": [
+      "236d573",
+      "bee50f5",
+      "ecf4828",
+      "2f31939",
+      "42c4cae"
+    ],
+    "tests": {
+      "before": 413,
+      "after": 440,
+      "mutations_killed": "32/32 (L30 by tests/remote-surface.test.mjs)"
+    },
+    "deviations": "spec.md section 13, Lot 2 (DEV-P6-15 to 24, F-P6-02)",
+    "evidence": "evidence.md EV-P6-23 to EV-P6-42",
+    "environment_note": "run tests with MEMO_BRIDGE_GOVERNANCE_ROOT=~/memolabs/os/integrations/github (F-P6-02)"
+  }
 }

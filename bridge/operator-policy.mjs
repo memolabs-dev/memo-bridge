@@ -17,7 +17,13 @@
 //   rate_limits     {write, exec, root}                calls per minute per tier (D6 defaults 120, 60, 20)
 //   frozen_file     abs path                           FROZEN switch, checked on every call (D6)
 //   audit_file      abs path                           hash-chained host journal (D7)
-//   repositories    {projects_root, registry_file?, layout_root?}  for the D11 repository guard
+//   repositories    {projects_root, registry_file?, layout_root?}  for the D11 repository guard;
+//                   required from max_tier "write" up (Lot 2): no write tool without the guard
+//   state_dir       abs path, writable by the agent: background runs, uploads, auto-freeze
+//                   marker (default: the directory of audit_file)
+//   run_env_allow   ["NAME", ...] environment names a caller may set on operator_run, on top of
+//                   LANG, LC_ALL, TZ, TERM, NO_COLOR; loader and linker variables are refused
+//   root_helper     {socket: abs path} the root helper's Unix socket; required for "root" (vps)
 // Paths are absolute; "~/" is accepted on the Mac only and expands to the agent user's home.
 //
 // The file itself must be trustworthy before anything in it is believed: a regular file (no
@@ -39,12 +45,16 @@ const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_LIST = 128;
 const MAX_PATH_CHARS = 1024;
 const KEYS = Object.freeze(['version', 'host', 'max_tier', 'roots', 'units', 'containers', 'approval_mode', 'denylist',
-  'rate_limits', 'frozen_file', 'audit_file', 'repositories']);
+  'rate_limits', 'frozen_file', 'audit_file', 'repositories', 'state_dir', 'run_env_allow', 'root_helper']);
 const REQUIRED = Object.freeze(['version', 'host', 'max_tier', 'roots', 'frozen_file', 'audit_file']);
 // systemd unit names (systemd.unit(5)): name, optional instance, a known suffix.
 export const UNIT_RE = /^[A-Za-z0-9][A-Za-z0-9:_.@-]{0,120}\.(service|socket|timer|target|path|mount)$/;
 export const CONTAINER_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const GLOB_RE = /^(\/|~\/|\*\*\/)[^\0]{1,250}$/;
+export const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
+// Names that change what a program loads or runs: never settable by a caller.
+export const FORBIDDEN_ENV_RE = /^(PATH|HOME|USER|SHELL|IFS|ENV|BASH_ENV|BASH_FUNC_.*|LD_.*|DYLD_.*|NODE_.*|PYTHON.*|PERL.*|RUBY.*|GIT_.*|SSH_.*|GCONV_PATH|LOCPATH|SYSTEMD_.*|CREDENTIALS_DIRECTORY|PROMPT_COMMAND|PS4)$/;
+export const DEFAULT_RUN_ENV = Object.freeze(['LANG', 'LC_ALL', 'TZ', 'TERM', 'NO_COLOR']);
 
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -123,6 +133,18 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
     repositories = Object.freeze(Object.fromEntries(Object.entries(raw.repositories)
       .map(([key, value]) => [key, policyPath(value, `repositories.${key}`, ctx)])));
   }
+  // Lot 2 rule: no write tier without the repository guard (DEV-P6-12).
+  if (maxTier >= TIERS.indexOf('write') && repositories === null) throw invalid('repositories');
+  const runEnvAllow = list(raw.run_env_allow, 'run_env_allow', n => typeof n === 'string' && ENV_NAME_RE.test(n) && !FORBIDDEN_ENV_RE.test(n));
+  let rootHelper = null;
+  if (raw.root_helper !== undefined) {
+    if (host !== 'vps') throw invalid('root_helper');
+    onlyKeys(raw.root_helper, ['socket'], 'root_helper');
+    rootHelper = Object.freeze({ socket: policyPath(raw.root_helper.socket, 'root_helper.socket', ctx) });
+  }
+  if (maxTier === TIERS.indexOf('root') && rootHelper === null) throw invalid('root_helper');
+  const auditFile = policyPath(raw.audit_file, 'audit_file', ctx);
+  const stateDir = raw.state_dir === undefined ? dirname(auditFile) : policyPath(raw.state_dir, 'state_dir', ctx);
   const read = canonicalRoots([...readPaths, ...writePaths], realpath);
   const write = canonicalRoots(writePaths, realpath);
   return Object.freeze({
@@ -141,7 +163,10 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
     denylist: Object.freeze(denylist),
     rateLimits: Object.freeze(rateLimits),
     frozenFile: policyPath(raw.frozen_file, 'frozen_file', ctx),
-    auditFile: policyPath(raw.audit_file, 'audit_file', ctx),
+    auditFile,
+    stateDir,
+    runEnvAllow: Object.freeze([...DEFAULT_RUN_ENV, ...runEnvAllow.filter(n => !DEFAULT_RUN_ENV.includes(n))]),
+    rootHelper,
     repositories,
     home
   });
@@ -209,6 +234,8 @@ export function policySummary(policy) {
     approval_mode: policy.approvalMode,
     extra_denylist: [...policy.denylist],
     rate_limits_per_minute: { ...policy.rateLimits },
-    repository_guard: policy.repositories !== null
+    repository_guard: policy.repositories !== null,
+    run_env_allow: [...policy.runEnvAllow],
+    root_helper: policy.rootHelper !== null
   };
 }

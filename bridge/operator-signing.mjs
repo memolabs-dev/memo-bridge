@@ -7,12 +7,14 @@
 // any request without a valid one.
 //
 // Signed statement: canonical JSON of
-//   {v:1, id, op, host, tier, principal, args_sha256, exp, nonce}
+//   {v:1, id, op, host, tier, principal, args_sha256, exp, nonce, approval}
 // where id is the wire request id, host the operator host ("mac" | "vps") the hub routes to,
 // tier the op's tier (0..3), principal the forwarded principal id, args_sha256 the SHA-256 of
 // the canonical JSON of the arguments, exp a Unix time in ms at most 60 s ahead, nonce 128
 // random bits. The agent recomputes args_sha256 from the arguments it received, so changing one
-// argument byte breaks the signature (AC-P6-03).
+// argument byte breaks the signature (AC-P6-03). approval (Lot 2) is the id of the owner's
+// Telegram approval the hub consumed for this exact call, or null: an agent or the root helper
+// whose own policy requires an approval refuses a signed call that carries none.
 //
 // Limit (spec D4, stated plainly): the key lives on lab next to the hub, so root on lab can
 // sign. Signing protects the Mac and the root helper from anything that reaches the hub's agent
@@ -26,6 +28,7 @@ export const NONCE_CACHE_MAX = 4096;
 const NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
 const SIG_RE = /^[A-Za-z0-9_-]{86}$/;         // 64 bytes, base64url
 const KEY_ID_RE = /^[0-9a-f]{16}$/;
+export const APPROVAL_ID_RE = /^ap_[A-Za-z0-9_-]{16,40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -45,7 +48,7 @@ export function operatorKeyId(publicKeyPem) {
 
 const statement = fields => Buffer.from(`memo-bridge-operator-v1\n${canonicalJson({
   v: SIGNATURE_VERSION, id: fields.id, op: fields.op, host: fields.host, tier: fields.tier, principal: fields.principal,
-  args_sha256: fields.args_sha256, exp: fields.exp, nonce: fields.nonce
+  args_sha256: fields.args_sha256, exp: fields.exp, nonce: fields.nonce, approval: fields.approval ?? null
 })}`, 'utf8');
 
 // Hub side. privateKeyPem: the operator signing key. Returns sign({id, op, host, tier,
@@ -57,9 +60,9 @@ export function createOperatorSigner({ privateKeyPem, now = Date.now, ttlMs = DE
   if (!Number.isInteger(ttlMs) || ttlMs < 1_000 || ttlMs > MAX_SKEW_MS) throw new Error('invalid ttl');
   return Object.freeze({
     keyId,
-    sign({ id, op, host, tier, principal, args }) {
+    sign({ id, op, host, tier, principal, args, approval = null }) {
       const fields = { id, op, host, tier, principal, args_sha256: argsSha256(args), exp: now() + ttlMs,
-        nonce: random(16).toString('base64url') };
+        nonce: random(16).toString('base64url'), approval: typeof approval === 'string' && APPROVAL_ID_RE.test(approval) ? approval : null };
       return { key_id: keyId, ...fields, sig: sign(null, statement(fields), key).toString('base64url') };
     }
   });
@@ -73,7 +76,8 @@ function wellFormed(env) {
     && typeof env.principal === 'string' && env.principal.length <= 130
     && typeof env.args_sha256 === 'string' && HEX64.test(env.args_sha256)
     && Number.isInteger(env.exp) && typeof env.nonce === 'string' && NONCE_RE.test(env.nonce)
-    && typeof env.sig === 'string' && SIG_RE.test(env.sig);
+    && typeof env.sig === 'string' && SIG_RE.test(env.sig)
+    && (env.approval === undefined || env.approval === null || (typeof env.approval === 'string' && APPROVAL_ID_RE.test(env.approval)));
 }
 
 // Agent (and, in Lot 2, root helper) side.
@@ -118,7 +122,7 @@ export function createOperatorVerifier({ publicKeys, host, now = Date.now, maxEn
       if (seen.has(env.nonce)) return { ok: false, error: 'replayed' };
       if (seen.size >= maxEntries) return { ok: false, error: 'nonce_cache_full' };
       seen.set(env.nonce, env.exp);
-      return { ok: true, tier: env.tier, keyId: env.key_id };
+      return { ok: true, tier: env.tier, keyId: env.key_id, approval: env.approval ?? null };
     }
   });
 }

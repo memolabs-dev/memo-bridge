@@ -30,6 +30,11 @@ const GITHUB_READ_OPS = new Set(['github_issues', 'github_pull_requests', 'githu
 // Ops answered by the hub itself (no agent, no capability beyond authentication).
 export const HUB_LOCAL_OPS = Object.freeze(['list_hosts', 'bridge_info']);
 export const HOSTS = Object.freeze(['mac', 'vps']);
+export const OPERATOR_INTERNAL_OPS = Object.freeze(['operator_audit_head', 'operator_owner_unfreeze']);
+// Hub waits for operator ops (ms). A foreground operator_run or operator_script waits for its
+// own timeout_s plus a margin (bridge/hub.mjs operatorTimeout); these are the floors.
+const OPERATOR_TIMEOUTS = Object.freeze({ operator_edit: 60_000, operator_upload_complete: 120_000, operator_copy: 300_000,
+  operator_move: 120_000, operator_delete: 300_000, operator_run: 60_000, operator_script: 60_000, operator_service: 120_000 });
 // Phase 6 (spec D2): each host also runs an operator agent, a separate process with its own
 // identity key (operator-mac.pub, operator-vps.pub in the hub's secrets), so it never replaces
 // the probe agent or the runtime on the hub's one-connection-per-identity table. Tools name the
@@ -69,8 +74,12 @@ export const OPS = Object.freeze(Object.fromEntries([
   // (bridge/hub.mjs requestOperator). tier 0..3; mutating from T1 up. 30 s covers the 20 s
   // search budget (spec D10).
   ...Object.entries(OPERATOR_OPERATION_CAPABILITY).map(([name, capability]) => [name, entry(name, {
-    kind: 'operator', capability, tier: operatorTier(name), mutating: operatorTier(name) > 0, timeoutMs: TIMEOUTS.default,
-    checkResult: genericResult })])
+    kind: 'operator', capability, tier: operatorTier(name), mutating: operatorTier(name) > 0,
+    timeoutMs: OPERATOR_TIMEOUTS[name] ?? TIMEOUTS.default, checkResult: genericResult })]),
+  // Internal operator ops: sent by the hub itself (chain anchoring every 15 min, the owner's
+  // Telegram /unfreeze), never listed as a tool, never callable through requestOperator.
+  ...OPERATOR_INTERNAL_OPS.map(name => [name, entry(name, { kind: 'operator', internal: true, capability: null, tier: 0,
+    mutating: false, timeoutMs: TIMEOUTS.default, checkResult: genericResult })])
 ]));
 export const OPERATOR_OPS = Object.freeze(Object.values(OPS).filter(o => o.kind === 'operator').map(o => o.name));
 export const isOperatorOp = op => Object.hasOwn(OPS, op) && OPS[op].kind === 'operator';

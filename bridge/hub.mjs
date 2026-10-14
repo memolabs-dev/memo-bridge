@@ -29,9 +29,11 @@ import {
 } from './protocol.mjs';
 import { AGENT_IDS, HOSTS, HUB_LOCAL_OPS, HUB_PRINCIPALS, OPERATOR_AGENT_IDS, OPERATOR_OPS, OPS, PRINCIPAL_IDS, RUNTIME_OPS, collectToolDefinitions,
   denialReason, isForwardable, isOperatorOp, servableBy } from './ops.mjs';
-import { authorize } from '../server/coordinator/policy.mjs';
+import { OPERATOR_TIER_CAPABILITIES, authorize, operatorCallTier } from '../server/coordinator/policy.mjs';
 import { collectOperatorDefinitions } from '../server/registry.mjs';
-import { createOperatorSigner } from './operator-signing.mjs';
+import { argsSha256, createOperatorSigner } from './operator-signing.mjs';
+import { createApprovalStore } from './operator-approvals.mjs';
+import { dangerReason, needsApproval } from './operator-dangerous.mjs';
 import { journalArgs } from './operator-audit.mjs';
 import { sha256Hex } from './operator-output.mjs';
 
@@ -70,6 +72,15 @@ export function createHub(options) {
     try { lstatSync(freezeFile); return true; } catch (error) { return error?.code !== 'ENOENT'; }
   };
   const hubFrozen = () => operatorFrozen || fileFrozen();
+  // Phase 6 Lot 2: approvals (in memory), the Telegram bot (attachOperatorBot), approval mode
+  // per host (default dangerous on both, fail closed without a bot), chain anchors.
+  const approvals = createApprovalStore(operator?.now ? { now: operator.now } : {});
+  const approvalModes = { mac: 'dangerous', vps: 'dangerous', ...(operator?.approvalModes ?? {}) };
+  for (const mode of Object.values(approvalModes)) if (!['off', 'dangerous', 'all_root'].includes(mode)) throw new Error('invalid operator approval mode');
+  let bot = null;
+  const anchors = new Map();
+  const anchorIntervalMs = operator?.anchorIntervalMs ?? 15 * 60_000;
+  let anchorTimer = null;
   let operatorDefs = null;
   const agents = new Map();   // host -> connection
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
@@ -92,9 +103,10 @@ export function createHub(options) {
     if (gate.runtimeEnabled && definitions) for (const op of RUNTIME_OPS) {
       if (definitions.has(op) && !denialReason(principal, op, gate)) ops.push(op);
     }
-    // Lot 1: T0 operator tools for a principal holding operator:read (hub:owner).
+    // Operator tools for a principal holding their capability (hub:owner): T0 always, T1 to T3
+    // only with MEMO_BRIDGE_HUB_MUTATING_OPS=owner, like every other write on this listener.
     if (signer && operatorDefs) for (const op of OPERATOR_OPS) {
-      if (operatorDefs.has(op) && OPS[op].tier === 0 && authorize(principal, op)) ops.push(op);
+      if (operatorDefs.has(op) && (OPS[op].tier === 0 || gate.mutatingOps === 'owner') && authorize(principal, op)) ops.push(op);
     }
     return ops.sort();
   }
@@ -139,35 +151,120 @@ export function createHub(options) {
   // tool's own host argument by the caller), signed for exactly these arguments. The principal
   // must already be authorized for the op (remote surface or 9443 listing); the agent checks the
   // tier against its local policy again.
-  function requestOperator(host, op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
-    if (!signer) return Promise.resolve(fail('operator_disabled'));
-    if (!isOperatorOp(op)) return Promise.resolve(fail('unsupported_op'));
-    if (!Object.hasOwn(OPERATOR_AGENT_IDS, host) || args?.host !== host) return Promise.resolve(fail('invalid_arguments'));
-    if (!principal?.id || !authorize(principal, op)) return Promise.resolve(fail('forbidden'));
-    const tier = OPS[op].tier;
+  async function requestOperator(host, op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
+    if (!signer) return fail('operator_disabled');
+    if (!isOperatorOp(op) || OPS[op].internal) return fail('unsupported_op');
+    if (!Object.hasOwn(OPERATOR_AGENT_IDS, host) || args?.host !== host) return fail('invalid_arguments');
+    // The call's tier: operator_run with as_root is T3 and needs operator:root (spec D1).
+    const tier = operatorCallTier(op, args);
+    if (!principal?.id || !authorize(principal, op) || !principal.capabilities?.has(OPERATOR_TIER_CAPABILITIES[tier])) return fail('forbidden');
+    // approval_status is answered here: approvals live in the hub (TODO-P6-11).
+    if (op === 'approval_status') return approvals.status(args.approval_id, host);
     const frozen = hubFrozen();
     if (hubFreezeDenial(tier, frozen)) {
       record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'frozen'});
-      return Promise.resolve(fail('frozen'));
+      return fail('frozen');
+    }
+    const hash = argsSha256(args);
+    let approval = null;
+    const mode = approvalModes[host];
+    if (needsApproval(mode, op, args, tier)) {
+      const call = { host, op, argsSha256: hash, principal: principal.id };
+      approval = approvals.consume(call);
+      if (!approval) {
+        if (!bot) {
+          record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'approval_unavailable'});
+          return fail('approval_unavailable');
+        }
+        const reason = dangerReason(op, args) ?? (tier === 3 ? 'root' : 'policy');
+        const asked = approvals.request({ ...call, reason });
+        if (asked.error) return fail(asked.error);
+        if (asked.created) {
+          try {
+            await bot.notifyApproval(asked.approval, { host, op, principal: principal.id, args: journalArgs(args), args_sha256: hash, reason,
+              expires_at: new Date(asked.approval.expires).toISOString() });
+          } catch {
+            approvals.drop(asked.approval.id);
+            record('operator_approval_unsent', OPERATOR_AGENT_IDS[host], {principal: principal.id, op});
+            return fail('approval_unavailable');
+          }
+          record('operator_approval_requested', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, tier, reason, args_sha256: hash,
+            approval_id: asked.approval.id});
+        }
+        return { ok: false, error: 'pending_approval', approval_id: asked.approval.id, expires_at: new Date(asked.approval.expires).toISOString(),
+          detail: 'the owner was asked in Telegram; poll approval_status, then repeat this exact call once it is approved' };
+      }
     }
     const id = newId();
     const started = Date.now();
-    const signature = signer.sign({ id, op, host, tier, principal: principal.id, args });
-    return sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, requestId, clientSession, id, operator: signature }).then(out => {
-      const data = op === 'operator_freeze_status' && out && out.ok !== false
-        ? { ...out, hub_frozen: frozen, frozen_above_t0: Boolean(out.frozen_above_t0) || frozen } : out;
-      // Hub journal (spec D7): tier, args hash and redacted args, outcome, duration, output hash.
-      // The wire id matches the host journal's request id when no request id travelled.
-      record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
-        args_sha256: signature.args_sha256, args: journalArgs(args), outcome: data?.ok === false ? 'refused' : 'ok',
-        code: data?.ok === false && CODE_RE.test(String(data.error)) ? data.error : null, ms: Date.now() - started,
-        output_sha256: sha256Hex(data ?? null) });
-      return data;
-    });
+    const signature = signer.sign({ id, op, host, tier, principal: principal.id, args, approval });
+    // A foreground run or script waits for its own timeout plus a margin.
+    const foreground = ['operator_run', 'operator_script'].includes(op) && args.background !== true;
+    const timeoutMs = foreground ? Math.max(OPS[op].timeoutMs, ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 30) * 1000) : undefined;
+    const out = await sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, requestId, clientSession, id, operator: signature, timeoutMs });
+    const data = op === 'operator_freeze_status' && out && out.ok !== false
+      ? { ...out, hub_frozen: frozen, frozen_above_t0: Boolean(out.frozen_above_t0) || frozen } : out;
+    // Hub journal (spec D7): tier, args hash and redacted args, approval, outcome, duration, output
+    // hash. The wire id matches the host journal's request id when no request id travelled.
+    record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
+      args_sha256: signature.args_sha256, args: journalArgs(args), approval_id: approval, outcome: data?.ok === false ? 'refused' : 'ok',
+      code: data?.ok === false && CODE_RE.test(String(data.error)) ? data.error : null,
+      exit_code: Number.isInteger(data?.exit_code) ? data.exit_code : null, ms: Date.now() - started, output_sha256: sha256Hex(data ?? null) });
+    return data;
   }
+
   function setOperatorFrozen(value, by) {
     operatorFrozen = value === true;
     record(operatorFrozen ? 'operator_frozen' : 'operator_unfrozen', null, {by: typeof by === 'string' ? by.slice(0, 64) : 'owner'});
+  }
+
+  // Internal operator ops (never tools): signed by the hub as hub:owner.
+  function sendInternal(host, op, args) {
+    if (!signer || !OPS[op]?.internal) return Promise.resolve(fail('unsupported_op'));
+    const id = newId();
+    const principal = HUB_PRINCIPALS[PRINCIPAL_IDS.owner];
+    const signature = signer.sign({ id, op, host, tier: 0, principal: principal.id, args });
+    return sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, id, operator: signature });
+  }
+  // The owner's Telegram /unfreeze: the hub flag, then each host's auto-freeze (signed internal
+  // op). The FROZEN files stay the owner's to remove on the hosts.
+  async function ownerUnfreeze(by = 'owner') {
+    setOperatorFrozen(false, by);
+    const hosts = {};
+    for (const host of Object.keys(OPERATOR_AGENT_IDS)) {
+      if (!agents.has(OPERATOR_AGENT_IDS[host])) continue;
+      const out = await sendInternal(host, 'operator_owner_unfreeze', { host, by: String(by).slice(0, 64) });
+      hosts[host] = out?.ok === true ? (out.cleared ? 'auto_freeze_cleared' : 'not_auto_frozen') : (out?.error ?? 'failed');
+    }
+    return hosts;
+  }
+  // Spec D7: every anchorIntervalMs the hub asks each operator agent for its chain head and the
+  // hash of the last line it anchored. A shorter chain or a changed anchored line means the host
+  // journal was rewritten: the hub journals it and freezes operator access above T0.
+  async function anchorChains() {
+    const results = {};
+    for (const host of Object.keys(OPERATOR_AGENT_IDS)) {
+      if (!agents.has(OPERATOR_AGENT_IDS[host])) continue;
+      const last = anchors.get(host) ?? null;
+      const out = await sendInternal(host, 'operator_audit_head', { host, ...(last ? { since_seq: last.seq } : {}) });
+      if (out?.ok !== true || typeof out.head !== 'string' || !Number.isInteger(out.seq)) {
+        record('operator_anchor_failed', OPERATOR_AGENT_IDS[host], { code: out?.error ?? 'invalid' });
+        results[host] = 'failed';
+        continue;
+      }
+      const rewritten = last && (out.seq < last.seq || out.at?.hash !== last.hash);
+      if (rewritten || out.chain_ok === false) {
+        record('operator_chain_tampered', OPERATOR_AGENT_IDS[host], { anchored_seq: last?.seq ?? null, seq: out.seq, chain_ok: out.chain_ok,
+          first_broken_line: out.first_broken_line ?? null });
+        setOperatorFrozen(true, 'chain_check');
+        results[host] = 'tampered';
+        continue;
+      }
+      if (out.seq > 0) anchors.set(host, { seq: out.seq, hash: out.head });
+      record('operator_chain_anchor', OPERATOR_AGENT_IDS[host], { seq: out.seq, head: out.head });
+      results[host] = 'anchored';
+    }
+    return results;
   }
 
   function settle(id, value) {
@@ -380,17 +477,21 @@ export function createHub(options) {
       if (signer && !operatorDefs) operatorDefs = await collectOperatorDefinitions();
       await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,bind,resolve);});
       pinger = setInterval(heartbeat, pingIntervalMs); pinger.unref();
+      if (signer && anchorIntervalMs > 0) { anchorTimer = setInterval(() => { anchorChains().catch(() => {}); }, anchorIntervalMs); anchorTimer.unref(); }
       return server.address();
     },
     async stop(){
-      clearInterval(pinger);
+      clearInterval(pinger); clearInterval(anchorTimer); bot?.stop?.();
       for (const id of [...pending.keys()]) settle(id, fail('shutting_down'));
       for (const ws of wss.clients) ws.terminate();
       await new Promise(resolve=>server.close(resolve));
     },
     inventory, requestAgent, requestOperator, availableOps,
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
-    setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null,
+    setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
+    operatorApprovals: approvals,
+    // The Telegram bot (bridge/operator-telegram.mjs), built by hub-cli with the hub's owner hooks.
+    attachOperatorBot(value) { bot = value; },
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }
   };
 }
