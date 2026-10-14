@@ -16,8 +16,9 @@ import { JOB_TOOLS, registerJobTools } from './tools/job-tools.mjs';
 import { HOST_TOOLS, registerHostTools } from './tools/host-tools.mjs';
 import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
+import { MEMORY_TOOLS, registerMemoryTools } from './tools/memory-tools.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
-import { MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
+import { MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
 
 const VERSION = '0.6.0';
 
@@ -31,7 +32,8 @@ const TOOL_GROUPS = {
   coordinate: [...COORDINATOR_TOOLS],
   run: [...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS],
   github: [...GITHUB_TOOLS],
-  audit: [...AUDIT_TOOLS]
+  audit: [...AUDIT_TOOLS],
+  memory: [...MEMORY_TOOLS]
 };
 const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
 
@@ -49,7 +51,7 @@ const server = new McpServer({
     'branch, never force-push, never merge and never deploy. Jobs run the repository\'s own test/build/lint scripts, which you ' +
     'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +
     'only, no private data or credentials) and stop when the claim ends; elsewhere they are refused unless the owner set ' +
-    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent. ' + MULTI_SESSION_INSTRUCTIONS
+    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent. ' + MULTI_SESSION_INSTRUCTIONS + ' ' + MEMORY_INSTRUCTIONS
 });
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -172,5 +174,6 @@ registerJobTools(server, getRuntime);
 registerHostTools(server, getRuntime);
 registerGithubTools(server, getRuntime);
 registerAuditTools(server, getRuntime);
+registerMemoryTools(server, getRuntime);
 
 await server.connect(new StdioServerTransport());

@@ -40,12 +40,12 @@ async function v3Database(t) {
   return dir;
 }
 
-test('schema v4: a v3 database migrates in place, keeps every row, and the new columns work', async t => {
-  assert.equal(SCHEMA_VERSION, 4);
+test('schema v4 (and v5 on top): a v3 database migrates in place, keeps every row, and the new columns work', async t => {
+  assert.equal(SCHEMA_VERSION, 5);
   const dir = await v3Database(t);
   const store = openSqliteStore({ dir });
   t.after(() => store.close());
-  assert.equal(store.settings().schema_version, 4);
+  assert.equal(store.settings().schema_version, SCHEMA_VERSION);
 
   const kept = await store.transaction(repo => ({
     workspace: repo.getWorkspace('ws_AAAAAAAAAAAAAAAA'), claim: repo.getClaim('a'.repeat(32)),
@@ -79,7 +79,7 @@ test('schema v4: migrating twice, or from an older user_version with the columns
   raw.close();
   const store = openSqliteStore({ dir });
   t.after(() => store.close());
-  assert.equal(store.settings().schema_version, 4);
+  assert.equal(store.settings().schema_version, SCHEMA_VERSION);
   const db = new DatabaseSync(join(dir, 'coordinator.sqlite'));
   assert.deepEqual(columns(db, 'events').filter(c => ['via', 'client_type', 'request_id'].includes(c)), ['via', 'client_type', 'request_id']);
   assert.equal(columns(db, 'workspaces').filter(c => c === 'client_session').length, 1);
@@ -90,7 +90,7 @@ test('a database newer than the code is refused, as before', async t => {
   const dir = await tempStateDir(t);
   await openSqliteStore({ dir }).close();
   const raw = new DatabaseSync(join(dir, 'coordinator.sqlite'));
-  raw.exec('PRAGMA user_version = 5');
+  raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
   raw.close();
   assert.throws(() => openSqliteStore({ dir }), /state_schema_newer_than_code/);
 });

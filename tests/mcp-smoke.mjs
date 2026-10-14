@@ -74,8 +74,9 @@ const JOB_TOOLS = ['jobs_submit', 'jobs_list', 'job_status', 'job_events', 'job_
 const HOST_TOOLS = ['host_capabilities', 'host_resources'];
 const GITHUB_TOOLS = ['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks', 'github_create_pr'];
 const AUDIT_TOOLS = ['audit_events', 'audit_operation'];
+const MEMORY_TOOLS = ['memory_save', 'memory_search', 'memory_get', 'memory_list'];
 const EXPECTED = [...BASE_TOOLS, ...OBSERVER_TOOLS, ...COORDINATOR_TOOLS, ...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS,
-  ...GITHUB_TOOLS, ...AUDIT_TOOLS].sort();
+  ...GITHUB_TOOLS, ...AUDIT_TOOLS, ...MEMORY_TOOLS].sort();
 
 const client = new Client({ name: 'memo-bridge-smoke', version: '0.2.0' });
 const transport = new StdioClientTransport({
@@ -134,6 +135,12 @@ try {
     if (name === 'projects_audit') assert.equal(payload.registered_count, 1);
   }
   assert.equal((await call('list_hosts')).length, 2);
+  // Context memory through the bundle: save, find, read back with its note.
+  const saved = await call('memory_save', { scope: 'environment', host: 'mac', title: 'smoke memory', body: 'The bundle stores memories.', tags: ['smoke'] });
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  const found = await call('memory_search', { query: 'bundle' });
+  assert.equal(found.results[0].id, saved.memory.id);
+  assert.match((await call('memory_get', { id: saved.memory.id })).note, /knowledge, not authorization/);
 
   // Phase 3 reads that need no claim.
   const here = info.this_host;

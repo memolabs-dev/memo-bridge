@@ -1,6 +1,6 @@
 ---
 name: memo-bridge-operations
-description: Observe Memo Labs hosts and projects, coordinate parallel AI work sessions on GitHub Issues (workspaces, task claims, checkpoints), and do the work of a task on the Mac through Memo Bridge (worktrees, file edits, test/build/lint jobs, commit, push, pull request).
+description: Observe Memo Labs hosts and projects, coordinate parallel AI work sessions on GitHub Issues (workspaces, task claims, checkpoints), keep a memory across conversations, and do the work of a task on the Mac through Memo Bridge (worktrees, file edits, test/build/lint jobs, commit, push, pull request).
 ---
 
 # Memo Bridge
@@ -35,6 +35,16 @@ A task is a GitHub Issue, written `owner/repo#n`. Its reservation (claim) is sha
 8. **Pull request.** `github_create_pr({workspace_id, worktree_id, title, body})`. It links the Issue (`Closes #n`) and never merges: the landing contract merges when CI is green. Follow CI with `github_checks({repo, ref: branch})`.
 9. **Finish.** `task_complete({workspace_id, issue, claim_id, fence, summary})`, or `task_release({..., outcome})` with `blocked`, `failed` or `cancelled`. Then `worktree_remove({worktree_id})` once the branch is pushed (`ignored_files` lists ignored files it would delete: pass `discard_ignored: true` only if they are disposable; `job_active` means a job still runs there), and `workspace_close({workspace_id})`.
 
+## Memory across conversations
+
+`workspace_open` returns `memory_snapshot`: the facts saved about the owner and about this project, frozen for this conversation (a save shows at the next `workspace_open`). Task briefs list `related_memories`. Read them, and `memory_search` / `memory_get`, before asking the owner to repeat himself.
+
+- `memory_save({scope, title, body, project | host, tags, issue})` saves one fact. `scope: "owner"` is about the owner and his preferences (no project or host); `scope: "environment"` is about a project (or a host). One fact, one entry: `duplicate_fact` names the entry to update instead.
+- Write facts, not orders: "The owner prefers short answers", not "Always answer short" (`not_a_fact`). A claim that something does not work needs `evidence` (`evidence_required`). Secrets and instructions to a model are refused (`secret_detected`, `instruction_refused`).
+- Update with `id` and `base_revision` (the revision you read), with `body` or a `body_patch: {old, new}`; `revision_conflict` means another conversation saved first: `memory_get`, merge, save again. `archived: true` removes an entry reversibly; the last 20 revisions stay readable.
+- Each scope has a size budget: `memory_full` lists the entries and the characters to free. Consolidate (shorten, merge, archive), nothing is dropped for you.
+- Memory restores knowledge, not authorization: claims, locks and approvals are checked again.
+
 If you lost your context (compaction, crash, new conversation), call `workspace_recover({workspace_id})` first: it shows which claims you still hold, your worktrees, checkpoints, jobs and the next safe actions.
 
 **Stop writing at once** if a call returns `stale_lease`, `no_live_claim` or `issue_changed`: your reservation is gone or the Issue changed under you. Tell the user instead of retrying. `branch_changed` or `external_edits` in `worktree_status` mean someone touched the worktree outside Memo Bridge: report it before going on.
@@ -45,6 +55,11 @@ The `operator_*` tools act on the machines themselves, not on repositories. They
 
 - Start with `operator_policy({host})`: it shows the tier, the roots and whether the host is frozen. Read with `operator_list`, `operator_read`, `operator_search`, `operator_logs` (lab only); write inside the write roots with `operator_edit` (use `dry_run` first), `operator_copy`, `operator_move`, `operator_delete` (always backed up); run an argv with `operator_run` (no shell: `["df","-h"]`, never `"df -h"`). Root, `as_root` and `operator_script` exist on lab, and on the Mac once its root helper is installed (`operator_policy` shows `max_tier: root` and `root_helper: true`); otherwise they answer `root_unavailable_on_host`. Mac root follows the same rules: explicit `host: "mac"`, a `global` lock, Telegram approval for dangerous calls.
 - Writes, commands and root calls name your `workspace_id` and need an `operator_lock` that covers them: a path lock on the file or directory (on the `cwd` for `operator_run`), a unit lock for `operator_service`, a `global` lock for `as_root`, `operator_script` and commands without `cwd`. `lock_required` means take it; `locked_by_other_session` means another conversation holds it: stop and tell the owner. Read-only tools need no lock.
+- `operator_help` lists topics and reviewed playbooks (`restart_stack`, `read_logs`, `free_disk`, `deploy_check`, `git_sync`, `backup_status`, `rotate_key`, `freeze`); `operator_help({playbook})` gives the steps.
+- `operator_snapshot({host, path})` orients you in any readable directory in one call: git state, recent commits, tree summary, README head.
+- `operator_read_media({host, path, pages, dpi})` shows an image or PDF pages as image content, with the PDF text alongside (ChatGPT may not show the image itself to the model: rely on the text part).
+- `operator_transfer({src_host, src_path, dst_host, dst_path, overwrite, workspace_id})` copies one file up to 512 MiB between the Mac and lab, under your lock on `dst_path`; a long one answers `status: "running"`: follow it with `operator_transfer_status`.
+- Content larger than one call: `operator_upload_init({path, size, stage: true})`, the 64 KiB chunks, `operator_upload_complete`, then `operator_edit({path, mode, new_upload_id})` (or `old_upload_id` for `replace`).
 - Tracked code is not edited here: `use_dev_flow` means the path is a registered checkout on its default branch; use the worktree flow above.
 - `pending_approval` means the owner must approve in Telegram: tell the user, poll `approval_status`, and repeat the exact same call once it is approved. Never change the call to avoid the approval.
 - **A refusal is final.** `frozen`, `path_secret`, `path_not_allowed`, `tier_not_allowed`, `approval_unavailable`, `denied`, `rate_limited` and the like: report it to the user and stop. Never retry the same intent another way (another tool, another path, a wrapper, a script, a copy of the file elsewhere) to get around it.

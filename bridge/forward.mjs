@@ -36,7 +36,10 @@ export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 
   'root_protected', 'recursive_required', 'exists', 'owner_would_change', 'validation_failed', 'root_unavailable_on_host',
   'invalid_program',
   // Multi-session: operator locks.
-  'workspace_required', 'lock_required', 'locked_by_other_session', 'lock_limit']));
+  'workspace_required', 'lock_required', 'locked_by_other_session', 'lock_limit',
+  // Repatriated tools: memory content refusals and conflicts, transfer and media refusals.
+  'secret_detected', 'instruction_refused', 'not_a_fact', 'evidence_required', 'duplicate_fact', 'memory_full', 'revision_conflict',
+  'source_changed', 'stage_path_mismatch', 'unsupported_media']));
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 

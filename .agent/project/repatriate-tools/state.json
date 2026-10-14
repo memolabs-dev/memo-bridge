@@ -1,0 +1,10 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "Repatriated SentinelX tools, part 2: operator_transfer, operator_read_media, operator_help + playbooks, memory_*, operator_snapshot, staged edits",
+  "branch": "feat/operator-repatriate-tools",
+  "requirements": { "total": 10, "covered": 10 },
+  "acceptance": { "total": 10, "verified_automated": 10, "pending_manual": ["AC-3 ChatGPT image visibility", "AC-1 real tunnel transfer"] },
+  "todos": { "p0_open": 0, "p1_open": 3, "open": ["T11 lab-infra deploy and poppler-utils (owner)", "T12 manual acceptance from ChatGPT", "T13 merge with part 1"] },
+  "risks": { "critical_open": 0, "high_open": 0, "medium_open": ["R1 transfer moves data between hosts (denylist, roots, lock, journals)", "R3 ChatGPT may not show images", "memory edits not owner-approved (journaled and reversible instead)"] },
+  "verification": { "pnpm_test": "514/514", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "3/3 caught" }
+}

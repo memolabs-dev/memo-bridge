@@ -7,8 +7,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { MEMORY_SCHEMA, memoryRepository } from './memory-store.mjs';
 
-export const SCHEMA_VERSION = 4;
+// v5: context memory across conversations (server/coordinator/memory-store.mjs), additive.
+export const SCHEMA_VERSION = 5;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -447,6 +449,7 @@ function migrate(db) {
       if (current < 2) db.exec(SCHEMA_V2);
       if (current < 3) db.exec(SCHEMA_V3);
       if (current < 4) migrateV4(db);
+      if (current < 5) db.exec(MEMORY_SCHEMA);
       if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
@@ -499,7 +502,7 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
     db.close();
     throw error;
   }
-  const repo = repository(db);
+  const repo = { ...repository(db), ...memoryRepository(db) };
   // One connection per process: serialize transactions so concurrent MCP calls in the same
   // process never interleave inside BEGIN/COMMIT. Cross-process exclusion is SQLite's lock.
   let queue = Promise.resolve();

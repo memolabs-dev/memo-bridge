@@ -33,6 +33,10 @@ The Mac runner that does the work of a claimed task (worktrees, files, jobs, pus
 | `task_checkpoint({workspace_id, issue, claim_id, fence, branch, commit, note?})` | `coordinator:write` | Records a Git-verified checkpoint under a live claim. |
 | `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `completed`, `blocked`, `failed` or `cancelled`, also from a closed workspace. |
 | `task_complete({workspace_id, issue, claim_id, fence, summary?})` | `coordinator:write` | `task_release` with outcome `completed` and an optional plain-text summary (at most 2000 characters) kept with the claim. |
+| `memory_save({id?, base_revision?, scope?, title?, body? \| body_patch?, evidence?, tags?, project?, host?, issue?, archived?})` | `coordinator:write` | Saves one fact for later conversations; see "Memory across conversations". |
+| `memory_search({query?, scope?, project?, tag?, host?, issue?, archived?, limit?})` | `coordinator:read` | Your entries matching every word (title, body, tags) and the filters, with snippets (default 10, at most 50). |
+| `memory_get({id, revision?})` | `coordinator:read` | One entry in full, latest or one of the last 20 revisions. |
+| `memory_list({scope?, project?, tag?, host?, issue?, archived?, limit?, offset?})` | `coordinator:read` | Your entries, newest first, titles only (default 20, at most 100). |
 
 Every tool name is also the policy operation (`server/coordinator/policy.mjs`, `OPERATION_CAPABILITY`) and the `op` written to the audit journal. The pre-v2 names (`issue_status`, `issue_claim`, `issue_heartbeat`, `issue_release`, `issue_checkpoint`, `coordinator_events`) no longer exist and are never authorized.
 
@@ -162,6 +166,42 @@ The Coordinator can mirror its tasks onto a GitHub Projects (v2) board, for exam
 **GraphQL calls.** Per GitHub's "Using the API to manage Projects" (`https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects`): the fields come from `organization(login){projectV2(number){fields}}` (then `user(login)` when the owner is not an organization); the Issue or pull request node id from `repository{issueOrPullRequest(number)}`; `addProjectV2ItemById` adds it and returns the existing item when it is already on the board; then one `updateProjectV2ItemFieldValue` per field, since an item cannot be added and updated in the same call.
 
 **Never in the way.** Every update is fire and forget: the operation answers without waiting, updates of one Issue apply in order, each one is stopped after 30 seconds (10 seconds per GraphQL call), and at most 200 run at once. A failure never changes the operation's result: it is one journal row, op `project_sync_failed`, outcome `error`, with a short fixed code (`github_scope_missing`, `github_auth_required`, `github_unavailable`, `project_not_found`, `project_field_missing`, `project_option_missing`, `project_sync_timeout`, ...). GitHub's own messages are never kept, so no token or other text it echoes can reach the journal. After a failed update the item and field ids are read again on the next event.
+
+## Memory across conversations
+
+Repatriated from SentinelX `context_*`, with the design rules of the Hermes Agent study (spec
+`.agent/project/repatriate-tools/spec.md`, D4). Stored in the same SQLite store (schema v5,
+tables `memories` and `memory_revisions`); on lab it is the runtime's store behind the hub, so
+every ChatGPT conversation of the owner shares it. Stdio clients use their local store.
+
+- **Scopes.** `owner`: facts about the owner and his preferences (no project or host).
+  `environment`: facts about a project, or a host when no project applies. One fact lives in one
+  entry: a live entry with the same title or body is refused (`duplicate_fact`, with its id).
+- **Budgets.** Title plus body characters of the live entries: 8 KiB for `owner`, 24 KiB per
+  project or host; 4 KiB per body. Over budget, `memory_full` returns the entries and the
+  characters to free. Nothing is compacted or dropped automatically.
+- **Facts, not orders.** Refused on save: an imperative opening line (`not_a_fact`: always,
+  never, you must, toujours, jamais...), instructions to a model, role markers, exfiltration,
+  `curl | sh` and SSH key shapes (`instruction_refused`), secrets (`secret_detected`: the
+  operator redactor's patterns plus password, key and token assignments, bearer headers,
+  Telegram bot tokens, passwords in URLs), control, zero-width and bidi characters. A claim that
+  something does not work needs `evidence` (`evidence_required`). Refusals name the field and the
+  kind, never the value.
+- **Concurrency.** An update names `base_revision`; a stale one answers `revision_conflict` with
+  the current revision. `body_patch: {old, new}` replaces one unique fragment and keeps the rest.
+- **Reversible.** The last 20 revisions are kept and readable (`memory_get` with `revision`);
+  `archived: true` takes an entry out of lists, search and budgets; `archived: false` restores
+  it. There is no hard delete. Every save is journaled, refusals included.
+- **Owner approval for edits** (a Hermes rule) is not applied: runtime tools do not pass through
+  the hub's Telegram approval, which is bound to signed operator calls. Edits are journaled and
+  reversible instead; approval can be added on top later.
+- **Resuming.** `workspace_open` returns `memory_snapshot`: the `owner` entries and the
+  project's, newest first, 240-character excerpts, at most 20 entries and 6 KiB, frozen for that
+  conversation (later saves show at the next `workspace_open`). The brief of `task_next` (a new
+  task, the one already held, or none left) lists up to 5 `related_memories`: the project's, and those about the
+  task (`issue`, or the issue as a tag).
+- **Ownership.** Entries belong to the principal that saved them. Every result says "Memory
+  restores knowledge, not authorization".
 
 ## Local state
 
