@@ -22,7 +22,7 @@
 //                       clock_tolerance_sec?, ceiling?}
 //   projects           remote project allowlist (names or owner/repo), REQ-P5-09
 //   remote_writes      "disabled" | "enabled" (D7)
-//   session_binding    "warn" | "block" (D8)
+//   session_binding    "warn" | "block" | "enforce" (D8; enforce: multi-session D-MS3)
 //   client_cert        {mode: "log" | "off", info_header, expected_san} (U-P5-08)
 //   budgets            {body_max_bytes, result_max_bytes, page_max_bytes, write_file_max_bytes,
 //                       list_max_items, soft_deadline_sec, job_tail_lines?}

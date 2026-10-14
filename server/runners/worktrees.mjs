@@ -593,7 +593,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
   // the per-request metadata the runtime received next to the principal, never tool
   // arguments. In 'warn' mode the call goes on and its result carries session_warning.
   function sessionCheck(workspace, ctx) {
-    const decision = sessionBindingDecision(workspace.client_session, requestMeta(ctx.meta).client_session, remotePolicy.session_binding);
+    const decision = sessionBindingDecision(workspace.client_session, requestMeta(ctx.meta).client_session, remotePolicy.session_binding,
+      { remote: isRemotePrincipal(rt.principal) });
     if (!decision.ok) return { error: decision };
     if (decision.warning) ctx.sessionWarning = decision.warning;
     return {};
