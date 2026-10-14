@@ -535,7 +535,7 @@ const appSettings = { [APP_ENV.id]: String(APP_ID), [APP_ENV.installationId]: St
 
 test('agent-cli: starts with the App and no PAT; refuses an unusable App without ledger-gh; logs a fallback to the PAT', async t => {
   const app = await startCli(t, { [APP_KEY_CREDENTIAL]: TEST_PEM }, appSettings);
-  const ready = app.stderr().split('\n').filter(Boolean).map(l => JSON.parse(l)).find(e => e.event === 'runtime_ready');
+  const ready = app.stderr().split('\n').filter(l => l.startsWith('{')).map(l => JSON.parse(l)).find(e => e.event === 'runtime_ready');
   assert.ok(ready, app.stderr());
   assert.deepEqual(ready.github_auth, { app: 'configured', ledger: 'app', push: 'app' });
   assert.equal(ready.push_credential, true);
@@ -552,7 +552,7 @@ test('agent-cli: starts with the App and no PAT; refuses an unusable App without
 
   const ledgerPat = pat();
   const fallback = await startCli(t, { [APP_KEY_CREDENTIAL]: 'junk\n', [LEDGER_CREDENTIAL]: `${ledgerPat}\n` }, appSettings);
-  const lines = fallback.stderr().split('\n').filter(Boolean).map(l => JSON.parse(l));
+  const lines = fallback.stderr().split('\n').filter(l => l.startsWith('{')).map(l => JSON.parse(l));
   assert.deepEqual(lines.find(e => e.event === 'github_app_unusable')?.code, 'app_key_invalid');
   assert.deepEqual(lines.find(e => e.event === 'runtime_ready')?.github_auth, { app: 'app_key_invalid', ledger: 'pat', push: 'missing' });
   assert.ok(!fallback.stderr().includes(ledgerPat));
