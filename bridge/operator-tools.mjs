@@ -28,18 +28,18 @@ export const LIMITS = Object.freeze({
 // Skipped while walking, as SentinelX does (research §3): big, never what the owner looks for.
 export const NOISE_DIRS = Object.freeze(new Set(['.git', 'node_modules', '.venv', 'venv', '__pycache__', '.cache', '.next',
   '.pnpm-store', '.tox', '.mypy_cache', '.pytest_cache', 'DerivedData']));
-const SAFE_ENV = Object.freeze({ PATH: '/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin:/usr/local/bin', LANG: 'C.UTF-8',
+export const SAFE_ENV = Object.freeze({ PATH: '/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin:/usr/local/bin', LANG: 'C.UTF-8',
   LC_ALL: 'C.UTF-8', SYSTEMD_COLORS: '0', SYSTEMD_PAGER: '', PAGER: 'cat' });
 
 const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
 
 // Run one fixed argv without a shell. Resolves {code, signal, stdout, stderr, timedOut,
 // truncated}; never rejects (a missing binary answers code null, error 'spawn_failed').
-export function runArgv(argv, { timeoutMs = LIMITS.commandTimeoutMs, maxBytes = LIMITS.commandMaxBytes, env = SAFE_ENV } = {}) {
+export function runArgv(argv, { timeoutMs = LIMITS.commandTimeoutMs, maxBytes = LIMITS.commandMaxBytes, env = SAFE_ENV, cwd } = {}) {
   return new Promise(resolve => {
     let child;
     try {
-      child = spawn(argv[0], argv.slice(1), { shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: { ...env } });
+      child = spawn(argv[0], argv.slice(1), { shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: { ...env }, ...(cwd ? { cwd } : {}) });
     } catch { resolve({ code: null, error: 'spawn_failed', stdout: '', stderr: '', timedOut: false, truncated: false }); return; }
     const out = []; const err = []; let size = 0; let truncated = false; let timedOut = false;
     const take = (chunks, chunk) => {
@@ -305,7 +305,8 @@ export function createOperatorTools(policy, { run = runArgv, projects = catalogP
 
     async operator_audit_verify() {
       if (!chain) return fail('audit_unavailable');
-      const v = chain.verify();
+      let v;
+      try { v = await chain.verify(); } catch { return fail('audit_unavailable'); }
       return { ok: true, host: policy.host, chain_ok: v.ok, lines: v.lines, head: v.head,
         ...(v.ok ? {} : { first_broken_line: v.first_broken_line, reason: v.reason }) };
     }
