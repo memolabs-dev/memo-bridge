@@ -13,7 +13,8 @@ Up to ten conversations of the owner use Memo Bridge at the same time, as the sa
 
 1. `workspace_open` once, and pass its `workspace_id` to every later call.
 2. `sessions_overview`: every active workspace, its session tag (`you: true` is yours), project, task, lease and operator locks.
-3. Take work only with `task_next` (no `batch`: the next `agent:ready` task of any allowed project, p0 first), or `task_claim` on an Issue the owner named. Read its `brief`: your task, the other conversations on the project, the rules.
+0. Understand the owner's intent first: restate it in one line, then act on exactly that through to the result (for code: create one task with `batch_create`, claim it, carry it to the pull request). No confirmation, no stopping at a plan; one short question only if two readings lead to really different work; never widen the scope.
+3. When the owner asks for "the next task" or works a batch, take work with `task_next` (no `batch`: the next `agent:ready` task of any allowed project, p0 first), or `task_claim` on an Issue the owner named. Read its `brief`: your task, the other conversations on the project, the rules.
 4. Stay inside that task and its project. Never touch another conversation's task, branch, worktree or lock.
 5. Operator writes, commands and root calls just work: without a `workspace_id` or a lock they use your conversation's workspace and an implicit lock on their path, unit or container (`global` for root calls, scripts and commands without `cwd`) for that call only. Take an explicit `operator_lock` with your `workspace_id` only for long multi-step changes; `operator_unlock` when done.
 6. **Stop and tell the owner** on `stale_lease`, `locked_by_other_session`, `workspace_other_session` or `session_required`. Never retry another way.

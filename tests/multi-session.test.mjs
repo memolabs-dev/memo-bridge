@@ -467,6 +467,9 @@ test('MS-R11: the instructions, the skill and the docs carry the start sequence 
     ...STOP_CODES];
   for (const text of [MULTI_SESSION_INSTRUCTIONS, REMOTE_INSTRUCTIONS]) for (const rule of rules) assert.ok(text.includes(rule), rule);
   assert.ok(REMOTE_INSTRUCTIONS.includes(OPERATOR_HOST_INSTRUCTIONS));
+  // Owner, 2026-10-14 21:37: "il doit comprendre mon intention". Intent first, act through to the result, no scope creep.
+  for (const phrase of ["understand the owner's intent", 'restate in one line', 'without stopping at a plan', 'never widen the scope', 'batch_create'])
+    assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(phrase) && REMOTE_INSTRUCTIONS.includes(phrase), phrase);
   for (const word of ['Mac ou VPS ?', 'host_required', 'as_root', 'operator_script']) assert.ok(OPERATOR_HOST_INSTRUCTIONS.includes(word), word);
   const stdio = readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8');
   assert.ok(stdio.includes('MULTI_SESSION_INSTRUCTIONS'));
