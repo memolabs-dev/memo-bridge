@@ -96,7 +96,7 @@ has repaired one real thing remotely.
   their own local policy file. Limit, stated plainly: the hub key lives on lab, so a root
   compromise of lab can sign. Signing protects the Mac and the root helper from anything that
   reaches the hub socket without the key (ingress bug, forged agent traffic), not from lab root.
-- **D5. Approval (owner decision pending, default `dangerous`).** `approval_mode` per host:
+- **D5. Approval (owner decided 2026-10-14: `dangerous` on lab).** `approval_mode` per host:
   `off`, `dangerous` or `all_root`. In `dangerous` mode a call matching the dangerous list goes
   to Telegram: fixed owner chat, buttons Approve, Deny, Approve this exact command for 15 min.
   The tool answers `pending_approval{approval_id}`; `approval_status` polls it. Approval binds
@@ -179,7 +179,7 @@ unfreeze, self-update, chown below T3 (use `operator_run as_root`).
 | R-P6-07 | Hash-chained host audit the agent user cannot rewrite; hub journal with redacted args and hashes | P0 |
 | R-P6-08 | Secret denylist on T0 and T1 paths, output redaction, untrusted content wrapper | P0 |
 | R-P6-09 | Atomic edits with backup, presets only, delete with backup | P1 |
-| R-P6-10 | Approval in `dangerous` mode via Telegram, bound to args hash, fail closed without a bot | P1 (P0 if the owner keeps `dangerous`) |
+| R-P6-10 | Approval in `dangerous` mode via Telegram, bound to args hash, fail closed without a bot | P0 (owner chose `dangerous`) |
 | R-P6-11 | Rate limits per tier and auto-freeze on denial bursts | P1 |
 | R-P6-12 | Responses bounded at 128 KiB with omission metadata; background runs stored before send | P1 |
 | R-P6-13 | Repository guard D11 | P1 |
@@ -248,7 +248,7 @@ Total: about 56 h of agent work, so 5 to 7 working days, delivered in three usab
 
 ## 9. Owner-only actions (one batch, about 15 min)
 
-- O-P6-1: decide `approval_mode` on lab: `off`, `dangerous` (recommended), `all_root`.
+- O-P6-1: done 2026-10-14, `approval_mode: dangerous` on lab.
 - O-P6-2: create a Telegram bot with @BotFather and store its token on lab by the command the
   runbook gives (never in chat), then send `/start` to it so the bot learns the chat id.
   Needed only for `dangerous`, `all_root` and remote `/freeze`.
