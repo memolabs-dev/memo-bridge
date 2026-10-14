@@ -257,3 +257,7 @@ Whether Pocket ID issues `typ: at+jwt` with a `client_id` claim and the expected
 (U-P5-02), whether ChatGPT sends an `Origin` header and its client certificate on every call
 (U-P5-08), the token lifetime (R-P5-11), the ChatGPT timeout (U-P5-03) and the stability of
 `openai/session` (U-P5-05). Until then these are documented or inferred, not observed.
+
+## Premier cycle réel
+
+Le 14 octobre 2026, ce changement a été effectué depuis ChatGPT Chat.
