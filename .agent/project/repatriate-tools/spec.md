@@ -132,3 +132,21 @@ Stages are removed after a real edit, and expire after 1 h.
 | R6 | git config in a snapshotted repo runs a program (fsmonitor) | `-c core.fsmonitor=false`, status and log only, no hooks run by these |
 | R7 | PDF parsing of a hostile file | PDFKit/poppler out of process, 30 s timeout, size and page bounds |
 | R8 | Merge conflicts with part 1 | new files; shared files touched by a few lines (listed in the closure) |
+
+## Work graph
+
+| ID | TODO | Priority | State | Evidence |
+|---|---|---|---|---|
+| T1 | Spec, decisions, acceptance, risks | P0 | DONE | this file, commit 83ec583 |
+| T2 | Memory store v5, operations, tools, snapshot at workspace_open, brief | P0 | DONE | `tests/memory.test.mjs` (8), EV-1 |
+| T3 | Hermes rules for memory (coordinator input) | P0 | DONE | D4 above, `tests/memory.test.mjs` |
+| T4 | Transfer: source ops, hub orchestrator, binary passthrough | P0 | DONE | `tests/operator-transfer.test.mjs` (7) |
+| T5 | read_media: sniff, images, sips, PDFKit, poppler, MCP image content | P0 | DONE | `tests/operator-media.test.mjs` (9) |
+| T6 | operator_help and 8 playbooks | P1 | DONE | `tests/operator-snapshot-help.test.mjs` |
+| T7 | operator_snapshot | P1 | DONE | `tests/operator-snapshot-help.test.mjs` |
+| T8 | Staged edit uploads | P1 | DONE | `tests/operator-snapshot-help.test.mjs` |
+| T9 | Wiring: definitions, policy, ops, agent, CLI, hub, remote surface, smoke | P0 | DONE | full suite, build, smoke (EV-2) |
+| T10 | Docs: OPERATOR.md, COORDINATOR.md, instructions, skill | P1 | DONE | commit 6fe91c7 |
+| T11 | lab-infra: poppler-utils on lab, redeploy hub, runner and operator agents, reinstall the Mac agent | P1 | OPEN (owner, outside this repo) | evidence.md "Deployment" |
+| T12 | Live check from ChatGPT: image visible or not, a real Mac to lab transfer over the tunnel | P1 | OPEN (manual acceptance) | evidence.md "Manual acceptance" |
+| T13 | Merge with part 1 (feat/operator-repatriate-exec): 7 files conflict, all adjacent additions | P1 | OPEN (after part 1 lands) | evidence.md "Merge" |
