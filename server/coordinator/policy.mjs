@@ -77,7 +77,12 @@ export const OPERATION_CAPABILITY = Object.freeze({
   audit_events: CAPABILITIES.READ,
   audit_operation: CAPABILITIES.READ,
   // Catalogue (Phase 5, FU-4): served by the runtime so a hub client can discover project names.
-  projects_list: CAPABILITIES.READ
+  projects_list: CAPABILITIES.READ,
+  // Context memory across conversations (repatriated SentinelX context_*): the runtime's store.
+  memory_save: CAPABILITIES.WRITE,
+  memory_search: CAPABILITIES.READ,
+  memory_get: CAPABILITIES.READ,
+  memory_list: CAPABILITIES.READ
 });
 
 // Phase 6 operator ops (spec §4). Kept apart from OPERATION_CAPABILITY on purpose: those are

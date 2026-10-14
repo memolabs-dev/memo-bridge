@@ -16,6 +16,7 @@ import { JOB_TOOLS, registerJobTools } from './tools/job-tools.mjs';
 import { HOST_TOOLS, registerHostTools } from './tools/host-tools.mjs';
 import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
+import { MEMORY_TOOLS, registerMemoryTools } from './tools/memory-tools.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 import { MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
 
@@ -31,7 +32,8 @@ const TOOL_GROUPS = {
   coordinate: [...COORDINATOR_TOOLS],
   run: [...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS],
   github: [...GITHUB_TOOLS],
-  audit: [...AUDIT_TOOLS]
+  audit: [...AUDIT_TOOLS],
+  memory: [...MEMORY_TOOLS]
 };
 const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
 
@@ -172,5 +174,6 @@ registerJobTools(server, getRuntime);
 registerHostTools(server, getRuntime);
 registerGithubTools(server, getRuntime);
 registerAuditTools(server, getRuntime);
+registerMemoryTools(server, getRuntime);
 
 await server.connect(new StdioServerTransport());

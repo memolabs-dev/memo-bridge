@@ -22,6 +22,7 @@ import { remotePolicyFromEnv, remoteProjectRefusal, requestMeta, sessionBindingD
 import { ACTIVE_JOB_STATUSES } from '../runners/executor.mjs';
 import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
+import { MEMORY_NOTE, createMemoryOperations } from './memory.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
 import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
   isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
@@ -50,7 +51,7 @@ const REMOTE_HOST = 'vps';
 const UNCERTAIN = new Set(['ledger_unavailable', 'ledger_outcome_unknown']);
 const MAX_LIST = 200;
 const WRITES = new Set(['workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete',
-  'task_checkpoint', 'batch_create', 'task_next']);
+  'task_checkpoint', 'batch_create', 'task_next', 'memory_save']);
 // Phase 5 remote guards (D8, D9, REQ-P5-15), applied around the operations whatever the caller:
 // - the project allowlist binds remote principals when they open or extend work; giving work
 //   back (release, complete, close) stays possible after a project leaves the allowlist;
@@ -348,6 +349,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   const syncing = (ids, meta) => ({ onFailure: code => note('project_sync_failed', 'error', code, ids, meta) });
   const read = fn => store.transaction(repo => fn(repo, now()), { write: false });
   const write = fn => store.transaction(repo => fn(repo, now()));
+  // Context memory across conversations (spec D4 of the repatriated tools): server/coordinator/memory.mjs.
+  const memory = createMemoryOperations({ read, write, principal });
 
   // Shared precondition for every operation that names a workspace.
   async function ownedWorkspace(workspaceId, { requireActive = true } = {}) {
@@ -581,6 +584,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   // same project, the rules. Fixed server text around identifiers; nothing from the Issue.
   async function briefFor(workspace, task, meta) {
     const others = await othersOn(workspace.project_id, workspace.id);
+    // What earlier conversations saved about this project or this task (titles only).
+    const memories = await memory.related(workspace.project_id, task?.issue ?? null);
     return { you: { session_tag: sessionTag(meta?.client_session) ?? sessionTag(workspace.client_session), workspace_id: workspace.id },
       task: task?.issue ?? null, title: task?.title ?? null, project: workspace.project_id,
       others_on_project: others,
@@ -588,6 +593,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         ? `You work on ${task.issue} in ${workspace.project_id}, and only on it. ${others.length} other conversation(s) work on this project` +
           `${others.some(o => o.task) ? ` (${others.filter(o => o.task).map(o => `${o.session_tag ?? o.workspace_id}: ${o.task}`).join(', ')})` : ''}.`
         : 'You hold no task: take one with task_next.',
+      related_memories: memories,
+      ...(memories.length ? { memories_hint: `memory_get these ids to resume where earlier conversations stopped. ${MEMORY_NOTE}` } : {}),
       rules: SESSION_RULES };
   }
 
@@ -658,6 +665,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   }
 
   const operations = {
+    memorySave: args => memory.save(args),
+    memorySearch: args => memory.search(args),
+    memoryGet: args => memory.get(args),
+    memoryList: args => memory.list(args),
     async workspaceOpen(args) {
       // A client kind the server derived (principal.client_type, Phase 5 D6) wins over the
       // argument a model wrote; otherwise the argument, as before.
@@ -1128,7 +1139,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     workspaceClose: 'workspace_close', workspaceRecover: 'workspace_recover',
     tasksList: 'tasks_list', taskStatus: 'task_status', taskClaim: 'task_claim', taskRenew: 'task_renew',
     taskRelease: 'task_release', taskComplete: 'task_complete', taskCheckpoint: 'task_checkpoint',
-    batchCreate: 'batch_create', taskNext: 'task_next', batchStatus: 'batch_status', sessionsOverview: 'sessions_overview'
+    batchCreate: 'batch_create', taskNext: 'task_next', batchStatus: 'batch_status', sessionsOverview: 'sessions_overview',
+    memorySave: 'memory_save', memorySearch: 'memory_search', memoryGet: 'memory_get', memoryList: 'memory_list'
   };
   // GitHub origins (owner/repo, lower case) of the allowlisted projects, for remote principals.
   async function remoteOrigins() {
@@ -1185,6 +1197,11 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     if (op === 'workspace_open' && result?.ok && meta.client_session) {
       // D8: the conversation that opened the workspace is the one it is bound to.
       await write(repo => repo.updateWorkspace(result.workspace.workspace_id, { client_session: meta.client_session }));
+    }
+    // The memory snapshot of this session (owner scope and the project's entries), frozen at open.
+    if (op === 'workspace_open' && result?.ok && !result.replayed && principal.capabilities.has(CAPABILITIES.READ)) {
+      const snapshot = await memory.snapshot(result.workspace.project);
+      if (snapshot) result = { ...result, memory_snapshot: snapshot };
     }
     if (op === 'workspace_recover' && result?.ok && meta.client_session) result = { ...result, session: await rebind(result, meta) };
     if (warning && result && typeof result === 'object') result = { ...result, session_warning: warning };

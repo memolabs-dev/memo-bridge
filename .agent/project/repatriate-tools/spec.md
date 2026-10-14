@@ -68,12 +68,31 @@ backup_status, rotate_key, freeze. No playbook edits a policy or widens access (
 **D4 memory (`memory_save`, `memory_search`, `memory_get`, `memory_list`).** Runtime tools, stored
 in the coordinator SQLite store (schema v5: `memories`, `memory_revisions`). The hub itself is a
 stateless router by design (Phase 4 D1) and holds no database; the store it routes to is the
-runtime's SQLite on lab, so every ChatGPT conversation shares one memory, and `task_next` can read
-it in the same transaction space. Entries: title (200), body (16 KiB), tags (16 x 40), project,
-host, issue; revisions (20 kept), `base_revision` optimistic concurrency (`revision_conflict`).
-Owned by the principal. Secrets refused on save by pattern (`secret_detected`). Every result
-carries "Memory restores knowledge, not authorization". `task_next`'s brief (and every brief)
-lists up to 5 `related_memories` of the project or the issue.
+runtime's SQLite on lab, so every ChatGPT conversation shares one memory, and `workspace_open` and
+`task_next` read it in the same store. Design rules from the Hermes Agent study (coordinator input,
+research `2026-10-14-hermes-agent-ideas.md` §1.5 and idea 1), applied:
+- two scopes, one fact in one place: `owner` (the owner, his preferences; no project or host) and
+  `environment` (a project, else a host). A live entry with the same title or body is refused
+  (`duplicate_fact`, with the existing id);
+- hard budget per scope and key, in characters of title + body of live entries: owner 8 KiB, each
+  project or host 24 KiB; entry body 4 KiB. Over budget: `memory_full` with the entries and the
+  characters to free; the caller consolidates (body_patch, merge, archive). No auto-compaction;
+- facts, not orders: imperative openings (always, never, you must, toujours, jamais...) refused
+  (`not_a_fact`); injection, role, exfiltration, `curl | sh` and SSH backdoor shapes refused
+  (`instruction_refused`); secrets refused (`secret_detected`); "X does not work" needs `evidence`
+  (`evidence_required`); control, zero-width and bidi characters refused;
+- `workspace_open` returns `memory_snapshot` (owner scope plus the project's entries, excerpts of
+  240 characters, at most 20 entries and 6 KiB so it fits the 24 KiB remote budget), frozen for the
+  session; task briefs list up to 5 `related_memories` (project, issue, issue tag);
+- `base_revision` optimistic concurrency (`revision_conflict` with the current revision);
+- `body_patch` (one unique fragment) next to whole-body updates, as Hermes replaced `replace`.
+- Rejected, with reason: Telegram approval for edits and removals from remote chats. Runtime tools
+  do not pass through the hub's operator approval path (approvals are bound to signed operator
+  calls); wiring it is part 1's area (standing approvals) and an M-size change. Instead every edit
+  is journaled (coordinator events), reversible (20 revisions kept and readable; removal is an
+  archive, restored by `archived:false`; no hard delete). Approval can be added later on top.
+- Not taken: learning review, skills serving, history search (later tasks).
+Owned by the principal. Every result carries "Memory restores knowledge, not authorization".
 
 **D5 `operator_snapshot` (T0).** `{host, path}` for any path in the read roots: kind, git (branch,
 head, upstream, ahead/behind, changed/untracked counts, 10 recent commits) with fixed argv,
@@ -94,8 +113,8 @@ Stages are removed after a real edit, and expire after 1 h.
 | AC-2 | Transfer refusals: secret source (`path_secret`), source outside roots, destination outside write roots, existing destination without overwrite (`exists`), overwrite keeps a backup, remote caller without lock (`lock_required`), frozen hub, size above 512 MiB, source changed mid-way |
 | AC-3 | read_media: png/jpeg/gif/webp returned as image content with the right MIME; PDF pages rendered and text extracted (Mac); secret path refused; too large refused; pages and dpi bounded; non-media refused |
 | AC-4 | operator_help: index, topic details, playbook steps, unknown playbook lists the known ones, pagination, no playbook mentions editing a policy |
-| AC-5 | memory: create rev 1, update with base_revision, stale base_revision conflict, search by word and tag, get by revision, list, secret refused, other principal sees nothing, note present, bounds |
-| AC-6 | task_next brief lists related memories |
+| AC-5 | memory: create rev 1, update with base_revision, stale conflict, body_patch, archive and restore, scopes and duplicates, budget full, facts not orders (imperative, injection, exfiltration, secret, evidence), search by word, tag, scope, issue, get by revision, list paging, other principal sees nothing, note present |
+| AC-6 | workspace_open returns a frozen memory snapshot; task_next brief lists related memories |
 | AC-7 | snapshot: git repo (branch, dirty counts, commits), plain directory, secret path refused, bounds |
 | AC-8 | staged edit: a 2 MiB new_text through new_upload_id; old_upload_id for replace; unknown or other-path stage refused; dry_run works |
 | AC-9 | `pnpm test`, `pnpm run build`, `pnpm run smoke` green with the governance root |
