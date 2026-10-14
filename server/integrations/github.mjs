@@ -3,12 +3,13 @@
 // argv (no shell) under the operator's gh login. The `gh` runner is injectable so tests never
 // reach the real GitHub.
 //
-// Pull request creation on the VPS runner (GitHub App tokens): createPull, and the reads of the
-// same flow called with {auth: 'pull_request'}, get the runtime credentials provider's
-// pull_request token for that one repository (an App installation token with contents:write and
-// pull_requests:write). It reaches only that gh child, as GH_TOKEN with a private GH_CONFIG_DIR
-// created for the call and removed after it; process.env is never modified. Without systemd
-// credentials (the Mac), or on the VPS without the App, gh runs as before.
+// On the VPS runner (GitHub App tokens) every call gets a token of the runtime credentials
+// provider for that one repository: createPull, and the reads of the same flow called with
+// {auth: 'pull_request'}, the pull_request token (contents:write, pull_requests:write); batch
+// labels and Issues the issues token (issues:write); every other read the read token. A token
+// reaches only that gh child, as GH_TOKEN with a private GH_CONFIG_DIR created for the call and
+// removed after it; process.env is never modified. Without systemd credentials (the Mac), or on
+// the VPS without the App, gh runs as before.
 //
 // Scope: only repositories that are the GitHub origin of a project registered in PROJECTS.md,
 // plus memolabs-dev/.github (governance). Nothing here merges a pull request or enables
@@ -199,11 +200,11 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
   const repoOfProject = projectRepo ?? (name => catalogProjectRepo(name, catalogOptions));
   let cache = null;
 
-  // fn(env) with the pull_request token of `repo` in env, or fn(undefined) when there is none
-  // to use (gh's own environment, as before). A provider error fails closed.
-  async function withPullRequestAuth(repo, fn) {
+  // fn(env) with the `purpose` token of `repo` in env, or fn(undefined) when there is none to
+  // use (gh's own environment, as before). A provider error fails closed.
+  async function withAuth(purpose, repo, fn) {
     if (!credentials) return fn(undefined);
-    const got = await credentials.token('pull_request', repo.full);
+    const got = await credentials.token(purpose, repo.full);
     if (got.error) return fail('credential_unavailable', `${got.credential} ${got.error}`);
     if (!got.token) return fn(undefined);
     let dir;
@@ -214,7 +215,8 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
-  const authed = (repo, auth, fn) => (auth === 'pull_request' ? withPullRequestAuth(repo, fn) : fn(undefined));
+  const authed = (repo, auth, fn) => withAuth(auth === 'pull_request' ? 'pull_request' : 'read', repo, fn);
+  const read = (repo, path, params) => authed(repo, undefined, env => getJson(path, params, env));
   const ghOpts = (opts, env) => (env ? { ...opts, env } : opts);
 
   // Reads always use GET explicitly, so a stray parameter can never turn into a write.
@@ -249,7 +251,7 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     },
 
     async issues(repo, { state = 'open', labels, limit = LIMITS.list.default } = {}) {
-      const res = await getJson(`repos/${repo.full}/issues`, { state, labels: labels?.length ? labels.join(',') : undefined,
+      const res = await read(repo, `repos/${repo.full}/issues`, { state, labels: labels?.length ? labels.join(',') : undefined,
         sort: 'updated', direction: 'desc', per_page: limit, page: 1 });
       if (!res.ok) return res;
       if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
@@ -259,13 +261,13 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     },
 
     async pullRequests(repo, { state = 'open', limit = LIMITS.list.default } = {}) {
-      const res = await getJson(`repos/${repo.full}/pulls`, { state, sort: 'updated', direction: 'desc', per_page: limit, page: 1 });
+      const res = await read(repo, `repos/${repo.full}/pulls`, { state, sort: 'updated', direction: 'desc', per_page: limit, page: 1 });
       if (!res.ok) return res;
       if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
       const pulls = res.data.slice(0, limit);
       // The list endpoint never reports mergeability; look it up for the first few open PRs.
       const detailed = await Promise.all(pulls.map((p, index) => (p.state === 'open' && index < LIMITS.mergeableLookups
-        ? getJson(`repos/${repo.full}/pulls/${Number(p.number)}`).then(r => (r.ok ? { ...p, ...r.data } : p))
+        ? read(repo, `repos/${repo.full}/pulls/${Number(p.number)}`).then(r => (r.ok ? { ...p, ...r.data } : p))
         : p)));
       const out = detailed.map(compactPull);
       return { ok: true, repo: repo.full, state, count: out.length, pull_requests: out,
@@ -273,7 +275,7 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     },
 
     async workflowRuns(repo, { branch, limit = LIMITS.list.default } = {}) {
-      const res = await getJson(`repos/${repo.full}/actions/runs`, { branch, per_page: limit, page: 1 });
+      const res = await read(repo, `repos/${repo.full}/actions/runs`, { branch, per_page: limit, page: 1 });
       if (!res.ok) return res;
       const runs = Array.isArray(res.data?.workflow_runs) ? res.data.workflow_runs.slice(0, limit).map(compactRun) : [];
       return { ok: true, repo: repo.full, ...(branch ? { branch } : {}), count: runs.length,
@@ -282,7 +284,7 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
 
     async checks(repo, ref) {
       const path = `repos/${repo.full}/commits/${encodeURIComponent(ref)}`;
-      const [runs, status] = await Promise.all([getJson(`${path}/check-runs`, { per_page: 100, page: 1 }), getJson(`${path}/status`, { per_page: 100 })]);
+      const [runs, status] = await Promise.all([read(repo, `${path}/check-runs`, { per_page: 100, page: 1 }), read(repo, `${path}/status`, { per_page: 100 })]);
       if (!runs.ok) return runs;
       if (!status.ok) return status;
       const checkRuns = (Array.isArray(runs.data?.check_runs) ? runs.data.check_runs : []).slice(0, 100).map(c => ({
@@ -336,7 +338,7 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     // The Issues list endpoint reads the database directly, unlike search, so an Issue created a
     // second ago is already there.
     async labelledIssues(repo, labelName, { limit = 30 } = {}) {
-      const res = await getJson(`repos/${repo.full}/issues`, { state: 'all', labels: labelName, sort: 'created',
+      const res = await read(repo, `repos/${repo.full}/issues`, { state: 'all', labels: labelName, sort: 'created',
         direction: 'asc', per_page: Math.min(Math.max(limit, 1), 100), page: 1 });
       if (!res.ok) return res;
       if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
@@ -349,7 +351,7 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     // Pull requests (any state, newest first) that close one of `numbers` with a GitHub closing
     // keyword, or whose head is one of `branches`. Map number -> [{number, state, url, head}].
     async linkedPulls(repo, { numbers = [], branches = new Map() } = {}) {
-      const res = await getJson(`repos/${repo.full}/pulls`, { state: 'all', sort: 'created', direction: 'desc', per_page: 100, page: 1 });
+      const res = await read(repo, `repos/${repo.full}/pulls`, { state: 'all', sort: 'created', direction: 'desc', per_page: 100, page: 1 });
       if (!res.ok) return res;
       if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
       const linked = new Map();
@@ -369,8 +371,9 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
 
     // POST a label; one that already exists (422 already_exists) is fine. Batch labels only.
     async ensureLabel(repo, { name, color, description }) {
-      const out = await gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json', `repos/${repo.full}/labels`, '--input', '-'],
-        { input: JSON.stringify({ name, color, description }), timeoutMs: writeTimeoutMs });
+      const out = await withAuth('issues', repo, env => gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json',
+        `repos/${repo.full}/labels`, '--input', '-'], ghOpts({ input: JSON.stringify({ name, color, description }), timeoutMs: writeTimeoutMs }, env)));
+      if (out.ok === false) return out;
       if (out.code === 0 && !out.overflow) return { ok: true, created: true };
       const failure = ghFailure(out);
       if (failure.error === 'github_validation_failed' && /already_exists|already exists/i.test(`${out.stdout}${out.stderr}`)) {
@@ -381,8 +384,9 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
 
     // POST one Issue: title, body, labels. Never assignees, milestones or anything else.
     async createIssue(repo, { title, body, labels }) {
-      const out = await gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json', `repos/${repo.full}/issues`, '--input', '-'],
-        { input: JSON.stringify({ title, body, labels }), timeoutMs: writeTimeoutMs });
+      const out = await withAuth('issues', repo, env => gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json',
+        `repos/${repo.full}/issues`, '--input', '-'], ghOpts({ input: JSON.stringify({ title, body, labels }), timeoutMs: writeTimeoutMs }, env)));
+      if (out.ok === false) return out;
       if (out.code === 0 && !out.overflow) {
         try { return { ok: true, issue: compactIssue(JSON.parse(out.stdout)) }; } catch { /* fall through */ }
         return fail('github_outcome_unknown');
@@ -395,7 +399,7 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
     // POST only: title/head/base/body/draft. Never merge, never auto-merge.
     async createPull(repo, { title, head, base, body, draft }) {
       const payload = JSON.stringify({ title, head, base, body, draft: Boolean(draft), maintainer_can_modify: false });
-      const out = await withPullRequestAuth(repo, env => gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json',
+      const out = await withAuth('pull_request', repo, env => gh(['api', '-X', 'POST', '-H', 'Accept: application/vnd.github+json',
         `repos/${repo.full}/pulls`, '--input', '-'], ghOpts({ input: payload, timeoutMs: writeTimeoutMs }, env)));
       if (out.ok === false) return out;
       if (out.code === 0 && !out.overflow) {

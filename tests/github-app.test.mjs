@@ -465,18 +465,21 @@ test('pull request creation: GH_TOKEN per gh call with a private config dir, nev
   assert.deepEqual(await github.openPullFor(repo, 'agent/7-x', { auth: 'pull_request' }), { ok: true, pull: null });
   const created = await github.createPull(repo, { title: 't', head: 'agent/7-x', base: 'main', body: 'b', draft: false });
   assert.equal(created.ok, true, JSON.stringify(created));
-  await github.defaultBranch(repo); // an ordinary read: no token
+  await github.defaultBranch(repo); // an ordinary read: the read token
   const token = f.api.issued[0];
-  assert.equal(f.api.posts().length, 1, 'one pull_request token, cached for the three calls');
+  assert.equal(f.api.posts().length, 2, 'one pull_request token, cached for the three calls, then one read token');
   assert.deepEqual(f.api.posts()[0].body, { repositories: ['cuesheet'], permissions: { contents: 'write', pull_requests: 'write' } });
+  assert.deepEqual(f.api.posts()[1].body, { repositories: ['cuesheet'],
+    permissions: { actions: 'read', contents: 'read', issues: 'read', pull_requests: 'read' } });
   for (const call of seen.slice(0, 3)) {
     assert.equal(call.token, token);
     assert.equal(call.configExists, true);
     assert.ok(call.config.startsWith(scratch));
     assert.equal(call.creds, false, 'no credentials directory in the gh child');
   }
-  assert.equal(seen[3].hasEnv, false, 'reads outside the pull request flow are unchanged');
-  for (const call of seen.slice(0, 3)) assert.equal(existsSync(call.config), false, 'config dir removed after the call');
+  assert.equal(seen[3].token, f.api.issued[1], 'reads outside the pull request flow use the read token');
+  assert.notEqual(seen[3].token, token);
+  for (const call of seen.slice(0, 4)) assert.equal(existsSync(call.config), false, 'config dir removed after the call');
   assert.notEqual(process.env.GH_TOKEN, token);
   assert.equal(baseEnv.GH_TOKEN, undefined, 'the base environment is not modified');
 
@@ -492,6 +495,45 @@ test('pull request creation: GH_TOKEN per gh call with a private config dir, nev
   const downGithub = createGitHub({ gh: async (...a) => { calls.push(a); return { code: 0, stdout: '{}', stderr: '' }; }, credentials: down.provider, scratchDir: scratch });
   assert.deepEqual(await downGithub.createPull(repo, { title: 't', head: 'agent/7-x', base: 'main', body: 'b' }),
     { ok: false, error: 'credential_unavailable', detail: 'app-key app_token_http_403' });
+  assert.equal(calls.length, 0);
+});
+
+test('reads and batch Issues on the VPS: read and issues tokens per call; ambient on the Mac (github_auth_required, 2026-10-14)', async t => {
+  const f = await appProvider(t);
+  const scratch = join(await temp(t, 'memo-app-reads-'), 'gh-pr');
+  const seen = [];
+  const gh = async (args, opts = {}) => {
+    seen.push({ path: args.find(a => a.startsWith('repos/')), token: opts.env?.GH_TOKEN ?? null });
+    if (args.includes('POST')) return { code: 0, stdout: JSON.stringify({ number: 9, title: 't', state: 'open', labels: [], user: { login: 'x' } }), stderr: '' };
+    if (args.at(-1).includes('/actions/runs')) return { code: 0, stdout: JSON.stringify({ total_count: 0, workflow_runs: [] }), stderr: '' };
+    return { code: 0, stdout: '[]', stderr: '' };
+  };
+  const github = createGitHub({ gh, credentials: f.provider, scratchDir: scratch, baseEnv: { PATH: '/usr/bin' } });
+  const repo = { full: 'memolabs-dev/cuesheet', owner: 'memolabs-dev', name: 'cuesheet' };
+  assert.equal((await github.issues(repo)).ok, true);
+  assert.equal((await github.pullRequests(repo)).ok, true);
+  assert.equal((await github.workflowRuns(repo)).ok, true);
+  assert.equal((await github.labelledIssues(repo, 'batch:x')).ok, true);
+  assert.equal((await github.ensureLabel(repo, { name: 'batch:x', color: 'ededed', description: 'd' })).ok, true);
+  assert.equal((await github.createIssue(repo, { title: 't', body: 'b', labels: ['batch:x'] })).ok, true);
+  const [readToken, issuesToken] = f.api.issued;
+  assert.deepEqual(f.api.posts().map(r => r.body.permissions), [
+    { actions: 'read', contents: 'read', issues: 'read', pull_requests: 'read' }, { issues: 'write' }]);
+  assert.deepEqual(seen.map(s => s.token), [readToken, readToken, readToken, readToken, issuesToken, issuesToken]);
+  assert.ok(f.api.posts().every(r => r.body.repositories.length === 1 && r.body.repositories[0] === 'cuesheet'));
+
+  // The Mac (no credentials provider): gh's own login, no token injected, as before.
+  const mac = [];
+  const macGithub = createGitHub({ gh: async (args, opts = {}) => { mac.push(opts.env); return { code: 0, stdout: '[]', stderr: '' }; } });
+  assert.equal((await macGithub.issues(repo)).ok, true);
+  assert.deepEqual(mac, [undefined]);
+  // An App failure fails closed before gh runs.
+  const down = await appProvider(t, { respond: () => ({ status: 403, data: {} }) });
+  const calls = [];
+  const downGithub = createGitHub({ gh: async (...a) => { calls.push(a); return { code: 0, stdout: '[]', stderr: '' }; }, credentials: down.provider, scratchDir: scratch });
+  assert.deepEqual(await downGithub.createIssue(repo, { title: 't', body: 'b', labels: [] }),
+    { ok: false, error: 'credential_unavailable', detail: 'app-key app_token_http_403' });
+  assert.equal((await downGithub.issues(repo)).error, 'credential_unavailable');
   assert.equal(calls.length, 0);
 });
 
