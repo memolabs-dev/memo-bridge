@@ -43,6 +43,9 @@ import { HUB_OPERATOR_TOOLS } from '../server/tools/operator-repatriated.mjs';
 import { operatorHelp } from './operator-help.mjs';
 import { createTransfers } from './operator-transfer.mjs';
 import { operatorContent } from './operator-content.mjs';
+import { NOTIFY_LIMITS, createNotifier } from './operator-notifications.mjs';
+import { NOTIFICATION_TOOLS } from '../server/tools/operator-notifications.mjs';
+import { untrusted } from './operator-output.mjs';
 
 const tags = {readOnlyHint:true, destructiveHint:false,idempotentHint:true,openWorldHint:false};
 const result = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
@@ -85,6 +88,15 @@ export function createHub(options) {
   const approvalModes = { mac: 'dangerous', vps: 'dangerous', ...(operator?.approvalModes ?? {}) };
   for (const mode of Object.values(approvalModes)) if (!['off', 'dangerous', 'all_root'].includes(mode)) throw new Error('invalid operator approval mode');
   let bot = null;
+  // Issue #35: jobs started with notify: true are watched here until they end; the notice goes to
+  // the starter's inbox and, through the bot, to the owner chat only.
+  const notifier = createNotifier({
+    poll: w => (w.kind === 'runtime'
+      ? sendAgent(w.host, 'job_status', { args: { job_id: w.job_id }, principal: w.principal, clientSession: w.clientSession ?? null })
+      : pollOperatorJob(w)),
+    send: n => (bot?.notifyJob ? bot.notifyJob(n) : null),
+    record: (event, details) => record(event, null, details),
+    ...(operator?.now ? { now: operator.now } : {}), ...(operator?.notifyLimits ? { limits: operator.notifyLimits } : {}) });
   const anchors = new Map();
   const anchorIntervalMs = operator?.anchorIntervalMs ?? 15 * 60_000;
   let anchorTimer = null;
@@ -163,7 +175,19 @@ export function createHub(options) {
       const who = options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly];
       return sendAgent(host, op, options).then(out => {
         const merged = mergeOverview(out, locks.overview(who, options.clientSession));
-        return merged?.ok === true ? { ...merged, standing_approvals: grants.list(who.id) } : merged;
+        if (merged?.ok !== true) return merged;
+        const { ok: _ok, ...inbox } = notifier.check(who.id);
+        return { ...merged, standing_approvals: grants.list(who.id), notifications: inbox };
+      });
+    }
+    // Issue #35: notify is the hub's, never the runtime's; the job is watched once it is accepted.
+    if (op === 'jobs_submit' && options.args && Object.hasOwn(options.args, 'notify')) {
+      const { notify, ...rest } = options.args;
+      return sendAgent(host, op, { ...options, args: rest }).then(out => {
+        if (notify !== true || out?.ok !== true || typeof out.job?.job_id !== 'string') return out;
+        const registered = notifier.watch({ kind: 'runtime', host, job_id: out.job.job_id, label: String(out.job.recipe ?? 'job').slice(0, 32),
+          principal: options.principal ?? HUB_PRINCIPALS[PRINCIPAL_IDS.readonly], timeout_s: out.job.timeout_seconds, clientSession: options.clientSession ?? null });
+        return { ...out, notify: registered };
       });
     }
     return sendAgent(host, op, options);
@@ -216,6 +240,7 @@ export function createHub(options) {
     if (!signer) return fail('operator_disabled');
     if (!isOperatorOp(op) || OPS[op].internal) return fail('unsupported_op');
     if (HUB_OPERATOR_TOOLS.includes(op)) return hubOperator(op, options);
+    if (NOTIFICATION_TOOLS.includes(op)) return notificationCall(op, options);
     const given = options.args ?? {};
     if ((host === undefined || host === null) && given.host === undefined) {
       const resolved = resolveOperatorHost(op, given);
@@ -287,6 +312,9 @@ export function createHub(options) {
 
   async function signedCall(host, op, { args, lockedArgs, principal, requestId, clientSession, tier, readOnly, auto, frozen }) {
     if (Object.hasOwn(args, 'workspace_id')) { const { workspace_id: _ws, ...rest } = args; args = rest; }
+    // Issue #35: notify is the hub's: removed before the hash, the approval and the signature.
+    const notify = args.notify === true;
+    if (Object.hasOwn(args, 'notify')) { const { notify: _n, ...rest } = args; args = rest; }
     const hash = argsSha256(args);
     let approval = null;
     const mode = approvalModes[host];
@@ -334,6 +362,11 @@ export function createHub(options) {
       ? { ...data, hub_frozen: frozen, frozen_above_t0: Boolean(data.frozen_above_t0) || frozen } : data;
     // The standing approvals live here: operator_policy shows the ones of this host (D-R4).
     if (op === 'operator_policy' && data && data.ok !== false) data = { ...data, standing_approvals: grants.list(principal.id).filter(g => g.host === host) };
+    if (notify && ['operator_run', 'operator_script'].includes(op) && data && typeof data === 'object' && data.ok !== false) {
+      data = { ...data, notify: args.background === true && typeof data.job_id === 'string'
+        ? notifier.watch({ kind: 'operator', host, job_id: data.job_id, label: op, principal, timeout_s: args.timeout_s, clientSession })
+        : { registered: false, reason: 'foreground' } };
+    }
     // Hub journal (spec D7): tier, args hash and redacted args, approval, outcome, duration, output
     // hash. The wire id matches the host journal's request id when no request id travelled.
     record('operator_call', OPERATOR_AGENT_IDS[host], { request_id: requestId ?? id, principal: principal.id, op, tier,
@@ -351,6 +384,30 @@ export function createHub(options) {
     if (op === 'operator_help') return operatorHelp(args);
     if (op === 'operator_transfer_status') return transfers.status(args, { principal });
     return transfers.start(args, { principal, clientSession, requestId });
+  }
+
+  // Issue #35: the inbox tools, answered here for the caller's own principal.
+  function notificationCall(op, { args = {}, principal, clientSession = null } = {}) {
+    if (!principal?.id || !authorize(principal, op) || !principal.capabilities?.has(OPERATOR_TIER_CAPABILITIES[0])) return fail('forbidden');
+    locks.seen(clientSession);
+    if (op === 'notifications_check') return notifier.check(principal.id);
+    if (op === 'notifications_ack') {
+      const out = notifier.ack(principal.id, args);
+      record('notifications_ack', null, { principal: principal.id, outcome: out.ok ? 'ok' : 'refused', acked: out.acked ?? 0 });
+      return out;
+    }
+    const out = notifier.get(principal.id, args);
+    if (!out.ok) return out;
+    const { notifications, ...counts } = out;
+    return { ...counts, ...untrusted({ notifications }) };
+  }
+  // The status of a watched operator job, signed for the principal that started it (T0).
+  function pollOperatorJob(w) {
+    if (!signer || !Object.hasOwn(OPERATOR_AGENT_IDS, w.host)) return Promise.resolve(fail('operator_disabled'));
+    const id = newId();
+    const args = { host: w.host, job_id: w.job_id };
+    const signature = signer.sign({ id, op: 'operator_job_status', host: w.host, tier: 0, principal: w.principal.id, args });
+    return sendAgent(OPERATOR_AGENT_IDS[w.host], 'operator_job_status', { args, principal: w.principal, id, operator: signature });
   }
 
   // D-R14 (bench 2026-10-14 19:57 and 20:04): the conversation's workspace, keyed by its session
@@ -690,11 +747,12 @@ export function createHub(options) {
       if (signer && !operatorDefs) operatorDefs = await collectOperatorDefinitions();
       await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,bind,resolve);});
       pinger = setInterval(heartbeat, pingIntervalMs); pinger.unref();
+      notifier.start(operator?.notifyPollMs ?? NOTIFY_LIMITS.pollMs);
       if (signer && anchorIntervalMs > 0) { anchorTimer = setInterval(() => { anchorChains().catch(() => {}); }, anchorIntervalMs); anchorTimer.unref(); }
       return server.address();
     },
     async stop(){
-      clearInterval(pinger); clearInterval(anchorTimer); bot?.stop?.();
+      clearInterval(pinger); clearInterval(anchorTimer); bot?.stop?.(); notifier.stop();
       for (const id of [...pending.keys()]) settle(id, fail('shutting_down'));
       for (const ws of wss.clients) ws.terminate();
       await new Promise(resolve=>server.close(resolve));
@@ -702,7 +760,7 @@ export function createHub(options) {
     inventory, requestAgent, requestOperator, availableOps,
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
     setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
-    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers, operatorGrants: grants,
+    operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers, operatorGrants: grants, operatorNotifications: notifier,
     // The Telegram bot (bridge/operator-telegram.mjs), built by hub-cli with the hub's owner hooks.
     attachOperatorBot(value) { bot = value; },
     agentInfo(host){ const c=agents.get(host); return c ? {version:c.version, ops:[...c.ops].sort(), pending:c.pending.size} : null; }
