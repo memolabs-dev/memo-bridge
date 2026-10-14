@@ -8,10 +8,12 @@
 import { z } from 'zod/v4';
 import { CLIENT_TYPES, HOSTS, SUMMARY_MAX, TASKS_LIMIT } from '../coordinator/index.mjs';
 import { LEASE_TTL, OUTCOMES } from '../coordinator/issue-lease.mjs';
+import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
+import { BATCH_MAX, BATCH_PRIORITIES, TASK_TEXT } from '../coordinator/batches.mjs';
 
 export const COORDINATOR_TOOLS = Object.freeze(['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close',
   'workspace_recover', 'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete',
-  'task_checkpoint']);
+  'task_checkpoint', 'batch_create', 'task_next', 'batch_status']);
 
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
@@ -21,6 +23,9 @@ const workspaceId = z.string().max(40).describe('Workspace id returned by worksp
 const issue = z.string().max(160).describe('The task: a GitHub Issue reference, owner/repo#n, e.g. memolabs-dev/cuesheet#42.');
 const claimId = z.string().max(32).describe('claim_id returned by task_claim.');
 const fence = z.string().max(40).describe('Latest fence returned by task_claim or task_renew. Writes with an outdated fence are refused.');
+const batchId = z.string().max(20).describe('Batch id returned by batch_create (10 hexadecimal characters).');
+const clientRequestId = z.string().regex(CLIENT_REQUEST_ID_RE).optional()
+  .describe('Your own id for this call (8 to 128 of A-Z a-z 0-9 _ -). A retry with the same id returns the first result instead of acting again.');
 const ttl = z.number().int().min(LEASE_TTL.min).max(LEASE_TTL.max).optional()
   .describe(`Lease duration in seconds (default ${LEASE_TTL.default}). Renew with task_renew before it expires.`);
 
@@ -28,7 +33,9 @@ const ttl = z.number().int().min(LEASE_TTL.min).max(LEASE_TTL.max).optional()
 // opened lazily) or a coordinator directly. Storage opens lazily so the read-only tools of
 // other modules keep working when the private state directory is unavailable.
 export function registerCoordinatorTools(server, getService) {
-  const call = method => async args => {
+  // extra.meta is the hub's per-request metadata (request id, session hash) when the runtime
+  // serves a forwarded call (bridge/agent.mjs); stdio calls have none. Never tool arguments.
+  const call = method => async (args, extra) => {
     let coordinator;
     try {
       const service = await getService();
@@ -38,7 +45,7 @@ export function registerCoordinatorTools(server, getService) {
       const code = String(error?.message ?? '');
       return result({ ok: false, error: 'store_unavailable', ...(/^state_[a-z_]{1,40}$/.test(code) ? { detail: code } : {}) });
     }
-    return result(await coordinator[method](args ?? {}));
+    return result(await coordinator[method](args ?? {}, extra?.meta ?? null));
   };
 
   server.registerTool('workspace_open', {
@@ -72,7 +79,7 @@ export function registerCoordinatorTools(server, getService) {
   }, call('workspaceClose'));
 
   server.registerTool('workspace_recover', {
-    description: 'Resume a workspace after losing context. Read-only snapshot: the workspace, each held claim reconciled with the shared ledger (still_held with the current fence, expired, lost or unknown), active worktrees, the last 10 checkpoints of its tasks, recent jobs, and the next safe actions. Writes nothing.',
+    description: 'Resume a workspace after losing context. Snapshot: the workspace, each held claim reconciled with the shared ledger (still_held with the current fence, expired, lost or unknown), active worktrees, the last 10 checkpoints of its tasks, recent jobs, and the next safe actions. Changes no task, file or branch; for a remote conversation it binds the workspace to the recovering conversation, and that rebind is journaled.',
     inputSchema: z.object({ workspace_id: workspaceId }),
     annotations: read
   }, call('workspaceRecover'));
@@ -94,7 +101,9 @@ export function registerCoordinatorTools(server, getService) {
 
   server.registerTool('task_claim', {
     description: 'Reserve a task for a workspace through the Memo Labs lease ledger (a Git ref in memolabs-dev/.github, visible to every machine). The Issue must be open and labelled agent:ready with one priority label, and it must belong to the workspace project when the project Git origin is known. Exactly one worker can hold it.',
-    inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl }),
+    inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl,
+      client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
+        .describe('Your own id for this claim attempt (8 to 128 of A-Z a-z 0-9 _ -). A retry with the same id returns the first result instead of claiming again.') }),
     annotations: write
   }, call('taskClaim'));
 
@@ -123,4 +132,38 @@ export function registerCoordinatorTools(server, getService) {
       branch: z.string().max(200), commit: z.string().max(64), note: z.string().max(500).optional() }),
     annotations: write
   }, call('taskCheckpoint'));
+
+  // Conductor workflow (TODO-P5-50 to 52): one conversation splits the work with batch_create,
+  // the owner opens one conversation per task and pastes the same sentence in each, each one
+  // takes a different task with task_next, and the conductor follows with batch_status.
+  server.registerTool('batch_create', {
+    description: `Split work into a batch of 1 to ${BATCH_MAX} tasks: creates one GitHub Issue per task in the project repository, labelled agent:ready, priority:<p> and agent:batch-<id>, with its scope and acceptance criteria in the body. Returns the batch id and the one sentence the owner pastes in each worker conversation. Creates Issues only: never claims, assigns, merges or deploys. On a partial failure it reports what was created.`,
+    inputSchema: z.object({
+      project: z.string().max(80).describe('Project name from projects_list; its GitHub origin must be in the lease ledger allowlist.'),
+      name: z.string().max(TASK_TEXT.label).optional().describe('Short name of the batch, shown in each Issue.'),
+      tasks: z.array(z.object({
+        title: z.string().max(TASK_TEXT.title).describe('Issue title, one line.'),
+        scope: z.string().max(TASK_TEXT.scope).describe('What to change and where, and what is out of scope.'),
+        acceptance: z.string().max(TASK_TEXT.acceptance).describe('Checkable acceptance criteria.'),
+        priority: z.enum(BATCH_PRIORITIES).optional().describe('Default p1. p0 tasks are taken first.')
+      })).min(1).max(BATCH_MAX),
+      client_request_id: clientRequestId
+    }),
+    annotations: write
+  }, call('batchCreate'));
+
+  server.registerTool('task_next', {
+    description: 'Take the next task of a batch: claims, through the lease ledger, the first ready task of the batch that nobody holds, for your workspace (opened with workspace_open on the batch project). If another conversation wins a task first, the next one is tried. Returns the task (Issue, title, scope, acceptance), claim_id, fence, expiry and the steps to follow; a workspace that already holds a task of the batch gets that task back. {done:true} when no task is left.',
+    inputSchema: z.object({ workspace_id: workspaceId, batch: batchId, ttl_seconds: ttl, client_request_id: clientRequestId }),
+    annotations: { ...write, idempotentHint: true }
+  }, call('taskNext'));
+
+  server.registerTool('batch_status', {
+    description: 'Progress of a batch: for each task its state (ready, claimed, stale, blocked, done, closed, not_ready, unknown), who holds it (worker, workspace, client) and until when, linked pull requests, then counts per state and the stale leases (claimed but expired). Read-only.',
+    inputSchema: z.object({
+      project: z.string().max(80).describe('Project the batch was created in.'),
+      batch: batchId
+    }),
+    annotations: read
+  }, call('batchStatus'));
 }

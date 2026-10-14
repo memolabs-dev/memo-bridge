@@ -3,13 +3,24 @@
 // Authorization comes first in every handler; the principal comes from the runtime, never
 // from tool arguments. Pull requests are opened, never merged: the landing contract of
 // memolabs-dev/.github lands them.
+//
+// Phase 5 (D9), enforced here whatever the caller sends:
+// - a remote principal (oidc:) reads and opens pull requests only on the GitHub origins of the
+//   allowlisted projects (remote.json);
+// - the head of a pull request is always the worktree's own branch (there is no head argument),
+//   never main, master or the default branch (compared without case), and for a remote
+//   principal the branch head on GitHub must be a commit worktree_push sent from this worktree;
+// - writes check the D8 session binding; github_create_pr takes client_request_id.
 import { z } from 'zod/v4';
 import { workerFor } from '../coordinator/index.mjs';
 import { ownsWorkspace } from '../coordinator/policy.mjs';
 import { validBranch } from '../coordinator/checkpoints.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
-import { AI_ATTRIBUTION } from '../runners/worktrees.mjs';
+import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
+import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
+import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, sessionBindingDecision }
+  from '../../bridge/write-gate.mjs';
 
 export const GITHUB_TOOLS = Object.freeze(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
   'github_create_pr']);
@@ -27,7 +38,8 @@ const LABEL_RE = /^[^,\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]
 // Refusals of github_create_pr are journaled as 'denied'; anything else that fails is 'error'.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_not_active', 'wrong_host', 'claim_required',
   'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'repo_not_allowed', 'repo_not_registered',
-  'default_branch_refused', 'branch_not_pushed', 'unknown_workspace', 'unknown_worktree']);
+  'default_branch_refused', 'branch_not_pushed', 'unknown_workspace', 'unknown_worktree', 'project_not_allowed',
+  'head_not_pushed_by_workspace', 'session_mismatch', 'path_protected']);
 
 const repoArg = z.string().max(140).describe('owner/repo of a registered project (its GitHub origin), or memolabs-dev/.github.');
 const limitArg = z.number().int().min(LIMITS.list.min).max(LIMITS.list.max).optional()
@@ -40,8 +52,10 @@ function closesIssue(body, issue) {
 }
 
 // options.github injects a ready integration (tests); otherwise one is built per runtime.
+// options.remotePolicy injects the remote policy (tests); otherwise MEMO_BRIDGE_REMOTE_CONFIG.
 export function registerGithubTools(server, getRuntime, options = {}) {
   const built = new WeakMap();
+  const remotePolicy = options.remotePolicy ?? remotePolicyFromEnv();
   const githubOf = rt => {
     if (options.github) return options.github;
     let github = built.get(rt);
@@ -66,11 +80,25 @@ export function registerGithubTools(server, getRuntime, options = {}) {
         if (resolved.error === 'repo_not_registered') await rt.audit(op, 'denied', 'repo_not_registered');
         return result(resolved);
       }
+      if (isRemotePrincipal(rt.principal) && !(await remoteRepoAllowed(github, resolved.repo))) {
+        await rt.audit(op, 'denied', 'project_not_allowed');
+        return result(fail('project_not_allowed'));
+      }
       return result(await run(github, resolved.repo, args));
     } catch {
       return result(fail('internal_error'));
     }
   };
+
+  // A remote principal reads only the GitHub origins of the allowlisted projects.
+  async function remoteRepoAllowed(github, repo) {
+    if (!remotePolicy.configured) return false;
+    for (const name of remotePolicy.projects) {
+      const origin = await github.projectRepo(name);
+      if (origin && origin.toLowerCase() === repo.full.toLowerCase()) return true;
+    }
+    return false;
+  }
 
   const limitOf = value => (value === undefined ? LIMITS.list.default
     : Number.isInteger(value) && value >= LIMITS.list.min && value <= LIMITS.list.max ? value : undefined);
@@ -145,20 +173,26 @@ export function registerGithubTools(server, getRuntime, options = {}) {
       worktree_id: z.string().max(60).describe('Worktree id returned by worktree_create.'),
       title: z.string().min(1).max(LIMITS.title),
       body: z.string().max(LIMITS.body).optional(),
-      draft: z.boolean().optional()
+      draft: z.boolean().optional(),
+      client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
+        .describe('Your own id for this call (8 to 128 letters, digits, _ or -). A retry with the same id returns the first result.')
     }),
     annotations: write
-  }, async (args = {}) => {
+  }, async (args = {}, extra = null) => {
     const op = 'github_create_pr';
     const rt = getRuntime();
-    const ids = { workspace_id: WS_RE.test(args.workspace_id ?? '') ? args.workspace_id : undefined };
+    const meta = metaFromExtra(extra);
+    const ids = { workspace_id: WS_RE.test(args.workspace_id ?? '') ? args.workspace_id : undefined,
+      ...(meta.request_id ? { request_id: meta.request_id } : {}) };
     if (!rt.authorize(op)) {
       await rt.audit(op, 'denied', 'forbidden', ids);
       return result(fail('forbidden'));
     }
     let outcome;
     try {
-      outcome = await createPr(rt, githubOf(rt), args, ids);
+      const guard = { remotePolicy, meta };
+      outcome = await runOnce(rt.store(), { principal: rt.principal.id, op, clientRequestId: args.client_request_id, now: rt.now() },
+        () => createPr(rt, githubOf(rt), args, ids, guard));
     } catch {
       outcome = fail('internal_error');
     }
@@ -169,7 +203,8 @@ export function registerGithubTools(server, getRuntime, options = {}) {
 }
 
 // ids is filled as facts are established so the audit row names the workspace and Issue.
-async function createPr(rt, github, args, ids) {
+async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
+  const remote = isRemotePrincipal(rt.principal);
   if (!WS_RE.test(args.workspace_id ?? '')) return fail('invalid_input', 'workspace_id');
   if (!WORKTREE_RE.test(args.worktree_id ?? '')) return fail('invalid_input', 'worktree_id');
   if (!validInputText(args.title, LIMITS.title) || !args.title.trim()) return fail('invalid_input', 'title');
@@ -203,6 +238,10 @@ async function createPr(rt, github, args, ids) {
   }
   if (local.error) return local.error;
   const { workspace, worktree, claim } = local;
+  const notAllowed = remoteProjectRefusal(rt.principal, worktree.project_id, remotePolicy);
+  if (notAllowed) return notAllowed;
+  const binding = sessionBindingDecision(workspace.client_session, meta?.client_session, remotePolicy?.session_binding);
+  if (!binding.ok) return binding;
   const issue = parseIssueRef(worktree.issue_ref);
   if (!issue) return fail('claim_required', 'invalid Issue reference');
   ids.issue = issue.ref;
@@ -218,9 +257,20 @@ async function createPr(rt, github, args, ids) {
   if (!validBranch(branch)) return fail('invalid_input', 'branch');
   const base = await github.defaultBranch(repo);
   if (!base.ok) return base;
-  if (branch === base.branch) return fail('default_branch_refused');
+  if (isProtectedBranch(branch, [base.branch])) return fail('default_branch_refused');
   const head = await github.remoteBranchHead(worktree.path, branch);
   if (!head.ok) return head;
+  // Remotely the pull request carries only what this workspace pushed: a branch someone moved
+  // since (another session, a terminal) is refused rather than proposed under the owner's name.
+  if (remote && !(await pushedCommits(rt, worktree.id)).includes(head.sha)) return fail('head_not_pushed_by_workspace');
+  // F1 (D9): what the pull request would carry, measured from the merge-base with the default
+  // branch GitHub reports, never touches a protected CI path.
+  if (remote) {
+    const { GIT_DIR, GIT_WORK_TREE, ...gitEnv } = gitBaseEnv(process.env);
+    const hits = await protectedSinceDefault(worktree.path, head.sha, base.branch, gitEnv);
+    if (!hits) return fail('git_failed', 'protected path check');
+    if (hits.count) return fail('path_protected', `${hits.count} change(s) under .github/workflows, .github/actions or .github/dependabot.yml`);
+  }
 
   // Idempotent: an already open pull request for this branch is returned as is.
   const existing = await github.openPullFor(repo, branch);
@@ -239,9 +289,10 @@ async function createPr(rt, github, args, ids) {
 
   const created = await github.createPull(repo, { title: args.title.trim(), head: branch, base: base.branch, body,
     draft: args.draft ?? false });
+  const warned = value => (binding.warning && value.ok ? { ...value, session_warning: binding.warning } : value);
   if (created.ok) {
-    return { ok: true, existing: false, repo: repo.full, number: created.pull.number, url: created.pull.url,
-      head: branch, base: base.branch, head_sha: head.sha, draft: created.pull.draft };
+    return warned({ ok: true, existing: false, repo: repo.full, number: created.pull.number, url: created.pull.url,
+      head: branch, base: base.branch, head_sha: head.sha, draft: created.pull.draft });
   }
   // A lost response or a concurrent creation: adopt the pull request if it now exists.
   if (created.uncertain || created.error === 'github_validation_failed' || created.error === 'github_outcome_unknown') {

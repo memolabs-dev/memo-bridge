@@ -151,7 +151,7 @@ test('missing capability and foreign workspaces are refused and audited', { skip
   const { stateDir, store, coordinator, github, ws } = await setup(t);
   const a = await ws();
   const claim = await coordinator.taskClaim({ workspace_id: a, issue: DROP });
-  const reader = makePrincipal('oidc:reader', [CAPABILITIES.READ]);
+  const reader = makePrincipal('peer:reader', [CAPABILITIES.READ]);
   const { store: s2, coordinator: readOnly } = coordinatorOn(stateDir, { principal: reader, ledger: ledgerFor(github) });
   t.after(() => s2.close());
   assert.deepEqual(await readOnly.taskClaim({ workspace_id: a, issue: DROP }), { ok: false, error: 'forbidden' });
@@ -159,7 +159,7 @@ test('missing capability and foreign workspaces are refused and audited', { skip
   assert.deepEqual(await readOnly.taskClaim({ workspace_id: 'nope' }), { ok: false, error: 'forbidden' });
   assert.equal((await readOnly.taskStatus({ issue: DROP })).ok, true);
 
-  const stranger = makePrincipal('oidc:stranger', [CAPABILITIES.READ, CAPABILITIES.WRITE]);
+  const stranger = makePrincipal('peer:stranger', [CAPABILITIES.READ, CAPABILITIES.WRITE]);
   const { store: s3, coordinator: other } = coordinatorOn(stateDir, { principal: stranger, ledger: ledgerFor(github) });
   t.after(() => s3.close());
   assert.equal((await other.workspaceStatus({ workspace_id: a })).error, 'forbidden');
@@ -168,8 +168,8 @@ test('missing capability and foreign workspaces are refused and audited', { skip
 
   const events = await journal(store);
   const deniedBy = p => events.filter(e => e.principal === p && e.outcome === 'denied' && e.code === 'forbidden');
-  assert.equal(deniedBy('oidc:reader').length, 3);
-  assert.equal(deniedBy('oidc:stranger').length, 3);
+  assert.equal(deniedBy('peer:reader').length, 3);
+  assert.equal(deniedBy('peer:stranger').length, 3);
   assert.equal((await coordinator.taskStatus({ issue: DROP })).lease.state, 'claimed');
 });
 
@@ -522,15 +522,15 @@ test('tasks_list with nothing to search, a GitHub failure, an unreadable allowli
   t.after(() => truncated.store.close());
   assert.equal((await truncated.coordinator.tasksList({})).truncated, true);
 
-  const nobody = coordinatorOn(stateDir, { ledger: stubLedger(), principal: makePrincipal('oidc:nobody', []) });
+  const nobody = coordinatorOn(stateDir, { ledger: stubLedger(), principal: makePrincipal('peer:nobody', []) });
   t.after(() => nobody.store.close());
   assert.deepEqual(await nobody.coordinator.tasksList({}), { ok: false, error: 'forbidden' });
-  const reader = coordinatorOn(stateDir, { ledger: stubLedger(), principal: makePrincipal('oidc:reader', [CAPABILITIES.READ]),
+  const reader = coordinatorOn(stateDir, { ledger: stubLedger(), principal: makePrincipal('peer:reader', [CAPABILITIES.READ]),
     tasks: tasksStub([]) });
   t.after(() => reader.store.close());
   assert.equal((await reader.coordinator.tasksList({})).ok, true, 'coordinator:read is enough');
   const events = await journal(none.store);
-  assert.ok(events.some(e => e.principal === 'oidc:nobody' && e.op === 'tasks_list' && e.code === 'forbidden'));
+  assert.ok(events.some(e => e.principal === 'peer:nobody' && e.op === 'tasks_list' && e.code === 'forbidden'));
 });
 
 test('the ledger allowlist is parsed as text, strictly', async () => {
@@ -675,11 +675,11 @@ test('workspace_recover on an empty or closed workspace, and for another princip
   assert.equal(closed.workspace.status, 'closed');
   assert.match(closed.next_actions[0], /Workspace is closed/);
 
-  const stranger = createRuntime({ stateDir: rt.stateDir, principal: makePrincipal('oidc:stranger', [CAPABILITIES.READ]),
+  const stranger = createRuntime({ stateDir: rt.stateDir, principal: makePrincipal('peer:stranger', [CAPABILITIES.READ]),
     ledger: stubLedger(), host: 'mac', resolveProject: stubProjects() });
   t.after(() => stranger.close());
   assert.deepEqual(await stranger.coordinator().workspaceRecover({ workspace_id: id }), { ok: false, error: 'forbidden' });
-  const denied = (await journal(rt.store())).filter(e => e.principal === 'oidc:stranger');
+  const denied = (await journal(rt.store())).filter(e => e.principal === 'peer:stranger');
   assert.deepEqual(denied.map(e => `${e.op}:${e.outcome}:${e.code}`), ['workspace_recover:denied:forbidden']);
 });
 

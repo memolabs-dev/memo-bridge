@@ -54,6 +54,7 @@ import { jobConcurrencyLimit } from './hosts.mjs';
 import { signalJobGroup } from './processes.mjs';
 import { RECIPE_NAMES, detectRecipes } from './recipes.mjs';
 import { loadRunnerConfig } from './resources.mjs';
+import { remotePolicyFromEnv, requestMeta, sessionBindingDecision } from '../../bridge/write-gate.mjs';
 
 // Moved to executor-local.mjs (the local executor); re-exported for job-runner.mjs, the
 // Coordinator, worktrees.mjs and the Phase 3 tests.
@@ -83,7 +84,7 @@ export const DEFAULT_RUNNER_PATH = fileURLToPath(new URL('./job-runner.mjs', imp
 
 // Results the model sees as refusals rather than faults; both are journaled.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_removed', 'wrong_host', 'no_live_claim', 'host_busy',
-  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'queue_full']);
+  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'queue_full', 'session_mismatch']);
 
 const newJobId = () => `job_${randomBytes(12).toString('base64url')}`;
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -232,7 +233,8 @@ export function stopCancelledJobs(stopped, { killGraceMs = KILL_GRACE_MS, signal
 // ---------------------------------------------------------------------------------------
 
 export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePath = process.execPath,
-  maxJobs, killGraceMs = KILL_GRACE_MS, spawnRunner, env = process.env, executor, maxQueue } = {}) {
+  maxJobs, killGraceMs = KILL_GRACE_MS, spawnRunner, env = process.env, executor, maxQueue,
+  remotePolicy = typeof rt?.remotePolicy === 'function' ? rt.remotePolicy() : remotePolicyFromEnv(env) } = {}) {
   const read = fn => rt.store().transaction(repo => fn(repo, rt.now()), { write: false });
   const write = fn => rt.store().transaction(repo => fn(repo, rt.now()));
   const exec = executor ?? defaultExecutor(env, { runnerPath, nodePath, spawnRunner });
@@ -250,6 +252,16 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
     await rt.audit(op, outcome, result.ok ? null : result.error, ids);
     return result;
   }
+
+  // D8 (REQ-P5-11, fix F4): a job submitted or cancelled from a conversation other than the one
+  // the workspace is bound to. ctx.meta is the hub's per-request metadata, never tool arguments;
+  // in 'warn' mode the call goes on and the tool result carries session_warning.
+  function sessionCheck(workspace, ctx) {
+    const decision = sessionBindingDecision(workspace?.client_session, requestMeta(ctx?.meta).client_session, remotePolicy?.session_binding);
+    if (decision.ok && decision.warning && ctx) ctx.sessionWarning = decision.warning;
+    return decision;
+  }
+  const requestIds = ctx => { const id = requestMeta(ctx?.meta).request_id; return id ? { request_id: id } : {}; };
 
   // Load a job and check that the caller's principal owns its workspace.
   async function ownedJob(op, jobId, { reconcile: refresh = true } = {}) {
@@ -282,12 +294,12 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
   const service = {
     executor: exec,
 
-    async submit(args = {}) {
+    async submit(args = {}, ctx = {}) {
       const op = 'jobs_submit';
       if (!rt.authorize(op)) return denied(op);
       const { workspace_id: workspaceId, worktree_id: worktreeId, recipe } = args;
       if (!WS_RE.test(workspaceId ?? '')) return journal(op, fail('invalid_input', 'workspace_id'));
-      const ids = { workspace_id: workspaceId };
+      const ids = { workspace_id: workspaceId, ...requestIds(ctx) };
       if (!WORKTREE_RE.test(worktreeId ?? '')) return journal(op, fail('invalid_input', 'worktree_id'), ids);
       if (!RECIPE_NAMES.includes(recipe)) return journal(op, fail('unknown_recipe', `allowed: ${RECIPE_NAMES.join(', ')}`), ids);
       const timeoutSeconds = args.timeout_seconds ?? TIMEOUT_SECONDS.default;
@@ -338,6 +350,8 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       if (!workspace) return journal(op, fail('unknown_workspace'), ids);
       if (!ownsWorkspace(rt.principal, workspace)) return journal(op, fail('forbidden'), ids);
       if (workspace.status !== 'active') return journal(op, fail('workspace_closed'), ids);
+      const bound = sessionCheck(workspace, ctx);
+      if (!bound.ok) return journal(op, bound, ids);
       // Another workspace's worktree is reported as unknown, never described.
       if (!worktree || worktree.workspace_id !== workspace.id) return journal(op, fail('unknown_worktree'), ids);
       const issueIds = { ...ids, issue: worktree.issue_ref ?? undefined };
@@ -526,13 +540,15 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
       return { ok: true, job: publicJob(job), log: { lines, bytes: size, truncated_to_tail: cut }, ...(context ? { context } : {}) };
     },
 
-    async cancel(args = {}) {
+    async cancel(args = {}, ctx = {}) {
       const op = 'job_cancel';
       if (!rt.authorize(op)) return denied(op);
       if (!JOB_ID_RE.test(args.job_id ?? '')) return journal(op, fail('invalid_input', 'job_id'));
       const found = await ownedJob(op, args.job_id);
       if (found.error) return found.error.error === 'forbidden' ? found.error : journal(op, found.error);
-      const ids = { workspace_id: found.job.workspace_id };
+      const ids = { workspace_id: found.job.workspace_id, ...requestIds(ctx) };
+      const bound = sessionCheck(found.workspace, ctx);
+      if (!bound.ok) return journal(op, bound, ids);
       const outcome = await write((repo, at) => {
         const job = repo.getJob(found.job.id);
         if (!ACTIVE.has(job.status)) return { finished: job };

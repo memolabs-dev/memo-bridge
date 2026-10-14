@@ -12,6 +12,7 @@
 import { CAPABILITIES, DEFAULT_HUB_GRANTS, HUB_PRINCIPALS as HUB_IDS, OPERATION_CAPABILITY, authorize, principalFromHub }
   from '../server/coordinator/policy.mjs';
 import { CODE_RE, MAX_RESULT_BYTES } from './protocol.mjs';
+import { collectTools as registryTools, collectToolDefinitions as registryDefinitions } from '../server/registry.mjs';
 
 // Hub timeouts (ms). The ledger client kills a ledger call after 120 s
 // (server/coordinator/issue-lease.mjs), so a single-call ledger op waits at least 130 s and an
@@ -19,9 +20,11 @@ import { CODE_RE, MAX_RESULT_BYTES } from './protocol.mjs';
 // timeout only bounds the hub's wait: the runtime finishes the op either way.
 export const TIMEOUTS = Object.freeze({ probe: 6_000, default: 30_000, github: 60_000, ledger: 130_000, ledgerChain: 250_000 });
 
-const LEDGER_OPS = new Set(['tasks_list', 'task_status', 'task_renew', 'task_checkpoint', 'jobs_submit',
+// batch_status reads up to 30 leases in parallel; task_next may chain several claims and
+// batch_create up to 11 GitHub writes.
+const LEDGER_OPS = new Set(['tasks_list', 'task_status', 'batch_status', 'task_renew', 'task_checkpoint', 'jobs_submit',
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push', 'worktree_remove', 'github_create_pr']);
-const LEDGER_CHAIN_OPS = new Set(['task_claim', 'task_release', 'task_complete', 'workspace_close', 'workspace_recover']);
+const LEDGER_CHAIN_OPS = new Set(['task_claim', 'task_next', 'batch_create', 'task_release', 'task_complete', 'workspace_close', 'workspace_recover']);
 const GITHUB_READ_OPS = new Set(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks']);
 
 // Ops answered by the hub itself (no agent, no capability beyond authentication).
@@ -70,11 +73,13 @@ export const HUB_PRINCIPALS = Object.freeze({
   [PRINCIPAL_IDS.owner]: principalFromHub(PRINCIPAL_IDS.owner, DEFAULT_HUB_GRANTS),
   [PRINCIPAL_IDS.readonly]: principalFromHub(PRINCIPAL_IDS.readonly, DEFAULT_HUB_GRANTS)
 });
-// The wire carries {id} only; any other field (claimed capabilities included) is ignored.
-// Unknown ids map to null and are refused.
+// The wire carries {id} and, since Phase 5, an optional client_type label (checked against the
+// known client kinds; it grants nothing). Any other field, claimed capabilities included, is
+// ignored. Unknown ids map to null and are refused.
 export function principalFromWire(wire, grants = DEFAULT_HUB_GRANTS) {
   const id = wire?.id;
-  return typeof id === 'string' ? principalFromHub({ id }, grants) : null;
+  if (typeof id !== 'string') return null;
+  return principalFromHub(wire?.client_type === undefined ? { id } : { id, client_type: wire.client_type }, grants);
 }
 
 // Why `principal` may not call `op` through the hub, or null when it may.
@@ -89,39 +94,16 @@ export function denialReason(principal, op, { runtimeEnabled = false, mutatingOp
   return null;
 }
 
-// The tool modules served by the runtime (server/index.mjs registers the same ones).
-const TOOL_MODULES = [
-  ['../server/tools/coordinator-tools.mjs', 'registerCoordinatorTools'],
-  ['../server/tools/worktree-tools.mjs', 'registerWorktreeTools'],
-  ['../server/tools/job-tools.mjs', 'registerJobTools'],
-  ['../server/tools/host-tools.mjs', 'registerHostTools'],
-  ['../server/tools/github-tools.mjs', 'registerGithubTools'],
-  ['../server/tools/audit-tools.mjs', 'registerAuditTools']
-];
-
-// Register every runtime tool module against a collector. Returns
-// Map name -> {description, inputSchema, annotations, handler}. The modules call
-// getRuntime() lazily, inside handlers, so the hub can collect definitions with a getRuntime
-// that throws. Imported dynamically: the Mac probe agent never loads the runtime stack.
-export async function collectTools(getRuntime) {
-  const tools = new Map();
-  const collector = {
-    registerTool(name, config, handler) {
-      if (tools.has(name)) throw new Error('duplicate_tool');
-      tools.set(name, Object.freeze({ description: config.description, inputSchema: config.inputSchema,
-        annotations: config.annotations, handler }));
-    }
-  };
-  for (const [path, fn] of TOOL_MODULES) {
-    const mod = await import(path);
-    mod[fn](collector, getRuntime);
-  }
-  return tools;
-}
+// The tool modules served by the runtime, and their collection, live in server/registry.mjs
+// (Phase 5, spec D5): one list for the runtime agent, the Phase 4 hub and the Phase 5 remote
+// surface. collectTools(getRuntime) returns Map name -> {description, inputSchema, annotations,
+// handler}; the modules call getRuntime() lazily, inside handlers. The registry imports them
+// dynamically: the Mac probe agent never loads the runtime stack.
+export const collectTools = getRuntime => registryTools(getRuntime);
 
 // Tool definitions for the hub: schemas only, never a runtime.
 export async function collectToolDefinitions() {
-  const tools = await collectTools(() => { throw new Error('hub_has_no_runtime'); });
+  const tools = await registryDefinitions();
   for (const name of tools.keys()) if (!isForwardable(name)) throw new Error('tool_not_in_registry');
   return tools;
 }

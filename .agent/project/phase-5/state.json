@@ -1,0 +1,242 @@
+{
+  "phase": "VERIFYING",
+  "scope": "Phase 5: ChatGPT Chat conversations on Memo Bridge (memo-bridge v0.6.0, branch feat/phase-5-chatgpt-remote; lab-infra branch feat/phase-5-chatgpt-ingress)",
+  "summary": "Code integrated and green offline in both repositories. Independent review (verdict BLOCK) findings F1 to F6 fixed with regression tests (memo-bridge npm test 339/339, smoke ok, test:deploy 113 OK, build ok; lab-infra 58 + 49 unit tests, tests.sh 112 green). Nothing pushed or deployed. Runtime and manual acceptance are blocked on owner actions (enrollment, deploys, ChatGPT connection) and, for the write stage, on lab-infra #161 and the P2 landing-contract check.",
+  "updated": "2026-10-14",
+  "ready_for_manual_acceptance": false,
+  "blocked_on": [
+    "owner actions O5-02 to O5-12 (spec section 9)",
+    "lab-infra #161 (write stage only)"
+  ],
+  "requirements": {
+    "total": 22,
+    "covered": 22
+  },
+  "acceptance": {
+    "total": 22,
+    "verified": 7,
+    "verified_ids": [
+      "AC-P5-02",
+      "AC-P5-06",
+      "AC-P5-08",
+      "AC-P5-09",
+      "AC-P5-10",
+      "AC-P5-13",
+      "AC-P5-14"
+    ],
+    "automated_part_verified_runtime_pending": [
+      "AC-P5-03",
+      "AC-P5-07",
+      "AC-P5-15",
+      "AC-P5-16",
+      "AC-P5-17"
+    ],
+    "partial": [
+      "AC-P5-18",
+      "AC-P5-21",
+      "AC-P5-22"
+    ],
+    "not_started": [
+      "AC-P5-01",
+      "AC-P5-04",
+      "AC-P5-05",
+      "AC-P5-11",
+      "AC-P5-12",
+      "AC-P5-19",
+      "AC-P5-20"
+    ],
+    "failed": 0,
+    "notes": {
+      "AC-P5-21": "Node 24.21.0 only; Node 22 is not installed on this Mac",
+      "AC-P5-18": "AC-P4-14 and REQ-P4-14 amended in .agent/project/phase-4/spec.md; make check after deploy pending"
+    }
+  },
+  "todos": {
+    "done_in_code": {
+      "memo-bridge": [
+        "TODO-P5-02",
+        "TODO-P5-03",
+        "TODO-P5-04",
+        "TODO-P5-05",
+        "TODO-P5-06",
+        "TODO-P5-07",
+        "TODO-P5-08",
+        "TODO-P5-09",
+        "TODO-P5-10",
+        "TODO-P5-11",
+        "TODO-P5-12",
+        "TODO-P5-50",
+        "TODO-P5-51",
+        "TODO-P5-52"
+      ],
+      "lab-infra_committed_pending_owner_review": [
+        "TODO-P5-20",
+        "TODO-P5-21",
+        "TODO-P5-22",
+        "TODO-P5-23"
+      ],
+      "both": [
+        "TODO-P5-25"
+      ]
+    },
+    "open": {
+      "TODO-P5-01": {
+        "p": "P0",
+        "status": "partial",
+        "done": "Traefik v3.6 pages (tls-options, serverstransport, ratelimit, ipallowlist, passtlsclientcert), Traefik v3.6.25 forwarded_header.go, Pocket ID v2.18.0 appconfig/service.go and env_config.go",
+        "remaining": "GHSA-qh6q-598w-w6m2 patched version (U-P5-10), GitHub PAT Workflows permission, Pocket ID permission-key charset (U-P5-07), whether Traefik appends to X-Forwarded-For"
+      },
+      "TODO-P5-26": {
+        "p": "P2",
+        "status": "partial",
+        "remaining": "traefik_pin_digest stays false until an owner window (recreating Traefik interrupts every site)"
+      },
+      "TODO-P5-27": {
+        "p": "P2",
+        "status": "open",
+        "remaining": "journald retention for hub audit; monthly OpenAI CA and IP range recheck reminder"
+      },
+      "TODO-P5-30": {
+        "p": "P0",
+        "blocked_on": "O5-04, O5-07 (owner IP, deploy)"
+      },
+      "TODO-P5-31": {
+        "p": "P0",
+        "blocked_on": "O5-05 (enrollment)"
+      },
+      "TODO-P5-32": {
+        "p": "P0",
+        "blocked_on": "TODO-P5-31, a memo-bridge release with v0.6.0 pinned in lab-infra, memo_runner_enabled, O5-07"
+      },
+      "TODO-P5-33": {
+        "p": "P0",
+        "blocked_on": "TODO-P5-32, O5-06"
+      },
+      "TODO-P5-34": {
+        "p": "P0",
+        "blocked_on": "lab-infra #161 (TODO-P4-25), TODO-P4-40, TODO-P5-33"
+      },
+      "TODO-P5-35": {
+        "p": "P0",
+        "blocked_on": "TODO-P5-34"
+      },
+      "TODO-P5-36": {
+        "p": "P1",
+        "blocked_on": "TODO-P5-32"
+      },
+      "TODO-P5-40": {
+        "p": "P1",
+        "status": "partial",
+        "done": "evidence.md and this state.json",
+        "remaining": "Vault update (memo-labs-os.md via vault-commit.sh and memory-pointer.sh), manual acceptance checklist once runtime ACs run"
+      },
+      "FU-P5-B": {
+        "p": "P2",
+        "what": "worktree_diff has no paging and job_events no limit: both can only answer result_too_large when large"
+      },
+      "FU-P5-C": {
+        "p": "P2",
+        "what": "server/index.mjs keeps its inline projects_list and ALL_TOOLS (parity test guards drift); switch to registerCatalogTools"
+      },
+      "FU-P5-D": {
+        "p": "P2",
+        "what": "REQ-P5-14 structuredContent plus one-line content not implemented (compact text JSON kept for stdio parity)"
+      },
+      "FU-P5-E": {
+        "p": "P2",
+        "what": "remoteBranchHead in server/integrations/github.mjs runs git ls-remote without the push credential: github_create_pr remote check may fail on private repositories"
+      },
+      "FU-P5-F": {
+        "p": "P3",
+        "what": "the hub wire id is not the forwarder request id (meta carries it); hub-side op_timeout lines are not joined to the remote journal line"
+      },
+      "FU-P5-G": {
+        "p": "P1",
+        "what": "P2 of the review: confirm the merge contract never merges a ChatGPT-opened PR without human review before remote_writes is enabled",
+        "blocks": "TODO-P5-34"
+      },
+      "FU-P5-H": {
+        "p": "P2",
+        "what": "P4 of the review: periodic re-check of root runners while the write gate is open (today only at hub start)"
+      },
+      "FU-P5-I": {
+        "p": "P2",
+        "what": "P1 and P7 of the review: live SNI/Host fronting check after deploy; Origin scheme/port strictness"
+      },
+      "FU-P5-J": {
+        "p": "P3",
+        "what": "F3 deeper fix: forward the token capabilities in the hub envelope and intersect them in principalFromHub (today the runtime strips coordinator:audit and the hub enforces scopes per op)"
+      }
+    },
+    "p0_open": 7,
+    "p1_open": 3,
+    "p2_open": 8
+  },
+  "blocking_unknowns": [
+    "U-P5-02",
+    "U-P5-03",
+    "U-P5-04",
+    "U-P5-07",
+    "U-P5-08",
+    "U-P5-10"
+  ],
+  "risks": {
+    "critical_open": [
+      "R-P5-01 setup takeover (mitigated in code: enroll stage allowlist, public stage refused without an admin; open until TODO-P5-30/31)",
+      "R-P5-02 public exposure (mitigated in code: mTLS required by default and enforced by the ingress role, fix F2; open until AC-P5-01 runs live)",
+      "R-P5-03 writes before #161 (three-layer gate in code; open until #161)"
+    ],
+    "high_open": [
+      "R-P5-04 token theft",
+      "R-P5-06 prompt injection within the write invariants",
+      "R-P5-14 Pocket ID vulnerability (U-P5-10 unknown)"
+    ],
+    "added": {
+      "R-P5-17": "401 bucket keyed on client address: other ChatGPT users share OpenAI egress addresses with the owner and can spend that bucket (only invalid tokens count). Medium likelihood, medium impact (temporary owner lockout). Mitigation: raise unauthorized_per_min_per_ip, or key on the client certificate once U-P5-08 is observed.",
+      "R-P5-18": "The runner grants oidc:<owner sub> every capability but coordinator:audit once remote_writes is enabled (fix F3), wider than the token scopes; the hub enforces the scopes per call. Low likelihood (needs the hub's TLS key), medium impact.",
+      "R-P5-19": "Not run on Node 22 (engines >=22.16). Low likelihood, medium impact.",
+      "R-P5-20": "The hub reads the JWKS from 127.0.0.1:1411: if the Pocket ID port mapping changes, every token gets 500 (fail closed). Low likelihood, medium impact.",
+      "R-P5-21": "Traefik behaviour on X-Forwarded-For (append or replace) and clientAuth on HTTP/3 are inferred, not verified. Medium likelihood, low to medium impact."
+    }
+  },
+  "owner_actions_open": [
+    "O5-02 hostname confirmation",
+    "O5-03 no DNS change",
+    "O5-04 public exposure approval and owner IP",
+    "O5-05 Pocket ID enrollment, API, CIMD access, owner sub",
+    "O5-06 ChatGPT connection (read stage)",
+    "O5-07 review and merge lab-infra and memo-bridge branches, run deploys",
+    "O5-08 PR token permission",
+    "O5-09 #161 maintenance window",
+    "O5-10 opening the write gate",
+    "O5-11 decisions: session binding, project allowlist, coordinator:write before #161",
+    "O5-12 manual acceptance"
+  ],
+  "next_steps": [
+    "Owner reviews and merges both branches (O5-07); tag a memo-bridge release and pin it in lab-infra memo_bridge_version",
+    "TODO-P5-30/31: enrollment window, then auth stage public",
+    "TODO-P5-32: memo_runner_enabled, memo_bridge_remote_listener, then memo_bridge_public; run AC-P5-01/03/18",
+    "TODO-P5-33: read-stage ChatGPT connection; record claims, token lifetime (set max_token_age_sec), timeout, session stability"
+  ],
+  "verifier_review": {
+    "date": "2026-10-14",
+    "verdict": "BLOCK, findings fixed",
+    "fixed": {
+      "F1": "HIGH, D9 base bypass: tests/remote-write-guard.test.mjs F1 create/push/pull request",
+      "F2": "HIGH, lab-infra mTLS required by default and enforced while public: test_fix_f2_*",
+      "F3": "MEDIUM, remote principal never holds coordinator:audit: tests/policy-remote.test.mjs fix F3",
+      "F4": "MEDIUM, jobs_submit/job_cancel session binding and request_id: tests/remote-job-binding.test.mjs",
+      "F5": "LOW, lab-infra runner guard matches the hub check: RunnerGuardTests",
+      "F6": "LOW, accepted only for RETRY_SAFE_OPS: tests/remote-deadline.test.mjs fix F6"
+    },
+    "not_fixed_plausible": {
+      "P1": "domain fronting, SNI vs Host with different TLS options: test live with curl --resolve after deploy (AC-P5-01)",
+      "P2": "auto-merge path: check memolabs-dev/.github landing rules require human review before opening the write gate (gates TODO-P5-34)",
+      "P3": "401 bucket lockout from OpenAI egress IPs: already R-P5-17",
+      "P4": "write gate checked only at hub start: no periodic re-check of root runners",
+      "P5": "tests/jobs.test.mjs hang not reproduced here (339/339 incl. jobs.test.mjs after rebase on f9bc283)",
+      "P6": ".github symlink committed by a job: unverified whether GitHub follows it",
+      "P7": "Origin check ignores scheme and port (SDK validateOriginHeader); informational, bearer still required"
+    }
+  }
+}

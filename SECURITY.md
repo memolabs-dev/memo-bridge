@@ -88,3 +88,21 @@ Residual risks on the VPS:
 - A job has outbound internet (registries, GitHub) and could send out source code of an owner-controlled pilot repository; it holds no secret to send.
 - Root agents on the VPS (opencode, claude remote control) can read `/etc/credstore`; token scope and expiry bound the damage (owner decision O-D7).
 - The systemd semantics this relies on are read from the systemd 257 man pages and still to be exercised on the VPS (`docs/RUNNER_VPS.md`, "Still to verify").
+
+## Remote surface for ChatGPT (v0.6, Phase 5)
+
+Details: `docs/REMOTE_CHATGPT.md`, `docs/HUB_SECURITY.md`, `docs/OIDC_RESOURCE.md`. Not deployed yet.
+
+On 2026-10-14 a ChatGPT Chat conversation on the owner's Plus account called a remote write tool without asking for confirmation (EV-P5-01). Every rule below is therefore enforced by the server; annotations and tool descriptions only inform the model.
+
+- **One public endpoint, OAuth only.** `https://bridge.memolabs.dev/mcp`, through Traefik with mTLS to the OpenAI Connectors CA, to a separate hub listener on 127.0.0.1:9445 that accepts only Pocket ID access tokens (`typ: at+jwt`, exact issuer and audience, the owner's `sub`, an allowlisted `client_id`, bounded age). The static bearer, `/agent` and `/health` are not reachable from it.
+- **Write gate in three layers.** Write tools are not listed while `remote_writes` is disabled; with writes enabled the hub refuses to start while a GitHub Actions runner runs as root; the runner grants the remote owner from the same `remote.json` and strips write capabilities while that file does not enable writes.
+- **Invariants on every remote write.** Project allowlist; no write to `.github/workflows`, `.github/actions` or `.github/dependabot.yml` (also refused in commits and anywhere in pushed history, for every caller); push only the workspace branch, never with force, never the default branch; pull requests only on a head the workspace pushed; no merge tool; Mac workspaces refused.
+- **Bounded and journaled.** Results at most 24 KiB (`result_too_large`, never cut), remote writes at most 96 KiB, request bodies at most 128 KiB, per-class rate limits and a 401 bucket per client address. One journal line per call and a runtime event sharing its `request_id`; neither holds arguments, tokens or file contents.
+
+Residual risks:
+- Tool results (code, Issues, logs of the allowlisted projects) go to OpenAI by design (R-P5-09).
+- The mTLS certificate identifies OpenAI, not the owner: another ChatGPT user can reach the listener and is refused by the token checks (R-P5-05). Such a user, sharing OpenAI's egress addresses, can also spend the 401 bucket of those addresses and briefly lock the owner out; the bucket only counts invalid tokens.
+- A prompt injection in an Issue or a file can steer a conversation within the write invariants above (for example a bad commit on the workspace branch). Pull requests still land only through the merge contract and human review for workflow and infrastructure changes.
+- The Pocket ID token claims, ChatGPT's client certificate, `Origin` and timeout behaviour are documented or inferred, not yet observed (`docs/REMOTE_CHATGPT.md`, "Not verified yet").
+

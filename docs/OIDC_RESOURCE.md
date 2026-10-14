@@ -1,21 +1,57 @@
-# Memo Bridge — owner-only OAuth resource validation
+# Memo Bridge: owner-only OAuth resource server
 
-Optional mode in bridge/oidc.mjs. Keep the current production private hub unchanged until owner authentication is provisioned and tested.
+`bridge/oidc.mjs` (`createOidcVerifier`) is the OAuth resource-server side of the public
+listener (`bridge/public-listener.mjs`, port 9445), the only place where Memo Bridge accepts an
+OAuth token. How ChatGPT uses it, end to end: `docs/REMOTE_CHATGPT.md`.
 
-## Enforcement and protections
+## What a token must be
 
-The resource server accepts only JWTs signed by trusted provider keys, with exact issuer, canonical MCP audience URL, immutable owner subject ID, hosts:read scope, expiration, and recent issue time. It rejects invalid/expired or unauthorized tokens and publishes OAuth protected-resource metadata per RFC 9728. The agent WebSocket endpoint retains independent Ed25519 enrollment.
+An RFC 9068 access token (`typ: at+jwt`), signed RS256, ES256 or EdDSA by a key of the
+configured JWKS, with:
 
-The provider metadata and JWKS URI are explicitly configured and TLS-only. Never forward arbitrary upstream tokens or treat a provider ID token as an MCP access token.
+- `iss` exactly the issuer, `https://auth.memolabs.dev`;
+- `aud` containing the canonical resource `https://bridge.memolabs.dev/mcp` (the same string in
+  the protected resource metadata, the Pocket ID API, the hub configuration and ChatGPT);
+- `sub` equal to the configured owner sub;
+- `client_id` on the configured allowlist (the ChatGPT CIMD URL);
+- `exp`, and `iat` no older than `max_token_age_sec` (with 30 s of clock tolerance);
+- the scope `coordinator:read` (`scope`, or `scp` when `scope` is absent).
 
-## Current state
+An ID token, a token for another resource, another user, another client, an expired or too old
+token, or the static owner bearer is a 401 `invalid_token` with a fixed message; the reason goes
+to the journal only. A missing baseline scope is a 403 `insufficient_scope`. An unreachable JWKS
+is a 500, so ChatGPT does not loop on re-authorization.
 
-Pocket ID v2.18.0 is installed on the Memo Labs VPS under /opt/memo-bridge-auth, bound only to 127.0.0.1:1411. Discovery responds HTTP 200 and advertises PKCE S256. The configured issuer is https://auth.memolabs.dev, but there is no public route and no enrolled owner yet. The existing Memo Bridge remains private and on its previous loopback authentication mode.
+Scopes are capability names. The capabilities of the principal `oidc:<sub>` are the scopes,
+capped by the ceiling, minus every write capability while `remote_writes` is not `enabled`.
 
-Pocket ID is an upstream passkey identity provider. It is not assumed to issue audience-bound access tokens for https://bridge.memolabs.dev/mcp. Validate OAuth resource-indicator support or add a secure token brokerage/authorization server to mint dedicated MCP access tokens. Public access also requires owner passkey setup, issuer metadata, client registration (CIMD or DCR), authorization code + PKCE, RFC8707 resource indicators, revocation, rate limits, and end-to-end negative access tests.
+The JWKS URL is HTTPS on the issuer origin, or plain HTTP on a loopback address literal only
+(`127.0.0.1`, `[::1]`): on the VPS the hub reads Pocket ID's keys from its loopback port. jose
+caches the key set for 10 minutes and refetches on an unknown key at most every 30 seconds.
 
-Private secrets remain on the host and are never written to Git.
+The protected resource metadata (RFC 9728) is served at `/.well-known/oauth-protected-resource`
+and `/.well-known/oauth-protected-resource/mcp`: `resource`, `authorization_servers` (the
+issuer), `scopes_supported` (`coordinator:read`, plus the write scopes once the gate is open),
+`bearer_methods_supported: ["header"]`.
+
+## Removed in Phase 5
+
+The Phase 1 `oidcGuard` and the OIDC mode of the 9443 listener (`MEMO_BRIDGE_OIDC_SETTINGS`,
+scope `hosts:read`, 20 minutes, no `typ` check, so an ID token with the right audience passed)
+are gone. Setting `MEMO_BRIDGE_OIDC_SETTINGS` stops the hub at start.
+
+## RFC 8707 and CIMD: status
+
+Pocket ID v2.18.0 maps the RFC 8707 `resource` to `aud` through its APIs feature and supports
+CIMD (read in its source and documentation, spec section 0). Neither has been exercised live
+yet: whether the issued token carries `typ: at+jwt`, a `client_id` claim and the expected scopes
+is unknown U-P5-02, answered in the read-stage window (TODO-P5-33), where the hub journal records
+the decoded, non-secret claims. If Pocket ID does not set `typ` or `client_id` as expected,
+every token is refused (fail closed) and the verifier or the identity setup has to change.
 
 ## Tests
 
-The test suite covers signature and claim validation, token expiration, metadata discovery, HTTPS 401 responses, authorized MCP listing, and rejected impostors. No live public OAuth flow is claimed.
+`tests/oidc-verifier.test.mjs` (every claim check), `tests/oidc-resource.test.mjs` (configuration
+refusals, JWKS location), `tests/public-listener.test.mjs` (HTTP shapes over loopback TLS),
+`tests/remote-e2e.test.mjs` (an MCP client through the whole path with minted tokens). No live
+OAuth flow is claimed.

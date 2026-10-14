@@ -14,13 +14,20 @@ import { readFile } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { join } from 'node:path';
 import { projectInfo, readProjectRegistry } from '../catalog.mjs';
-import { authorize, ownsWorkspace, workerFor } from './policy.mjs';
+import { CLIENT_TYPES, authorize, isRemotePrincipal, ownsWorkspace, workerFor } from './policy.mjs';
+import { CAPABILITIES } from './policy.mjs';
+import { runOnce } from './store.mjs';
+import { remotePolicyFromEnv, remoteProjectRefusal, requestMeta, sessionBindingDecision } from '../../bridge/write-gate.mjs';
 import { ACTIVE_JOB_STATUSES } from '../runners/executor.mjs';
 import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
+import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
+  isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
+  from './batches.mjs';
 
-export const CLIENT_TYPES = Object.freeze(['chatgpt', 'claude-code', 'codex', 'opencode', 'hermes', 'cuesheet', 'cli', 'other']);
+// The list lives in policy.mjs, so a principal can carry a server-derived client kind (Phase 5).
+export { CLIENT_TYPES };
 export const HOSTS = Object.freeze(['mac', 'vps']);
 export const SUMMARY_MAX = 2000;
 export const TASKS_LIMIT = Object.freeze({ max: 100, default: 30 });
@@ -34,11 +41,39 @@ const CLAIM_RE = /^[0-9a-f]{32}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_closed', 'project_mismatch',
-  'repo_not_allowed', 'issue_not_ready', 'issue_changed', 'lease_race_lost', 'lease_denied']);
+  'repo_not_allowed', 'issue_not_ready', 'issue_changed', 'lease_race_lost', 'lease_denied', 'host_not_remote_enabled',
+  'project_not_allowed', 'session_mismatch']);
+// Phase 5: the only host a remote (OIDC) principal's workspace may live on. Mac-hosted
+// workspaces driven remotely are deferred to Phase 5b (spec non-goals, REQ-P5-08).
+const REMOTE_HOST = 'vps';
 const UNCERTAIN = new Set(['ledger_unavailable', 'ledger_outcome_unknown']);
 const MAX_LIST = 200;
 const WRITES = new Set(['workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete',
-  'task_checkpoint']);
+  'task_checkpoint', 'batch_create', 'task_next']);
+// Phase 5 remote guards (D8, D9, REQ-P5-15), applied around the operations whatever the caller:
+// - the project allowlist binds remote principals when they open or extend work; giving work
+//   back (release, complete, close) stays possible after a project leaves the allowlist;
+// - the session binding is checked on every write that names a workspace;
+// - task_claim takes client_request_id (Phase 4 FU-5): a retry returns the first result.
+// Batches (TODO-P5-50 to 52): batch_create and batch_status name their project, task_next works
+// in the project of its workspace; task_next and batch_create replay their first result.
+const REMOTE_PROJECT_OPS = new Set(['workspace_open', 'task_claim', 'task_renew', 'task_checkpoint', 'batch_create',
+  'batch_status', 'task_next']);
+const BOUND_OPS = new Set(['workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
+  'task_next']);
+const IDEMPOTENT_OPS = new Set(['task_claim', 'task_next', 'batch_create']);
+// Issues a task_next of this process is claiming right now: concurrent task_next calls try
+// them last, so parallel conversations on one batch rarely race for the same Issue. Only an
+// optimisation: the ledger alone decides who holds a task.
+const CLAIMING = new Map();
+const claiming = ref => (CLAIMING.get(ref) ?? 0) > 0;
+const holdClaiming = ref => CLAIMING.set(ref, (CLAIMING.get(ref) ?? 0) + 1);
+const dropClaiming = ref => { const n = (CLAIMING.get(ref) ?? 1) - 1; if (n > 0) CLAIMING.set(ref, n); else CLAIMING.delete(ref); };
+// Calls running now in this process, by hub request id, so workspace_status can say that an
+// operation answered 'accepted' is still running.
+const IN_FLIGHT = new Map();
+const IN_FLIGHT_MAX = 1000;
+const REQUESTS_SHOWN = 10;
 // workspace_recover bounds: ledger status calls are slow (python + gh), so only the most
 // recent held claims are reconciled.
 const RECOVER = Object.freeze({ claims: 10, checkpoints: 10, jobs: 10, worktrees: 50, actions: 20 });
@@ -238,23 +273,32 @@ export { workerFor };
 export function createCoordinator({ store, principal, ledger, now = Date.now, catalogOptions = {},
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
-  readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = query => ghSearchIssues(query) }) {
+  readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = query => ghSearchIssues(query),
+  remotePolicy = remotePolicyFromEnv(), github = null }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
+  const remote = isRemotePrincipal(principal);
+  // Where the call came from and which client made it, as the server set them on the principal
+  // (D6); never read from arguments. Absent attributes stay null in the journal.
+  const principalVia = ['stdio', 'hub'].includes(principal.via) ? principal.via : (remote ? 'hub' : null);
+  const principalClientType = CLIENT_TYPES.includes(principal.client_type) ? principal.client_type : null;
 
-  const audit = (repo, op, outcome, code, ids = {}) => repo.appendEvent({
+  const audit = (repo, op, outcome, code, ids = {}, meta = {}) => repo.appendEvent({
     at: now(), principal: principal.id,
     // Only well-formed identifiers reach the journal; arbitrary caller text never does.
     workspace_id: WS_RE.test(ids.workspace_id ?? '') ? ids.workspace_id : null,
     issue_ref: parseIssueRef(ids.issue) ? ids.issue : null,
-    op, outcome, code: code ?? null
+    op, outcome, code: code ?? null,
+    via: principalVia, client_type: principalClientType, request_id: meta.request_id ?? null
   });
   // Writes always journal their outcome; reads journal only refusals.
-  const journal = (op, result, ids) => {
+  const journal = (op, result, ids, meta = {}) => {
     const failed = result?.ok === false;
     if (!WRITES.has(op) && !(failed && DENIED.has(result.error))) return Promise.resolve();
     const outcome = failed ? (DENIED.has(result.error) ? 'denied' : 'error') : 'ok';
-    return store.transaction(repo => audit(repo, op, outcome, failed ? result.error : null, ids)).catch(() => {});
+    return store.transaction(repo => audit(repo, op, outcome, failed ? result.error : null, ids, meta)).catch(() => {});
   };
+  // One extra journal row (session checks, rebinds); never throws.
+  const note = (op, outcome, code, ids, meta) => store.transaction(repo => audit(repo, op, outcome, code, ids, meta)).catch(() => {});
   const read = fn => store.transaction(repo => fn(repo, now()), { write: false });
   const write = fn => store.transaction(repo => fn(repo, now()));
 
@@ -410,14 +454,64 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     return actions.slice(0, RECOVER.actions).map(a => a.slice(0, 300));
   }
 
+  // GitHub for batches: injected in tests, else the shared integration (server/integrations/
+  // github.mjs, loaded lazily: it imports this module).
+  let gitHubClient = github;
+  async function gitHub() {
+    if (!gitHubClient) {
+      const { createGitHub } = await import('../integrations/github.mjs');
+      gitHubClient = createGitHub({ catalogOptions });
+    }
+    return gitHubClient;
+  }
+
+  // The batch repository of a project: its GitHub origin, which must be in the ledger
+  // allowlist (else no task of the batch could ever be claimed).
+  async function batchRepo(projectName) {
+    const project = await resolve(projectName);
+    if (!project.ok) return project;
+    const origin = await projectRemote(project.project);
+    if (!origin) return fail('project_origin_unknown');
+    const allowlist = await readAllowlist();
+    if (!allowlist.ok) return allowlist;
+    const repo = allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase());
+    if (!repo) return fail('repo_not_allowed');
+    const [owner, name] = repo.split('/');
+    return { ok: true, project: project.project.name, repo: { full: repo, owner, name } };
+  }
+
+  // The Issues of a batch, newest data from GitHub, with their owner/repo#n reference.
+  async function batchIssues(repo, batch) {
+    const listed = await (await gitHub()).labelledIssues(repo, batchLabel(batch), { limit: BATCH_SCAN });
+    if (!listed.ok) return listed;
+    return { ok: true, issues: listed.issues.map(i => ({ ...i, ref: `${repo.full}#${i.number}` })) };
+  }
+
+  const claimRules = { ready: READY_LABEL, priorities: PRIORITIES, blocking: BLOCKING_LABELS };
+  const liveLocal = (claim, at) => claim?.state === 'claimed' && Date.parse(claim.expires_at) > at;
+
+  // What task_next hands a worker conversation: the task, its claim and the fixed steps.
+  function nextTask(issue, claim, workspaceId) {
+    const parsed = parseTaskBody(issue.body);
+    return { issue: issue.ref, title: issue.title, url: issue.url,
+      priority: (priorityOf(issue, PRIORITIES) ?? '').slice('priority:'.length) || null,
+      scope: parsed.scope, acceptance: parsed.acceptance, ...(parsed.scope || parsed.acceptance ? {} : { body: issue.body }),
+      workspace_id: workspaceId, claim_id: claim.claim_id, fence: claim.fence, expires_at: claim.expires_at,
+      instructions: workerInstructions({ workspaceId, issue: issue.ref, expiresAt: claim.expires_at }) };
+  }
+
   const operations = {
     async workspaceOpen(args) {
-      const clientType = args.client_type ?? 'other';
+      // A client kind the server derived (principal.client_type, Phase 5 D6) wins over the
+      // argument a model wrote; otherwise the argument, as before.
+      const clientType = principal.client_type ?? args.client_type ?? 'other';
       if (!CLIENT_TYPES.includes(clientType)) return fail('invalid_input', 'client_type');
       const label = cleanText(args.client_label, 80);
       if (label === undefined) return fail('invalid_input', 'client_label');
-      const hostId = args.host ?? host;
+      const remote = isRemotePrincipal(principal);
+      const hostId = args.host ?? (remote ? REMOTE_HOST : host);
       if (!HOSTS.includes(hostId)) return fail('invalid_input', 'host');
+      if (remote && hostId !== REMOTE_HOST) return fail('host_not_remote_enabled');
       if (args.branch !== undefined && args.branch !== null && !validBranch(args.branch)) return fail('invalid_input', 'branch');
       const project = await resolve(args.project);
       if (!project.ok) return project;
@@ -434,9 +528,17 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     async workspaceStatus(args) {
       const ws = await ownedWorkspace(args.workspace_id, { requireActive: false });
       if (ws.error) return ws.error;
-      const claims = await read(repo => repo.claimsOf(ws.workspace.id, 'claimed'));
+      const { claims, requests } = await read(repo => ({ claims: repo.claimsOf(ws.workspace.id, 'claimed'),
+        requests: repo.listEvents({ workspace_id: ws.workspace.id, with_request_id: true, limit: REQUESTS_SHOWN }) }));
+      // Outcomes of the last calls that carried a hub request id (how an 'accepted' answer is
+      // resolved, REQ-P5-15), and the ones still running in this process.
+      const running = [...IN_FLIGHT.entries()].filter(([, r]) => r.workspace_id === ws.workspace.id && r.principal === principal.id)
+        .slice(0, REQUESTS_SHOWN).map(([id, r]) => ({ request_id: id, op: r.op, started_at: iso(r.started) }));
       return { ok: true, workspace: publicWorkspace(ws.workspace), worker: workerFor(ws.workspace),
-        claims: claims.map(publicClaim) };
+        claims: claims.map(publicClaim),
+        ...(requests.length ? { requests: requests.map(e => ({ request_id: e.request_id, op: e.op, outcome: e.outcome,
+          code: e.code, at: iso(e.at) })) } : {}),
+        ...(running.length ? { in_flight: running } : {}) };
     },
 
     async workspaceList(args) {
@@ -510,11 +612,16 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (max === undefined) return fail('invalid_input', 'limit');
       let projects;
       if (args.project !== undefined) {
+        const refusal = remoteProjectRefusal(principal, args.project, remotePolicy);
+        if (refusal) return refusal;
         const project = await resolve(args.project);
         if (!project.ok) return project;
         projects = [project.project];
       } else {
+        if (remote && !remotePolicy.configured) return remoteProjectRefusal(principal, null, remotePolicy);
         try { projects = (await listProjectRepos()).slice(0, TASKS_SCAN.projects); } catch { return fail('catalog_unavailable'); }
+        // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09).
+        if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
       }
       const allowlist = await readAllowlist();
       if (!allowlist.ok) return allowlist;
@@ -555,6 +662,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     async taskStatus(args) {
       const issue = parseIssueRef(args.issue);
       if (!issue) return fail('invalid_input', 'issue');
+      if (remote && !(await remoteOrigins()).has(issue.repo.toLowerCase())) return fail('project_not_allowed');
       const lease = await ledger.status(issue);
       const checkpoints = await read(repo => repo.listCheckpoints(issue.ref, 20));
       if (!lease.ok) return { ...lease, checkpoints: checkpoints.map(publicCheckpoint) };
@@ -572,6 +680,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const project = await resolveProject(ws.workspace.project_id);
       const origin = project.ok ? await projectRemote(project.project) : null;
       if (origin && origin.toLowerCase() !== issue.repo.toLowerCase()) return fail('project_mismatch');
+      // Remotely the Issue must be proven to belong to the allowlisted project (D9).
+      if (remote && !origin) return fail('project_origin_unknown');
       const worker = workerFor(ws.workspace);
       let receipt; let recovered = false;
       const result = await ledger.claim(issue, worker, ttl);
@@ -671,6 +781,132 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     }
   };
 
+  // Batches (TODO-P5-50 to 52). A batch is a label on ordinary claimable Issues; claims go
+  // through operations.taskClaim, the same path as task_claim.
+  Object.assign(operations, {
+    // Create up to BATCH_MAX Issues labelled agent:ready, priority:<p> and agent:batch-<id>.
+    // Stops at the first failure and reports what exists: the answer is ok either way (a
+    // retry with the same client_request_id replays it and never creates duplicates).
+    async batchCreate(args) {
+      const checked = validateBatchTasks(args.tasks);
+      if (checked.error) return fail('invalid_input', checked.error);
+      const name = batchLabelText(args.name);
+      if (name === undefined) return fail('invalid_input', 'name');
+      const target = await batchRepo(args.project);
+      if (!target.ok) return target;
+      const gh = await gitHub();
+      const batch = newBatchId();
+      const label = batchLabel(batch);
+      const made = await gh.ensureLabel(target.repo, { name: label, color: BATCH_LABEL_COLOR,
+        description: (name ? `Memo Bridge batch: ${name}` : 'Memo Bridge batch').slice(0, 100) });
+      if (!made.ok) return made;
+      const created = []; let failure = null;
+      for (const task of checked.tasks) {
+        const labels = [READY_LABEL, `priority:${task.priority}`, label];
+        const r = await gh.createIssue(target.repo, { title: task.title, body: issueBody(task, batch, name), labels });
+        if (!r.ok) { failure = { index: created.length, error: r.error, ...(r.uncertain ? { uncertain: true } : {}) }; break; }
+        // Labels set by someone without push access are silently dropped (GitHub REST docs,
+        // "Create an issue"): an Issue without them would never be claimable.
+        const missing = labels.filter(l => !(r.issue.labels ?? []).includes(l));
+        created.push({ issue: `${target.repo.full}#${r.issue.number}`, number: r.issue.number, title: r.issue.title,
+          url: r.issue.url, priority: task.priority, ...(missing.length ? { missing_labels: missing } : {}) });
+        if (missing.length) { failure = { index: created.length - 1, error: 'labels_dropped' }; break; }
+      }
+      return { ok: true, batch, label, project: target.project, repo: target.repo.full, count: created.length, tasks: created,
+        ...(failure ? { partial: true, failed: failure, not_created: checked.tasks.length - created.length +
+          (failure.error === 'labels_dropped' ? 1 : 0) } : {}),
+        paste: pasteSentence(batch, target.project),
+        next: 'Open one ChatGPT conversation per task and paste the sentence in each. Follow progress with batch_status.' };
+    },
+
+    // Claim the next ready, unclaimed task of a batch for this workspace. A claim the ledger
+    // refuses because someone else got there first moves on to the next task.
+    async taskNext(args, meta) {
+      if (!BATCH_ID_RE.test(args.batch ?? '')) return fail('invalid_input', 'batch');
+      const ttl = ttlOf(args.ttl_seconds);
+      if (ttl === undefined) return fail('invalid_input', 'ttl_seconds');
+      const ws = await ownedWorkspace(args.workspace_id);
+      if (ws.error) return ws.error;
+      const target = await batchRepo(ws.workspace.project_id);
+      if (!target.ok) return target;
+      const listed = await batchIssues(target.repo, args.batch);
+      if (!listed.ok) return listed;
+      if (!listed.issues.length) return fail('unknown_batch');
+      const byRef = new Map(listed.issues.map(i => [i.ref, i]));
+      const local = await read((repo, at) => ({ at,
+        mine: repo.claimsOf(ws.workspace.id, 'claimed').filter(c => byRef.has(c.issue_ref) && Date.parse(c.expires_at) > at),
+        others: new Set(listed.issues.filter(i => repo.claimsOfIssue(i.ref, 5).some(c => c.workspace_id !== ws.workspace.id &&
+          liveLocal(c, at))).map(i => i.ref)) }));
+      // One task per conversation: a workspace that already holds one of the batch gets it back.
+      if (local.mine.length) {
+        const c = local.mine[local.mine.length - 1];
+        return { ok: true, done: false, already_held: true, batch: args.batch,
+          task: nextTask(byRef.get(c.issue_ref), { claim_id: c.claim_id, fence: c.fence_sha, expires_at: c.expires_at }, ws.workspace.id) };
+      }
+      const candidates = claimOrder(listed.issues.filter(i => isClaimable(i, claimRules) && !local.others.has(i.ref)), PRIORITIES,
+        new Set(listed.issues.filter(i => claiming(i.ref)).map(i => i.ref))).slice(0, BATCH_MAX);
+      const skipped = [];
+      for (const issue of candidates) {
+        holdClaiming(issue.ref);
+        let claim;
+        try { claim = await operations.taskClaim({ workspace_id: ws.workspace.id, issue: issue.ref, ttl_seconds: ttl }, meta); }
+        finally { dropClaiming(issue.ref); }
+        if (claim.ok) {
+          return { ok: true, done: false, batch: args.batch, task: nextTask(issue, claim, ws.workspace.id),
+            ...(skipped.length ? { skipped } : {}) };
+        }
+        if (!NEXT_ON.has(claim.error)) return { ...claim, ...(skipped.length ? { skipped } : {}) };
+        skipped.push({ issue: issue.ref, error: claim.error });
+      }
+      const open = listed.issues.filter(i => i.state === 'open').length;
+      return { ok: true, done: true, batch: args.batch, open_tasks: open, held_elsewhere: local.others.size + skipped.length,
+        detail: 'no ready, unclaimed task left in this batch' };
+    },
+
+    // Per task: state, holder, pull requests; counts and stale leases. Reads only.
+    async batchStatus(args) {
+      if (!BATCH_ID_RE.test(args.batch ?? '')) return fail('invalid_input', 'batch');
+      const target = await batchRepo(args.project);
+      if (!target.ok) return target;
+      const listed = await batchIssues(target.repo, args.batch);
+      if (!listed.ok) return listed;
+      if (!listed.issues.length) return fail('unknown_batch');
+      const leases = await Promise.all(listed.issues.map(i => ledger.status(parseIssueRef(i.ref)).catch(() => fail('ledger_unavailable'))));
+      const local = await read((repo, at) => ({ at, rows: listed.issues.map(i => {
+        const claims = repo.claimsOfIssue(i.ref, 5);
+        const branches = repo.listWorktrees({ issue_ref: i.ref, limit: 5 }).map(w => w.branch);
+        const workspaces = new Map(claims.map(c => [c.workspace_id, repo.getWorkspace(c.workspace_id)]));
+        return { claims, branches, workspaces };
+      }) }));
+      const pulls = await (await gitHub()).linkedPulls(target.repo, { numbers: listed.issues.map(i => i.number),
+        branches: new Map(listed.issues.map((i, k) => [i.number, local.rows[k].branches])) });
+      const tasks = listed.issues.map((issue, k) => {
+        const lease = leases[k]?.ok ? leases[k].receipt : null;
+        const row = local.rows[k];
+        // The local claim the ledger's current lease is about, else the most recent one.
+        const claim = row.claims.find(c => lease?.claim_id && c.claim_id === lease.claim_id) ?? row.claims[0] ?? null;
+        const decoded = claim ? decodeOutcome(claim.outcome) : { outcome: null };
+        const state = taskState(issue, lease, claim ? { ...claim, outcome: decoded.outcome } : null, { ...claimRules, now: local.at });
+        const ws = claim ? row.workspaces.get(claim.workspace_id) : null;
+        const holder = lease?.state === 'claimed' ? { worker: lease.worker, expires_at: lease.expires_at,
+          ...(ws && claim?.claim_id === lease.claim_id ? { workspace_id: ws.id, client_type: ws.client_type,
+            // Labels are free text of another principal's session: shown only for your own.
+            ...(ownsWorkspace(principal, ws) ? { client_label: ws.client_label, mine: true } : { mine: false }) } : {}) } : null;
+        return { issue: issue.ref, number: issue.number, title: issue.title, url: issue.url, state,
+          priority: (priorityOf(issue, PRIORITIES) ?? '').slice('priority:'.length) || null,
+          ...(holder ? { holder } : {}), ...(leases[k]?.ok ? {} : { lease_error: leases[k]?.error ?? 'ledger_unavailable' }),
+          ...(decoded.outcome && state !== 'claimed' ? { last_outcome: decoded.outcome } : {}),
+          pull_requests: pulls.ok ? (pulls.pulls.get(issue.number) ?? []) : null };
+      });
+      const counts = Object.fromEntries(TASK_STATES.map(s => [s, tasks.filter(t => t.state === s).length]).filter(([, n]) => n));
+      const stale = tasks.filter(t => t.state === 'stale').map(t => ({ issue: t.issue, worker: t.holder?.worker ?? null,
+        expired_at: t.holder?.expires_at ?? null }));
+      return { ok: true, batch: args.batch, project: target.project, repo: target.repo.full, total: tasks.length, counts,
+        stale_leases: stale, tasks, ...(pulls.ok ? {} : { pull_requests_error: pulls.error }),
+        truncated: listed.issues.length >= BATCH_SCAN };
+    }
+  });
+
   // Every call: authorization first (so every refusal is journaled whatever the arguments),
   // then the operation, then the journal entry. Store failures never crash the server.
   // The operation name is the MCP tool name and the policy key (policy.mjs OPERATION_CAPABILITY).
@@ -678,23 +914,107 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     workspaceOpen: 'workspace_open', workspaceStatus: 'workspace_status', workspaceList: 'workspace_list',
     workspaceClose: 'workspace_close', workspaceRecover: 'workspace_recover',
     tasksList: 'tasks_list', taskStatus: 'task_status', taskClaim: 'task_claim', taskRenew: 'task_renew',
-    taskRelease: 'task_release', taskComplete: 'task_complete', taskCheckpoint: 'task_checkpoint'
+    taskRelease: 'task_release', taskComplete: 'task_complete', taskCheckpoint: 'task_checkpoint',
+    batchCreate: 'batch_create', taskNext: 'task_next', batchStatus: 'batch_status'
   };
+  // GitHub origins (owner/repo, lower case) of the allowlisted projects, for remote principals.
+  async function remoteOrigins() {
+    const origins = new Set();
+    if (!remotePolicy.configured) return origins;
+    for (const name of remotePolicy.projects) {
+      const project = await resolveProject(name);
+      const origin = project?.ok ? await projectRemote(project.project) : null;
+      if (origin) origins.add(origin.toLowerCase());
+    }
+    return origins;
+  }
+
+  // The project an op works on, for the allowlist: the argument of workspace_open, else the
+  // project of the owned workspace it names. null when there is nothing to check yet (the
+  // operation itself then refuses the unknown or foreign workspace).
+  async function projectOf(op, args) {
+    if (op === 'workspace_open' || op === 'batch_create' || op === 'batch_status') return typeof args.project === 'string' ? args.project : '';
+    if (!WS_RE.test(args.workspace_id ?? '')) return null;
+    const workspace = await read(repo => repo.getWorkspace(args.workspace_id));
+    return workspace && ownsWorkspace(principal, workspace) ? workspace.project_id : null;
+  }
+
+  // The checks and bookkeeping around one operation. Returns {result, warning}.
+  async function guarded(op, method, args, meta) {
+    if (remote && REMOTE_PROJECT_OPS.has(op)) {
+      const project = await projectOf(op, args);
+      const refusal = project === null ? null : remoteProjectRefusal(principal, project, remotePolicy);
+      if (refusal) return { result: refusal };
+    }
+    let warning = null;
+    if (BOUND_OPS.has(op) && meta.client_session && WS_RE.test(args.workspace_id ?? '')) {
+      const workspace = await read(repo => repo.getWorkspace(args.workspace_id));
+      if (workspace && ownsWorkspace(principal, workspace)) {
+        const decision = sessionBindingDecision(workspace.client_session, meta.client_session, remotePolicy.session_binding);
+        if (!decision.ok) return { result: decision, mismatch: true };
+        warning = decision.warning ?? null;
+      }
+    }
+    const run = () => operations[method](args, meta);
+    let result = IDEMPOTENT_OPS.has(op)
+      ? await runOnce(store, { principal: principal.id, op, clientRequestId: args.client_request_id, now: now() }, run)
+      : await run();
+    if (op === 'workspace_open' && result?.ok && meta.client_session) {
+      // D8: the conversation that opened the workspace is the one it is bound to.
+      await write(repo => repo.updateWorkspace(result.workspace.workspace_id, { client_session: meta.client_session }));
+    }
+    if (op === 'workspace_recover' && result?.ok && meta.client_session) result = { ...result, session: await rebind(result, meta) };
+    if (warning && result && typeof result === 'object') result = { ...result, session_warning: warning };
+    return { result, warning, mismatch: Boolean(warning) };
+  }
+
+  // workspace_recover rebinds the workspace to the recovering conversation (D8, scenario D),
+  // explicitly and journaled. Only a principal that may write does it, on an active workspace.
+  async function rebind(recovered, meta) {
+    const id = recovered.workspace.workspace_id;
+    const current = await read(repo => repo.getWorkspace(id));
+    if (!current) return { bound: false };
+    if (current.client_session === meta.client_session) return { bound: true, rebound: false };
+    if (current.status !== 'active') return { bound: false, rebound: false, reason: 'workspace_closed' };
+    if (!principal.capabilities.has(CAPABILITIES.WRITE)) return { bound: false, rebound: false, reason: 'read_only' };
+    await write(repo => repo.updateWorkspace(id, { client_session: meta.client_session, updated_at: now() }));
+    await note('workspace_rebind', 'ok', current.client_session ? 'session_changed' : 'session_bound', { workspace_id: id }, meta);
+    return { bound: true, rebound: true };
+  }
+
+  // Every call: authorization first (so every refusal is journaled whatever the arguments),
+  // then the remote guards, then the operation, then the journal entry. Store failures never
+  // crash the server. `rawMeta` is the per-request metadata the runtime received next to the
+  // principal ({client_session, request_id}, bridge/forward.mjs); it is never read from args.
   const api = { principal: principal.id };
   for (const [method, op] of Object.entries(METHOD_OPERATION)) {
-    api[method] = async (raw = {}) => {
+    api[method] = async (raw = {}, rawMeta = null) => {
       const args = raw ?? {};
+      const meta = requestMeta(rawMeta);
       const ids = { workspace_id: args.workspace_id, issue: args.issue };
       if (!authorize(principal, op)) {
         const denied = fail('forbidden');
-        await journal(op, denied, ids);
+        await journal(op, denied, ids, meta);
         return denied;
       }
-      let result;
-      try { result = await operations[method](args); } catch {
-        result = fail('store_unavailable');
+      const tracked = meta.request_id && IN_FLIGHT.size < IN_FLIGHT_MAX ? meta.request_id : null;
+      if (tracked) IN_FLIGHT.set(tracked, { op, principal: principal.id, started: now(),
+        workspace_id: WS_RE.test(args.workspace_id ?? '') ? args.workspace_id : null });
+      let outcome;
+      try { outcome = await guarded(op, method, args, meta); } catch {
+        outcome = { result: fail('store_unavailable') };
+      } finally {
+        if (tracked) IN_FLIGHT.delete(tracked);
       }
-      await journal(op, result, { ...ids, workspace_id: ids.workspace_id ?? result?.workspace?.workspace_id });
+      const { result } = outcome;
+      const journalIds = { ...ids, workspace_id: ids.workspace_id ?? result?.workspace?.workspace_id,
+        // task_next journals the Issue it claimed.
+        issue: ids.issue ?? result?.task?.issue };
+      if (outcome.mismatch) {
+        // A session mismatch is journaled on its own row as well, whatever the mode.
+        await note('session_check', result?.ok === false ? 'denied' : 'ok', 'session_mismatch', journalIds, meta);
+      }
+      await journal(op, result, journalIds, meta);
       return result;
     };
   }

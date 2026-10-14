@@ -107,7 +107,7 @@ test('[sqlite] AC-09: refuses synced, repository, relative and shared locations'
 test('[sqlite] REQ-002: WAL, busy timeout, foreign keys and schema version are applied', async t => {
   const store = openSqliteStore({ dir: await tempStateDir(t) });
   t.after(() => store.close());
-  assert.equal(SCHEMA_VERSION, 3);
+  assert.equal(SCHEMA_VERSION, 4);
   assert.deepEqual(store.settings(), { journal_mode: 'wal', busy_timeout: 5000, foreign_keys: 1, schema_version: SCHEMA_VERSION });
 });
 

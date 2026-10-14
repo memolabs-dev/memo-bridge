@@ -12,8 +12,9 @@ import { join } from 'node:path';
 import { platform } from 'node:os';
 import { createCoordinator } from './coordinator/index.mjs';
 import { createIssueLeaseClient } from './coordinator/issue-lease.mjs';
-import { authorize, hubGrantsFromEnv, isPrincipal, localOwnerPrincipal, parseHubGrants,
-  principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
+import { CAPABILITIES, CLIENT_TYPES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
+  makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
+import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
 
 export function currentHost() {
@@ -23,8 +24,29 @@ export function currentHost() {
 // Views kept per principal; a handful exist in practice (owner, read-only test bearer).
 const MAX_VIEWS = 64;
 
+// Phase 5, write gate layer 3 (spec D7): the grant of the owner's remote principal comes from
+// the same remote.json the hub reads (MEMO_BRIDGE_REMOTE_CONFIG): oidc:<owner_sub> gets the
+// owner role when remote_writes is "enabled", read otherwise. Whatever the grants say, a remote
+// principal holds no write capability while that file does not enable remote writes, and no
+// principal at all without a readable file naming the owner.
+export function remoteGrants(baseGrants, policy) {
+  if (!policy?.configured || typeof policy.owner_sub !== 'string') return baseGrants;
+  return Object.freeze({ ...baseGrants, [`oidc:${policy.owner_sub}`]: policy.remote_writes === 'enabled' ? 'owner' : 'read' });
+}
+// A remote principal never holds coordinator:audit (fix F3, REQ-P5-09): with it, audit_events
+// and audit_operation would show every principal's events, workspaces and branches, including
+// hub:owner's and projects outside the remote allowlist, to the remote client.
+export function gateRemotePrincipal(p, policy) {
+  if (!p || !isRemotePrincipal(p)) return p;
+  if (!policy?.configured) return null;
+  const denied = policy.remote_writes === 'enabled' ? [CAPABILITIES.AUDIT] : [CAPABILITIES.AUDIT, ...WRITE_CAPABILITIES];
+  const kept = [...p.capabilities].filter(c => !denied.includes(c));
+  if (kept.length === p.capabilities.size) return p;
+  return makePrincipal(p.id, kept, { ...(p.client_type ? { client_type: p.client_type } : {}), ...(p.via ? { via: p.via } : {}) });
+}
+
 export function createRuntime({ stateDir = defaultStateDir(), principal = localOwnerPrincipal(), ledger, now = Date.now,
-  catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env } = {}) {
+  catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env, remotePolicy } = {}) {
   let store;
   const coordinators = new Map();
   const views = new Map();
@@ -40,20 +62,32 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const coordinatorFor = p => {
     if (!coordinators.has(p)) {
       coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host,
+        remotePolicy: policy(),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
     }
     return coordinators.get(p);
   };
   // Append one audit event; never throws (the journal must not take an operation down).
+  // via and client_type come from the principal the server minted; request_id is the hub's
+  // per-request id (ids.request_id, from the envelope meta), never a tool argument.
+  const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
   const auditAs = p => async (op, outcome, code, ids = {}) => {
     try {
       await openStore().transaction(repo => repo.appendEvent({ at: now(), principal: p.id,
-        workspace_id: ids.workspace_id ?? null, issue_ref: ids.issue ?? null, op, outcome, code: code ?? null }));
+        workspace_id: ids.workspace_id ?? null, issue_ref: ids.issue ?? null, op, outcome, code: code ?? null,
+        via: ['stdio', 'hub'].includes(p.via) ? p.via : (isRemotePrincipal(p) ? 'hub' : null),
+        client_type: CLIENT_TYPES.includes(p.client_type) ? p.client_type : null,
+        request_id: REQUEST_ID_RE.test(ids.request_id ?? '') ? ids.request_id : null }));
     } catch { /* journal unavailable */ }
   };
+  // The remote policy of this runtime (remote.json from its env, read once per path): the same
+  // object decides the oidc grant, the write gate on remote principals and the coordinator's
+  // project allowlist and session binding.
+  const policy = () => remotePolicy ?? remotePolicyFromEnv(env);
 
   const runtime = {
     now, host, stateDir, catalogOptions,
+    remotePolicy: policy,
     store: openStore,
     ledger: sharedLedger,
     coordinator: () => coordinatorFor(principal),
@@ -68,7 +102,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
     as(p) {
       if (!isPrincipal(p)) throw new Error('invalid_principal');
       if (p === principal) return runtime;
-      const key = `${p.id}\0${[...p.capabilities].sort().join(',')}`;
+      const key = `${p.id}\0${[...p.capabilities].sort().join(',')}\0${p.client_type ?? ''}\0${p.via ?? ''}`;
       const cached = views.get(key);
       if (cached) return cached;
       const view = Object.create(runtime);
@@ -93,11 +127,11 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
     // (unknown id, malformed claim, invalid grants configuration: always fail closed).
     principalFromHub(claim) {
       try {
-        grants ??= hubGrants !== undefined ? parseHubGrants(hubGrants) : hubGrantsFromEnv(env);
+        grants ??= remoteGrants(hubGrants !== undefined ? parseHubGrants(hubGrants) : hubGrantsFromEnv(env), policy());
       } catch {
         return null;
       }
-      return mapHubPrincipal(claim, grants);
+      return gateRemotePrincipal(mapHubPrincipal(claim, grants), policy());
     },
 
     async close() { if (store) await store.close(); }

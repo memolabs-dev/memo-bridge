@@ -34,7 +34,8 @@ export async function localStatus(host){
 
 export const probeOperations = host => ({ host_status: async () => localStatus(host) });
 
-// operations: {op: async (args, ctx) => data}. ctx = {op, principal:{id}, requestKey, timeoutMs}.
+// operations: {op: async (args, ctx) => data}. ctx = {op, principal:{id, client_type?}, requestKey, timeoutMs, meta}.
+// meta is the hub's per-request metadata ({request_id?, client_session?}, protocol.mjs wireMeta) or null.
 // A handler throws OperationError(code) to answer {type:'error', code}.
 export function createAgent({ host, url, privateKey, ca, operations = probeOperations(host), reconnectMs, backoff = {},
   maxInFlight = MAX_IN_FLIGHT, pingIntervalMs = PING_INTERVAL_MS, livenessMs = pingIntervalMs * 3, random = Math.random,
@@ -69,7 +70,7 @@ export function createAgent({ host, url, privateKey, ca, operations = probeOpera
     if (inFlight >= maxInFlight) { send(socket, errorFrame(req.id,'agent_busy')); return; }
     inFlight++;
     try {
-      const data = await handler(req.args, {op:req.op, principal:req.principal, requestKey:req.requestKey, timeoutMs:req.timeoutMs});
+      const data = await handler(req.args, {op:req.op, principal:req.principal, requestKey:req.requestKey, timeoutMs:req.timeoutMs, meta:req.meta ?? null});
       if (!send(socket, resultFrame(req.id, data))) send(socket, errorFrame(req.id,'result_too_large'));
     } catch (error) {
       const code = error instanceof OperationError ? error.code : 'internal_error';
@@ -146,6 +147,12 @@ async function localStatusFor(handlers){
   try { return await handlers.get('host_status')({}, {op:'host_status'}); } catch { return {online:false,error:'probe_failed'}; }
 }
 
+// The identity claim a runtime maps (runtime.principalFromHub): the forwarded id and, when the
+// hub sent one, the client_type label. Nothing else of the wire principal is passed on.
+export function wireClaim(wire) {
+  return wire?.client_type === undefined ? { id: wire?.id } : { id: wire?.id, client_type: wire.client_type };
+}
+
 // Runtime mode: serve the runtime tools for hub principals. For every request:
 //  1. the principal id from the wire maps to capabilities with this side's own table
 //     (bridge/ops.mjs); capabilities never come from the hub;
@@ -154,7 +161,10 @@ async function localStatusFor(handlers){
 //  3. the arguments are validated against the tool's own input schema;
 //  4. the tool handler runs against a runtime scoped to that principal.
 // runtimeFor(principal) returns that runtime: runtime.as(principal) (server/runtime.mjs).
-// principalFromWire(wire) maps the forwarded {id}: runtime.principalFromHub with the runtime's grants.
+// principalFromWire(wire) maps the forwarded {id, client_type?}: runtime.principalFromHub with the runtime's grants.
+// The hub's per-request metadata (ctx.meta) reaches the tool handler as extra.meta: the
+// coordinator, worktree and GitHub tools read the request id and the session hash from there,
+// never from tool arguments.
 export async function createRuntimeOperations({ runtimeFor, collect = collectTools, principalFromWire = hubPrincipalFromWire,
   authorize = policyAuthorize, ops = RUNTIME_OPS, log = () => {} }) {
   const scoped = new Map();
@@ -188,7 +198,7 @@ export async function createRuntimeOperations({ runtimeFor, collect = collectToo
       if (!tool) throw new OperationError('unsupported_op');
       const parsed = tool.inputSchema.safeParse(args ?? {});
       if (!parsed.success) throw new OperationError('invalid_arguments');
-      return unwrapToolResult(await tool.handler(parsed.data, { requestKey: ctx.requestKey ?? null, principal: principal.id }));
+      return unwrapToolResult(await tool.handler(parsed.data, { requestKey: ctx.requestKey ?? null, principal: principal.id, meta: ctx.meta ?? null }));
     };
   }
   return {

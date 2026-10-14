@@ -66,7 +66,8 @@ const BASE_TOOLS = ['bridge_info', 'host_status', 'list_hosts', 'project_git_sta
   'projects_list'];
 const OBSERVER_TOOLS = ['observe_agents', 'observe_focus', 'observe_guardian', 'observe_live_state'];
 const COORDINATOR_TOOLS = ['workspace_open', 'workspace_status', 'workspace_list', 'workspace_close', 'workspace_recover',
-  'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint'];
+  'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
+  'batch_create', 'task_next', 'batch_status'];
 const WORKTREE_TOOLS = ['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files', 'worktree_read_file',
   'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove'];
 const JOB_TOOLS = ['jobs_submit', 'jobs_list', 'job_status', 'job_events', 'job_results', 'job_cancel'];
@@ -103,7 +104,7 @@ try {
 
   // bridge_info reports exactly the registered tools.
   const info = await call('bridge_info');
-  assert.equal(info.version, '0.5.0');
+  assert.equal(info.version, '0.6.0');
   assert.deepEqual([...info.allowed_tools].sort(), EXPECTED);
   assert.ok(info.excluded.includes('arbitrary-shell') && info.excluded.includes('merge'));
   // Phase 4: the bundle on the Mac keeps the local executor (no queue), and says so.

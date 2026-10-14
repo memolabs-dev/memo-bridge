@@ -1,8 +1,8 @@
 # Memo Bridge
 
-Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Since v0.5 the same tools can run on the VPS behind the private hub, with jobs queued one at a time in an unprivileged systemd unit, so work continues with the Mac off (`docs/RUNNER_VPS.md`; not deployed yet). Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
+Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Since v0.5 the same tools can run on the VPS behind the private hub, with jobs queued one at a time in an unprivileged systemd unit, so work continues with the Mac off (`docs/RUNNER_VPS.md`; not deployed yet). Since v0.6 ChatGPT Chat conversations can use a fixed subset of those tools through a public, OAuth-protected endpoint served by the hub (`docs/REMOTE_CHATGPT.md`; not deployed yet). Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
 
-## Tools (v0.5.0, 48 tools)
+## Tools (v0.6.0, 51 tools)
 
 `bridge_info` returns the same list, grouped, with the capability each group needs.
 
@@ -18,6 +18,7 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 
 - Workspaces: `workspace_open`, `workspace_status`, `workspace_list`, `workspace_close`, `workspace_recover`
 - Tasks (a task is a GitHub Issue): `tasks_list`, `task_status`, `task_claim`, `task_renew`, `task_checkpoint`, `task_release`, `task_complete`
+- Batches for a conductor conversation (`docs/REMOTE_CHATGPT.md`): `batch_create`, `task_next`, `batch_status`
 - Audit journal: `audit_events`, `audit_operation`
 
 ### Phase 3: the Mac runner (`docs/RUNNER.md`)
@@ -38,6 +39,10 @@ No new tool: the runtime tools above run on the VPS as `memo-bridge-runner.servi
 
 Write tools stay off the hub until the root CI runners on the VPS are isolated (the write gate in `docs/HUB_SECURITY.md`).
 
+### Phase 5: ChatGPT conversations (`docs/REMOTE_CHATGPT.md`)
+
+No new tool: a fixed subset of the runtime tools (22 read tools, plus 14 write tools once the write gate opens) is served to ChatGPT Chat at `https://bridge.memolabs.dev/mcp`, through a separate, OAuth-only hub listener (Pocket ID tokens for the owner only, mTLS to OpenAI's connector certificate at Traefik). Every remote call runs on the VPS runner. The server enforces the write gate, the project allowlist, the protected CI paths, the branch rules, response bounds, rate limits and the per-conversation workspace binding, whatever the model sends. Configuration is one `remote.json` rendered by lab-infra. Not deployed yet.
+
 ### What Memo Bridge never does
 
 Through its own tools: no shell (every command is a fixed argument list), no file access outside its own worktrees and the canonical register, no write to a default branch (compared without case, and checked against the remote itself), no force-push, no merge, no deployment, no service change. Every repository write, job and pull request needs a live claim on the task, and commit, push, job submission and pull request creation re-verify that claim with the shared ledger first. Pull requests land through the Memo Labs landing contract (`.github/workflows/land.yml`), never through an agent.
@@ -52,6 +57,8 @@ npm test
 npm run test:runner       # Phase 4 subset, including the root helpers (python3 -I unittest)
 npm run build
 npm run smoke
+npm run smoke:remote      # Phase 5: an MCP client over HTTPS through the public listener to the runtime, offline
+npm run remote:toolsize   # size of the remote tools/list (read and write stages)
 npm run release:manifest  # VPS release: dist/release/SHA256SUMS + memo-bridge-release.json for lab-infra
 npm run install:local   # stable copy for AI clients: ~/.local/share/memo-bridge/stdio/{index,job-runner}.mjs
 ```
@@ -66,6 +73,6 @@ The plugin package is under `plugin/`. It is a **local stdio plugin**, not a clo
 2. Coordination on GitHub Issues through the canonical lease ledger (done).
 3. Mac runner: worktrees, file edits, recipes, commit, push, pull requests (done, v0.4, local stdio).
 4. VPS runner behind the private hub: protocol v2, principals, job queue, systemd sandbox, lease renewal (v0.5, code done, deployment pending; write tools on the hub after the root CI runners are isolated).
-5. Public HTTPS hub with OIDC, per-capability authorization and audit (Phase 5).
+5. ChatGPT conversations through a public, OAuth-protected endpoint, per-capability authorization, write gate and audit (v0.6, Phase 5, code done, deployment pending; write tools after the root CI runners are isolated).
 
-Existing Sentinel X configuration is untouched. No endpoints are exposed publicly.
+Existing Sentinel X configuration is untouched. No endpoint is exposed publicly until the owner deploys the Phase 5 lab-infra roles.

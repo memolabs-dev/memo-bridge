@@ -18,7 +18,7 @@ import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 const BASE_TOOLS = ['list_hosts', 'host_status', 'bridge_info', 'projects_list', 'project_info', 'project_git_status',
   'projects_audit'];

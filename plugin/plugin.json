@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "memo-bridge",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Private MCP for Memo Labs: inspect a Mac and a Netcup VPS read-only, browse registered projects, coordinate parallel AI work sessions on GitHub Issues (workspaces, shared Issue leases, Git-verified checkpoints), and run claimed tasks on the Mac (worktrees, file edits, test/build/lint jobs, commit, push, pull request) without relying on the Sentinel X commercial hub.",
   "author": {
     "name": "Memo Labs"
