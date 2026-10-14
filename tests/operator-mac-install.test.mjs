@@ -56,7 +56,9 @@ function macHome(t) {
 
 function run(home, args = []) {
   const out = spawnSync('/bin/bash', [SCRIPT, ...args], { encoding: 'utf8', timeout: 120_000,
-    env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(home, 'tmp'), MEMO_OPERATOR_NODE: process.execPath } });
+    // The root helper probe looks in the temporary home, not /Library: this Mac may have the real one installed.
+    env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(home, 'tmp'), MEMO_OPERATOR_NODE: process.execPath,
+      MEMO_OPERATOR_ROOT_DIR: join(home, 'no-root-helper') } });
   const lines = out.stdout.trim().split('\n').filter(Boolean);
   const steps = Object.fromEntries(lines.filter(l => l.startsWith('{')).map(l => JSON.parse(l)).map(o => [o.step, o]));
   return { ...out, steps };

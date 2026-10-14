@@ -429,7 +429,9 @@ async function main() {
     case 'keygen': result = keygen(home); break;
     case 'hub-ca': result = installHubCa(home, from); break;
     case 'hub-pub': result = installHubPub(home, from); break;
-    case 'policy': result = await writePolicy(home); break;
+    // MEMO_OPERATOR_ROOT_DIR (absolute) points the root helper probe elsewhere: tests run this step
+    // against a temporary home on a Mac where the real root helper may be installed.
+    case 'policy': result = await writePolicy(home, process.env.MEMO_OPERATOR_ROOT_DIR ? { rootLayout: macRootLayout(process.env.MEMO_OPERATOR_ROOT_DIR) } : {}); break;
     case 'runtime': result = installRuntime(home, from, { commit: arg('commit') ?? null }); break;
     case 'plist': result = writePlist(home, { node: arg('node'), out: arg('out') }); break;
     case 'hub-key-id': {
