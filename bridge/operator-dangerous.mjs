@@ -24,6 +24,15 @@
 // keychain); and any argument or write path naming the agent's own control files
 // (.memo-operator, /etc/memo-operator) or ~/Library/LaunchAgents asks, since T2 on the Mac runs
 // as the owner and could otherwise rewrite its policy or plant a launchd job without a word.
+// Mac root (spec §13 Mac root follow-up, R-MR-08): disk, firmware, encryption, user, firewall
+// and privacy tools anywhere in argv (diskutil, csrutil, nvram, fdesetup, sysadminctl,
+// dseditgroup, pfctl, tccutil, bless, kextload...), dscl with a writing verb (-create, -delete,
+// -passwd...; -read and -list stay free), and any path under /Library/LaunchDaemons, the root
+// helper's own files (/Library/Application Support/MemoBridge, /var/log/memo-operator,
+// /var/db/memo-operator-root, /var/run/memo-operator) or the local user database
+// (/var/db/dslocal). `rm` was already on the list, recursive or not; launchctl was already a
+// wrapper (bootout system included). /private/etc, /private/var and /private/tmp are read as
+// /etc, /var and /tmp first: on macOS /etc is a symlink to /private/etc (DEV-P6-39).
 // approval_mode: off (never), dangerous (this list), all_root (this list plus every T3 call).
 import { basename } from 'node:path';
 
@@ -32,7 +41,14 @@ export const STANDING_APPROVAL_MS = 15 * 60_000;
 
 const DESTRUCTIVE = new Set(['rm', 'dd', 'wipefs', 'parted', 'fdisk', 'sfdisk', 'gdisk', 'ufw', 'nft', 'iptables', 'ip6tables',
   'iptables-restore', 'nft-restore', 'userdel', 'usermod', 'passwd', 'chpasswd', 'reboot', 'shutdown', 'poweroff', 'halt',
-  'shred', 'truncate', 'visudo', 'deluser', 'kill', 'pkill', 'killall']);
+  'shred', 'truncate', 'visudo', 'deluser', 'kill', 'pkill', 'killall',
+  // macOS (Mac root): disks, firmware and boot, FileVault, users and groups, firewall, privacy.
+  'diskutil', 'asr', 'hdiutil', 'gpt', 'newfs_apfs', 'newfs_hfs', 'csrutil', 'nvram', 'bless', 'fdesetup', 'sysadminctl',
+  'dseditgroup', 'createhomedir', 'pfctl', 'socketfilterfw', 'tccutil', 'spctl', 'kextload', 'kextunload', 'kmutil', 'systemsetup',
+  'softwareupdate', 'pmset']);
+// dscl verbs that change the directory (users, groups, passwords); -read, -list, -search do not.
+const DSCL_WRITES = new Set(['-create', '-createpl', '-createpli', '-append', '-appendpl', '-appendpli', '-merge', '-mergepl', '-mergepli',
+  '-delete', '-deletepl', '-deletepli', '-change', '-changei', '-passwd', '-mcxset', '-mcxdelete', '-mcximport', '-auth', '-authonly']);
 const WRAPPERS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'fish', 'busybox', 'python', 'python3', 'perl', 'ruby', 'node', 'php',
   'env', 'xargs', 'find', 'sudo', 'doas', 'su', 'nice', 'ionice', 'timeout', 'nohup', 'setsid', 'chroot', 'nsenter', 'unshare',
   'systemd-run', 'runuser', 'flock', 'watch', 'stdbuf', 'ssh', 'awk', 'gawk', 'mawk', 'sed', 'crontab', 'at', 'docker', 'make',
@@ -41,10 +57,14 @@ const CRITICAL_UNIT_RE = /^(ssh|sshd|traefik|memo-bridge-[A-Za-z0-9@._-]*|memo-o
 const SENSITIVE_PATH_RE = /^\/etc\/(ssh(\/|$)|sudoers|pam\.d(\/|$)|passwd-?$|shadow-?$|group-?$|gshadow-?$)/;
 // Anywhere in the value, any letter case (APFS): the operator's own control files and launchd jobs.
 const AGENT_CONTROL_RE = /(^|\/)\.memo-operator(\/|$)|^\/etc\/memo-operator(\/|$)|\/Library\/LaunchAgents(\/|$)/i;
+// Mac root: launchd daemons, the root helper's files, the local user database (any case).
+const MAC_ROOT_CONTROL_RE = /\/Library\/LaunchDaemons(\/|$)|\/Library\/Application Support\/MemoBridge(\/|$)|^\/var\/(log\/memo-operator|db\/memo-operator-root|run\/memo-operator|db\/dslocal)(\/|$)/i;
 
 const isDestructiveName = name => DESTRUCTIVE.has(name) || /^mkfs(\.|$)/.test(name);
+// One spelling per path: repeated slashes folded, /private/{etc,var,tmp} read as /{etc,var,tmp}.
+const fold = value => value.replace(/\/{2,}/g, '/').replace(/^\/private\/(etc|var|tmp)(?=\/|$)/i, '/$1');
 const sensitivePath = value => typeof value === 'string'
-  && [SENSITIVE_PATH_RE, AGENT_CONTROL_RE].some(re => re.test(value.replace(/\/{2,}/g, '/')));
+  && [SENSITIVE_PATH_RE, AGENT_CONTROL_RE, MAC_ROOT_CONTROL_RE].some(re => re.test(fold(value)));
 
 // Why this call is dangerous, or null. op and args as the tool receives them.
 export function dangerReason(op, args = {}) {
@@ -60,6 +80,10 @@ export function dangerReason(op, args = {}) {
       // "--file=/etc/shadow" style arguments are checked on their value too.
       const value = item.includes('=') ? item.slice(item.indexOf('=') + 1) : item;
       if (sensitivePath(item) || sensitivePath(value)) return 'sensitive_path';
+    }
+    if (argv.some(a => basename(a) === 'dscl')) {
+      const verb = argv.find(a => DSCL_WRITES.has(a.toLowerCase()));
+      if (verb) return `dscl:${verb.toLowerCase()}`;
     }
     const i = argv.findIndex(a => basename(a) === 'systemctl');
     if (i >= 0) {
