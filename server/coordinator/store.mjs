@@ -8,9 +8,11 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, st
 import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { MEMORY_SCHEMA, memoryRepository } from './memory-store.mjs';
+import { CONTINUITY_SCHEMA, continuityRepository } from './continuity-store.mjs';
 
 // v5: context memory across conversations (server/coordinator/memory-store.mjs), additive.
-export const SCHEMA_VERSION = 5;
+// v6: structured handoffs and learning counters (server/coordinator/continuity-store.mjs), additive.
+export const SCHEMA_VERSION = 6;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -450,6 +452,7 @@ function migrate(db) {
       if (current < 3) db.exec(SCHEMA_V3);
       if (current < 4) migrateV4(db);
       if (current < 5) db.exec(MEMORY_SCHEMA);
+      if (current < 6) db.exec(CONTINUITY_SCHEMA);
       if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
@@ -502,7 +505,7 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
     db.close();
     throw error;
   }
-  const repo = { ...repository(db), ...memoryRepository(db) };
+  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db) };
   // One connection per process: serialize transactions so concurrent MCP calls in the same
   // process never interleave inside BEGIN/COMMIT. Cross-process exclusion is SQLite's lock.
   let queue = Promise.resolve();
