@@ -79,7 +79,8 @@ async function setup(t, { worktrees = 1 } = {}) {
   await writeFile(bin, `#!${process.execPath}
 const fs = require('fs'); const path = require('path');
 const units = JSON.parse(fs.readFileSync(path.join(path.dirname(fs.realpathSync(process.argv[1])), 'units.json'), 'utf8'));
-process.stdout.write('ActiveState=' + (units[process.argv[process.argv.length - 1]] || 'inactive') + '\\n');
+const named = process.argv.slice(2).filter(a => a.endsWith('.service'));
+process.stdout.write(named.map(unit => 'Id=' + unit + '\\nActiveState=' + (units[unit] || 'inactive') + '\\n').join('\\n'));
 `);
   chmodSync(bin, 0o755);
   const setUnit = (unit, state) => {

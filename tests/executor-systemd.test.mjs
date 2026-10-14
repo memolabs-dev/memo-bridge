@@ -15,12 +15,12 @@ import { createJobService } from '../server/runners/jobs.mjs';
 import { createLocalExecutor } from '../server/runners/executor-local.mjs';
 import { assertExecutor, executorKindFromEnv } from '../server/runners/executor.mjs';
 import { DISPATCH_ID_RE, SERVICE_RESULTS, createSystemdExecutor, dispatchIdFor, parseShowOutput, readStatusFile, spoolSpec,
-  statusFromResult, unitFor } from '../server/runners/executor-systemd.mjs';
+  statusFromResult, unitFor, installUnitFor, parseShowBlocks, INSTALL_TIMEOUT_SECONDS } from '../server/runners/executor-systemd.mjs';
 
 const OWNER = makePrincipal('local:owner', Object.values(CAPABILITIES));
 const ISSUE = 'memolabs-dev/drop#7';
 const UID = process.getuid();
-const SHOW_PROPS = '--property=LoadState,ActiveState,SubState,Result';
+const SHOW_PROPS = '--property=Id,LoadState,ActiveState,SubState,Result';
 
 const stubLedger = () => {
   const ok = async () => ({ ok: true, receipt: { state: 'claimed', fence_sha: 'f'.repeat(40) } });
@@ -38,10 +38,14 @@ const here = path.dirname(fs.realpathSync(process.argv[1]));
 fs.appendFileSync(path.join(here, 'calls.log'), JSON.stringify(process.argv.slice(2)) + '\\n');
 const units = JSON.parse(fs.readFileSync(path.join(here, 'units.json'), 'utf8'));
 if (units.__fail) process.exit(1);
-const unit = process.argv[process.argv.length - 1];
-const u = units[unit] || {};
-process.stdout.write(['LoadState=' + (u.LoadState || 'loaded'), 'ActiveState=' + (u.ActiveState || 'inactive'),
-  'SubState=' + (u.SubState || 'dead'), 'Result=' + (u.Result || 'success')].join('\\n') + '\\n');
+// One block per unit named, separated by an empty line, like systemctl show (the recipe unit
+// and its install unit).
+const named = process.argv.slice(2).filter(a => a.endsWith('.service'));
+process.stdout.write(named.map(unit => {
+  const u = units[unit] || {};
+  return ['Id=' + unit, 'LoadState=' + (u.LoadState || 'loaded'), 'ActiveState=' + (u.ActiveState || 'inactive'),
+    'SubState=' + (u.SubState || 'dead'), 'Result=' + (u.Result || 'success')].join('\\n') + '\\n';
+}).join('\\n'));
 `);
   chmodSync(bin, 0o755);
   return {
@@ -218,12 +222,14 @@ test('systemctl show: fixed argv, read-only, parsed; failures are reported, neve
   const job = { id: 'job_show_000000000000', unit: unitFor(dispatchIdFor('job_show_000000000000')) };
   assert.deepEqual(parseShowOutput('ActiveState=active\nSubState=running\nnoise\nActiveState=failed\n'), { ActiveState: 'active', SubState: 'running' });
   let s = await executor.show(job);
-  assert.deepEqual(s, { ok: true, unit: job.unit, load: 'loaded', active_state: 'inactive', sub_state: 'dead', result: 'success', active: false });
+  const install = installUnitFor(dispatchIdFor('job_show_000000000000'));
+  assert.deepEqual(s, { ok: true, unit: job.unit, load: 'loaded', active_state: 'inactive', sub_state: 'dead', result: 'success', active: false,
+    phase: null, install: { unit: install, active_state: 'inactive', result: 'success' } });
   systemctl.set(job.unit, { ActiveState: 'active', SubState: 'running' });
   assert.equal(await executor.alive(job), true);
   systemctl.set(job.unit, { ActiveState: 'deactivating', SubState: 'stop-sigterm' });
   assert.equal((await executor.show(job)).active, true, 'still stopping counts as active');
-  assert.deepEqual(systemctl.calls()[0], ['show', '--no-pager', SHOW_PROPS, job.unit]);
+  assert.deepEqual(systemctl.calls()[0], ['show', '--no-pager', SHOW_PROPS, job.unit, install]);
   assert.ok(systemctl.calls().every(argv => argv[0] === 'show'), 'only ever show');
   systemctl.fail();
   assert.deepEqual(await executor.show(job), { ok: false, error: 'systemctl_failed' });
@@ -231,6 +237,44 @@ test('systemctl show: fixed argv, read-only, parsed; failures are reported, neve
   const missing = createSystemdExecutor({ root: '/nonexistent', systemctl: '/nonexistent/systemctl' });
   assert.deepEqual(await missing.show(job), { ok: false, error: 'systemctl_missing' });
   assert.deepEqual(await executor.show({ id: 'x', unit: 'sshd.service' }), { ok: false, error: 'invalid_unit' });
+});
+
+test('two phases: the job is active while its install unit runs, and the recipe unit is the one reported', async t => {
+  // Rule: while memo-job-install@<id> runs, memo-job@<id> is inactive with a start job waiting
+  // (Requires=, After=); the supervisor must see the job active, not lost.
+  const { systemctl, executor } = await runnerTree(t);
+  const did = dispatchIdFor('job_twophase00000001');
+  const job = { id: 'job_twophase00000001', unit: unitFor(did) };
+  systemctl.set(installUnitFor(did), { ActiveState: 'activating', SubState: 'start' });
+  let s = await executor.show(job);
+  assert.equal(s.active, true);
+  assert.equal(s.phase, 'install');
+  assert.equal(s.active_state, 'inactive', 'the recipe unit has not started yet');
+  systemctl.set(installUnitFor(did), { ActiveState: 'inactive', SubState: 'dead' });
+  systemctl.set(job.unit, { ActiveState: 'active', SubState: 'running' });
+  s = await executor.show(job);
+  assert.deepEqual([s.active, s.phase, s.active_state], [true, 'recipe', 'active']);
+  systemctl.set(job.unit, { ActiveState: 'inactive', SubState: 'dead' });
+  assert.equal(await executor.alive(job), false);
+  // Blocks are matched by Id=, whatever order systemctl prints them in.
+  assert.deepEqual(parseShowBlocks('Id=b\nActiveState=active\n\nId=a\nActiveState=inactive\n'),
+    [{ Id: 'b', ActiveState: 'active' }, { Id: 'a', ActiveState: 'inactive' }]);
+  assert.equal(executor.installBudgetMs, INSTALL_TIMEOUT_SECONDS * 1000);
+});
+
+test('an install failure is its own outcome, with the install exit code', () => {
+  // Rule: root's install verdict (record-result --phase=install) ends the job failed with
+  // reason install_failed or install_timeout; a cancel and an OOM keep their meaning.
+  assert.deepEqual(statusFromResult({ service_result: 'exit-code', exit_code: 'exited', exit_status: '1', reason: 'install_failed' }),
+    { status: 'failed', exit_code: 1, reason: 'install_failed' });
+  assert.deepEqual(statusFromResult({ service_result: 'timeout', exit_code: 'killed', exit_status: 'TERM', reason: 'install_timeout' }),
+    { status: 'failed', exit_code: null, reason: 'install_timeout' });
+  assert.deepEqual(statusFromResult({ service_result: 'oom-kill', exit_code: 'killed', exit_status: 'KILL', reason: 'oom_kill' }).status, 'oom');
+  // Without root's reason the same unit result is an ordinary failure (the job cannot pick the reason).
+  assert.deepEqual(statusFromResult({ service_result: 'exit-code', exit_code: 'exited', exit_status: '1' }),
+    { status: 'failed', exit_code: 1 });
+  assert.deepEqual(statusFromResult({ service_result: 'dispatch_refused', reason: 'install_failed' }),
+    { status: 'failed', exit_code: null, reason: 'dispatch_refused' });
 });
 
 test('job log: bounded tail, never through a symlink planted by the job', async t => {

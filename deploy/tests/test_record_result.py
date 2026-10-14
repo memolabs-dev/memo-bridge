@@ -50,13 +50,15 @@ class RecordResultTestCase(unittest.TestCase):
                                     'dropin_dir': self.dropin}}, handle)
         os.chmod(self.config, 0o644)
 
-    def run_record(self, job_id=JOB, **systemd_env):
+    def run_record(self, job_id=JOB, phase=None, **systemd_env):
         env = {'PATH': '/usr/bin:/bin', 'INVOCATION_ID': INVOCATION}
         env.update({key: value for key, value in systemd_env.items() if value is not None})
         for key in [key for key, value in systemd_env.items() if value is None]:
             env.pop(key, None)
-        return subprocess.run([sys.executable, '-I', RECORD, '--config', self.config, job_id],
-                              env=env, capture_output=True, text=True, timeout=60)
+        argv = [sys.executable, '-I', RECORD, '--config', self.config]
+        if phase:
+            argv.append(f'--phase={phase}')
+        return subprocess.run(argv + [job_id], env=env, capture_output=True, text=True, timeout=60)
 
     def status(self):
         with open(os.path.join(self.job_dir, 'status.json')) as handle:
@@ -291,3 +293,58 @@ class RefusalTests(RecordResultTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class InstallPhaseTests(RecordResultTestCase):
+    """`ExecStopPost=+record-result --phase=install %i` of memo-job-install@.service."""
+
+    def setUp(self):
+        super().setUp()
+        self.install_dropin = os.path.join(self.dropin, f'memo-job-install@{JOB}.service.d')
+        os.makedirs(self.install_dropin)
+        with open(os.path.join(self.install_dropin, '50-dispatch.conf'), 'w') as handle:
+            handle.write('[Service]\nTimeoutStartSec=600\n')
+
+    def status_path(self):
+        return os.path.join(self.job_dir, 'status.json')
+
+    def test_successful_install_writes_no_status_and_leaves_the_recipe_dropin(self):
+        # Rule: the recipe runs after a successful install, and its own record-result ends the job.
+        result = self.run_record(phase='install', SERVICE_RESULT='success', EXIT_CODE='exited', EXIT_STATUS='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.exists(self.status_path()))
+        self.assertIn('event=job_install_succeeded', result.stderr)
+        self.assertFalse(os.path.exists(self.install_dropin))
+        self.assertTrue(os.path.exists(os.path.join(self.unit_dropin, '50-dispatch.conf')))
+
+    def test_failed_install_is_its_own_outcome(self):
+        # Rule: an install failure ends the job as failed with reason install_failed, and the
+        # recipe never runs (its drop-in goes too).
+        result = self.run_record(phase='install', SERVICE_RESULT='exit-code', EXIT_CODE='exited', EXIT_STATUS='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        document = self.status()
+        self.assertEqual((document['status'], document['reason']), ('failed', 'install_failed'))
+        self.assertEqual(document['unit'], f'memo-job-install@{JOB}.service')
+        self.assertEqual((document['service_result'], document['exit_code'], document['exit_status']),
+                         ('exit-code', 'exited', '1'))
+        self.assertFalse(os.path.exists(self.install_dropin))
+        self.assertFalse(os.path.exists(self.unit_dropin))
+
+    def test_install_timeout(self):
+        self.run_record(phase='install', SERVICE_RESULT='timeout', EXIT_CODE='killed', EXIT_STATUS='TERM')
+        self.assertEqual((self.status()['status'], self.status()['reason']), ('failed', 'install_timeout'))
+
+    def test_install_oom_and_cancel_keep_their_meaning(self):
+        self.run_record(phase='install', SERVICE_RESULT='oom-kill', EXIT_CODE='killed', EXIT_STATUS='KILL')
+        self.assertEqual(self.status()['status'], 'oom')
+        os.unlink(self.status_path())
+        self.mark_cancel('budget_exceeded')
+        # A cancel during the install: the dispatcher stopped both units. For Type=oneshot SIGTERM
+        # is not a clean exit (systemd.service(5) SuccessExitStatus=), so the result is "signal".
+        self.run_record(phase='install', SERVICE_RESULT='signal', EXIT_CODE='killed', EXIT_STATUS='TERM')
+        self.assertEqual((self.status()['status'], self.status()['reason']), ('budget_exceeded', 'budget_exceeded'))
+
+    def test_unknown_phase_is_refused(self):
+        result = self.run_record(phase='deploy', SERVICE_RESULT='success', EXIT_CODE='exited', EXIT_STATUS='0')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(os.path.exists(self.status_path()))

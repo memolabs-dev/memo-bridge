@@ -52,6 +52,17 @@ The cancel marker wins over "timeout" because a stop that outlasts TimeoutStopSe
 reported as "timeout" (inferred from "One of the steps timed out"; to verify in the TODO-P4-01
 spike). "oom-kill" wins over everything: memory is the budget that was exceeded.
 
+Install phase (`ExecStopPost=+/usr/local/lib/memo-runner/record-result --phase=install %i` in
+memo-job-install@.service, Type=oneshot): memo-job@<id> Requires= and comes After= that unit, so
+systemd runs the recipe only after a successful install. A status is written here exactly when
+the recipe will not run:
+  SERVICE_RESULT=oom-kill                         -> oom
+  cancel marker present                           -> cancelled or budget_exceeded, as above
+  SERVICE_RESULT=success                          -> nothing written (the recipe unit records the job)
+  SERVICE_RESULT=timeout (TimeoutStartSec=)       -> failed (reason install_timeout)
+  anything else                                   -> failed (reason install_failed)
+with "unit": "memo-job-install@<id>.service". On failure the recipe's drop-in is removed too.
+
 It also removes the runtime drop-in the dispatcher wrote for this job
 (/run/systemd/system/memo-job@<id>.service.d/50-dispatch.conf); the loaded unit keeps its
 settings until it is unloaded.
@@ -76,6 +87,7 @@ DISPATCH_ID_RE = re.compile(r'[a-z0-9][a-z0-9-]{7,63}')
 # Phase-3 job ids (server/runners/jobs.mjs), as recorded by the dispatcher in dispatch.json.
 JOB_ID_RE = re.compile(r'job_[A-Za-z0-9_-]{16}')
 UNIT_PREFIX = 'memo-job@'
+INSTALL_UNIT_PREFIX = 'memo-job-install@'
 DROPIN_NAME = '50-dispatch.conf'
 DEFAULT_CONFIG = '/etc/memo-bridge/runner.json'
 DEFAULTS = {'root': '/var/lib/memo-runner', 'runner_user': 'memo-runner', 'dropin_dir': '/run/systemd/system'}
@@ -198,6 +210,24 @@ def service_facts(env):
     return result, known, code, status, invocation
 
 
+def classify_install(result, known, code, status, cancel_reason):
+    """(status, reason) when the install unit did not succeed, or None when the recipe goes on.
+
+    systemd starts memo-job@<id> only after a successful memo-job-install@<id> (Requires=,
+    After=), so a status is written here exactly when systemd will not run the recipe: any
+    result other than "success", or a cancel marker (the dispatcher stops both units). A
+    successful install writes nothing; the recipe unit's own record-result ends the job."""
+    if result == 'oom-kill':
+        return 'oom', 'oom_kill'
+    if cancel_reason is not None:
+        return ('budget_exceeded' if cancel_reason == 'budget_exceeded' else 'cancelled'), cancel_reason
+    if result == 'success':
+        return None
+    if result == 'timeout':
+        return 'failed', 'install_timeout'
+    return 'failed', 'install_failed'
+
+
 def classify(result, known, code, status, cancel_reason):
     """(status, reason) of the job; see the module docstring for the table."""
     if result == 'oom-kill':
@@ -306,12 +336,12 @@ def write_status(job_fd, document, runner_gid):
         pass
 
 
-def remove_dropin(dropin_dir, dispatch_id):
+def remove_dropin(dropin_dir, dispatch_id, prefix=UNIT_PREFIX):
     try:
         base = os.open(dropin_dir, O_DIR)
     except OSError:
         return
-    directory = f'{UNIT_PREFIX}{dispatch_id}.service.d'
+    directory = f'{prefix}{dispatch_id}.service.d'
     try:
         try:
             fd = os.open(directory, O_DIR, dir_fd=base)
@@ -331,7 +361,7 @@ def remove_dropin(dropin_dir, dispatch_id):
         os.close(base)
 
 
-def record(dispatch_id, config_path, env):
+def record(dispatch_id, config_path, env, phase='recipe'):
     if not DISPATCH_ID_RE.fullmatch(dispatch_id or ''):
         raise Failure('invalid_id')
     root, dropin_dir, runner_gid = load_config(config_path)
@@ -339,12 +369,24 @@ def record(dispatch_id, config_path, env):
     job_fd = open_job_dir(root, dispatch_id, runner_gid)
     try:
         cancel_reason = cancel_reason_from(job_fd)
-        final, reason = classify(result, known, code, status, cancel_reason)
+        if phase == 'install':
+            verdict = classify_install(result, known, code, status, cancel_reason)
+            if verdict is None:
+                os.close(job_fd)
+                job_fd = None
+                remove_dropin(dropin_dir, dispatch_id, INSTALL_UNIT_PREFIX)
+                log('notice', 'job_install_succeeded', id=dispatch_id, exit_code=code or '-', exit_status=status or '-')
+                return None
+            final, reason = verdict
+            unit = f'{INSTALL_UNIT_PREFIX}{dispatch_id}.service'
+        else:
+            final, reason = classify(result, known, code, status, cancel_reason)
+            unit = f'{UNIT_PREFIX}{dispatch_id}.service'
         document = {
             'version': VERSION,
             'id': dispatch_id,
             'job_id': job_id_from(job_fd),
-            'unit': f'{UNIT_PREFIX}{dispatch_id}.service',
+            'unit': unit,
             'service_result': result,
             'exit_code': code,
             'exit_status': status,
@@ -357,9 +399,13 @@ def record(dispatch_id, config_path, env):
         }
         write_status(job_fd, document, runner_gid)
     finally:
-        os.close(job_fd)
+        if job_fd is not None:
+            os.close(job_fd)
+    # The recipe unit never runs after this install: its drop-in goes too.
     remove_dropin(dropin_dir, dispatch_id)
-    log('notice', 'job_result_recorded', id=dispatch_id, status=final, service_result=result,
+    if phase == 'install':
+        remove_dropin(dropin_dir, dispatch_id, INSTALL_UNIT_PREFIX)
+    log('notice', 'job_result_recorded', id=dispatch_id, phase=phase, status=final, service_result=result,
         exit_code=code or '-', exit_status=status or '-')
     return final
 
@@ -368,11 +414,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog=PROG, allow_abbrev=False,
                                      description='Record the final status of memo-job@<id>.service (ExecStopPost=+).')
     parser.add_argument('--config', default=DEFAULT_CONFIG)
+    parser.add_argument('--phase', choices=('recipe', 'install'), default='recipe',
+                        help='install: ExecStopPost=+ of memo-job-install@.service')
     parser.add_argument('id', help='dispatch id: %%i of memo-job@.service')
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
-        record(args.id, args.config, os.environ)
+        record(args.id, args.config, os.environ, args.phase)
         return 0
     except Failure as failure:
         log('err', 'job_result_not_recorded',

@@ -26,6 +26,13 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 DISPATCH = os.path.join(REPO, 'deploy', 'memo-runner-dispatch')
+
+# The dispatcher's constants (INSTALL_ARGV, INSTALL_TIMEOUT_SECONDS), loaded without running it.
+import importlib.machinery  # noqa: E402
+import importlib.util  # noqa: E402
+_LOADER = importlib.machinery.SourceFileLoader('memo_runner_dispatch', DISPATCH)
+dispatch = importlib.util.module_from_spec(importlib.util.spec_from_loader('memo_runner_dispatch', _LOADER))
+_LOADER.exec_module(dispatch)
 RECORD = os.path.join(REPO, 'deploy', 'record-result')
 EXECUTOR = os.path.join(REPO, 'server', 'runners', 'executor-systemd.mjs')
 FIXTURES = os.path.join(REPO, 'tests', 'fixtures', 'runner-probe')
@@ -206,6 +213,9 @@ class Sandbox:
     def dropin_file(self, did=DID):
         return os.path.join(self.dropin, f'memo-job@{did}.service.d', '50-dispatch.conf')
 
+    def install_dropin_file(self, did=DID):
+        return os.path.join(self.dropin, f'memo-job-install@{did}.service.d', '50-dispatch.conf')
+
 
 class DispatchTestCase(unittest.TestCase):
     def setUp(self):
@@ -269,12 +279,77 @@ class StartTests(DispatchTestCase):
         self.assertEqual(environment, {
             'MEMO_JOB_ID': JOB_ID, 'MEMO_JOB_DISPATCH_ID': DID, 'MEMO_JOB_RECIPE': 'test',
             'MEMO_JOB_ALLOWED_ARGV': ALL_TEST_SHAPES, 'MEMO_JOB_WORKTREE': self.box.worktree,
-            'MEMO_JOB_OUT': out, 'MEMO_JOB_TIMEOUT_SECONDS': '60'})
+            'MEMO_JOB_OUT': out, 'MEMO_JOB_TIMEOUT_SECONDS': '60', 'MEMO_JOB_NETWORK': 'private'})
         keys = [line.split('=', 1)[0] for line in text.splitlines() if '=' in line and not line.startswith('#')]
-        self.assertEqual(keys, ['WorkingDirectory', 'ReadWritePaths', 'RuntimeMaxSec', 'Environment'])
+        self.assertEqual(keys, ['WorkingDirectory', 'ReadWritePaths', 'RuntimeMaxSec', 'PrivateNetwork', 'Environment'])
         self.assertNotIn('ExecStart', text)
         self.assertNotIn('%', text.split('\n', 2)[2])
         self.assertEqual(stat.S_IMODE(os.lstat(self.box.dropin_file()).st_mode), 0o644)
+
+    def test_recipe_phase_runs_in_a_private_network(self):
+        # Rule: the recipe unit gets PrivateNetwork=yes (its own loopback, no internet, no host
+        # service) and the job-runner is told to check it (MEMO_JOB_NETWORK=private).
+        self.box.request()
+        self.box.run()
+        with open(self.box.dropin_file()) as handle:
+            text = handle.read()
+        self.assertIn('\nPrivateNetwork=yes\n', text)
+        self.assertIn(' MEMO_JOB_NETWORK=private', text)
+        self.assertNotIn('IPAddress', text, 'the IP policy is the unit template, never the drop-in')
+
+    def test_install_phase_dropin_pins_the_install_argv_and_its_bound(self):
+        # Rule: the install unit gets its own drop-in, the fixed install argv shapes only, a
+        # bounded start (TimeoutStartSec=) and the network as before (no PrivateNetwork=).
+        self.box.request(timeout_seconds=60)
+        result = self.box.run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.box.install_dropin_file()) as handle:
+            text = handle.read()
+        out = f'{self.box.root}/jobs/{DID}/out'
+        self.assertIn(f'WorkingDirectory={self.box.worktree}\n', text)
+        self.assertIn(f'ReadWritePaths={self.box.worktree} {out}\n', text)
+        self.assertIn(f'TimeoutStartSec={dispatch.INSTALL_TIMEOUT_SECONDS}\n', text)
+        self.assertNotIn('PrivateNetwork', text)
+        self.assertNotIn('RuntimeMaxSec', text)
+        environment = dict(item.split('=', 1) for item in
+                           next(line for line in text.splitlines() if line.startswith('Environment='))
+                           [len('Environment='):].split(' '))
+        self.assertEqual(environment['MEMO_JOB_ALLOWED_ARGV'],
+                         'npm:ci:--ignore-scripts,pnpm:install:--frozen-lockfile:--ignore-scripts')
+        self.assertNotIn('MEMO_JOB_NETWORK', environment)
+        keys = [line.split('=', 1)[0] for line in text.splitlines() if '=' in line and not line.startswith('#')]
+        self.assertEqual(keys, ['WorkingDirectory', 'ReadWritePaths', 'TimeoutStartSec', 'Environment'])
+        self.assertEqual(stat.S_IMODE(os.lstat(self.box.install_dropin_file()).st_mode), 0o644)
+        # One start: memo-job@ pulls the install unit in (Requires=, After= in the template).
+        self.assertEqual(self.box.starts(), [['start', '--no-block', f'memo-job@{DID}.service']])
+
+    def test_install_dropin_must_be_loaded_too(self):
+        self.box.request()
+        self.box.run()
+        shown = [call[-1] for call in self.box.calls() if call[0] == 'show']
+        self.assertEqual(shown, [f'memo-job-install@{DID}.service', f'memo-job@{DID}.service'])
+
+    def test_refusal_removes_both_dropins(self):
+        self.box.set_state({'start_rc': 5})
+        self.box.request()
+        self.box.run()
+        self.assertFalse(os.path.exists(self.box.install_dropin_file()))
+        self.assertFalse(os.path.exists(os.path.dirname(self.box.install_dropin_file())))
+
+    def test_running_install_unit_makes_host_busy(self):
+        self.box.set_state({'units': {f'memo-job-install@{DID2}.service': 'activating'}})
+        self.box.request()
+        self.assertRefused(self.box.run(), 'host_busy')
+
+    def test_install_argv_matches_the_runner(self):
+        # deploy/memo-runner-dispatch INSTALL_ARGV and server/runners/recipes.mjs INSTALL_ARGV.
+        with open(os.path.join(REPO, 'server', 'runners', 'recipes.mjs')) as handle:
+            source = handle.read()
+        for shape in dispatch.INSTALL_ARGV:
+            self.assertIn('[' + ', '.join(f"'{token}'" for token in shape) + ']', source)
+        with open(os.path.join(REPO, 'server', 'runners', 'executor-systemd.mjs')) as handle:
+            runner = handle.read()
+        self.assertIn(f'INSTALL_TIMEOUT_SECONDS = {dispatch.INSTALL_TIMEOUT_SECONDS};', runner)
 
     def test_dropin_checked_with_show_before_start(self):
         self.box.request()
@@ -625,7 +700,8 @@ class CancelTests(DispatchTestCase):
         self.box.write_cancel(DID)
         result = self.box.run()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.box.calls()[-1], ['stop', '--no-block', f'memo-job@{DID}.service'])
+        self.assertEqual(self.box.calls()[-1], ['stop', '--no-block', f'memo-job@{DID}.service',
+                                                f'memo-job-install@{DID}.service'])
         self.assertEqual(self.cancel_marker()['reason'], 'cancelled')
         self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(self.box.jobs, DID, 'cancel.json')).st_mode), 0o640)
         self.assertEqual(os.listdir(self.box.cancel), [])
@@ -969,7 +1045,8 @@ process.stdout.write(JSON.stringify(out));
         stopped = self.executor('stop')
         self.assertTrue(stopped['ok'], stopped)
         self.box.run()
-        self.assertEqual(self.box.calls()[-1], ['stop', '--no-block', f'memo-job@{DID}.service'])
+        self.assertEqual(self.box.calls()[-1], ['stop', '--no-block', f'memo-job@{DID}.service',
+                                                f'memo-job-install@{DID}.service'])
 
 
 class FixtureTests(DispatchTestCase):
