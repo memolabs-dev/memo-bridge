@@ -27,6 +27,13 @@
 //                   the Mac once its root helper is installed)
 //   run_path        [abs dir, ...] put before the fixed PATH of user runs (operator_run and
 //                   operator_script as the agent user; never root calls), repatriation D-R8
+//   permanent_grants [{host, programs, cwd_prefixes}] (issue #48) standing grants with no TTL, set
+//                   by the owner in this file only: operator_run and operator_script as the agent
+//                   user naming only these programs, with a cwd under a prefix, run without a
+//                   Telegram request. At most 8; each host is this file's host, programs are bare
+//                   names (1 to 16) none of them hard-listed or a privilege tool (sudo, su...),
+//                   prefixes 1 to 4 absolute paths other than "/". There is no root key: a hard
+//                   call or a root call is never covered (operator-grants.mjs permanentCovers).
 // Paths are absolute; "~/" is accepted on the Mac only and expands to the agent user's home.
 //
 // The file itself must be trustworthy before anything in it is believed: a regular file (no
@@ -38,6 +45,7 @@
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, normalize } from 'node:path';
+import { PROGRAM_RE, permanentGrantId, programGrantable } from './operator-grants.mjs';
 
 export const POLICY_VERSION = 1;
 export const TIERS = Object.freeze(['read', 'write', 'exec', 'root']);
@@ -48,7 +56,8 @@ const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_LIST = 128;
 const MAX_PATH_CHARS = 1024;
 const KEYS = Object.freeze(['version', 'host', 'max_tier', 'roots', 'units', 'containers', 'approval_mode', 'denylist',
-  'rate_limits', 'frozen_file', 'audit_file', 'repositories', 'state_dir', 'run_env_allow', 'root_helper', 'run_path']);
+  'rate_limits', 'frozen_file', 'audit_file', 'repositories', 'state_dir', 'run_env_allow', 'root_helper', 'run_path', 'permanent_grants']);
+export const PERMANENT_GRANT_LIMITS = Object.freeze({ entries: 8, programs: 16, prefixes: 4 });
 const REQUIRED = Object.freeze(['version', 'host', 'max_tier', 'roots', 'frozen_file', 'audit_file']);
 // systemd unit names (systemd.unit(5)): name, optional instance, a known suffix.
 export const UNIT_RE = /^[A-Za-z0-9][A-Za-z0-9:_.@-]{0,120}\.(service|socket|timer|target|path|mount)$/;
@@ -87,6 +96,32 @@ function list(value, field, check, { max = MAX_LIST, fallback = [] } = {}) {
   if (!Array.isArray(value) || value.length > max) throw invalid(field);
   value.forEach((item, i) => { if (!check(item)) throw invalid(`${field}[${i}]`); });
   return [...new Set(value)];
+}
+
+// permanent_grants (issue #48): each entry checked like a standing grant request, refused (never
+// trimmed) when it names a hard-listed program, a privilege tool, "/" or another host. Unknown keys
+// (a "root" or "as_root" flag included) are refused like everywhere else in the file.
+function permanentGrants(value, ctx) {
+  const entries = list(value, 'permanent_grants', item => plainObject(item), { max: PERMANENT_GRANT_LIMITS.entries });
+  return entries.map((entry, i) => {
+    const field = `permanent_grants[${i}]`;
+    onlyKeys(entry, ['host', 'programs', 'cwd_prefixes'], field);
+    if (entry.host !== ctx.host) throw invalid(`${field}.host`);
+    if (!Array.isArray(entry.programs) || entry.programs.length === 0 || entry.programs.length > PERMANENT_GRANT_LIMITS.programs) throw invalid(`${field}.programs`);
+    entry.programs.forEach((name, j) => {
+      if (typeof name !== 'string' || !PROGRAM_RE.test(name) || !programGrantable(name)) throw invalid(`${field}.programs[${j}]`);
+    });
+    if (!Array.isArray(entry.cwd_prefixes) || entry.cwd_prefixes.length === 0 || entry.cwd_prefixes.length > PERMANENT_GRANT_LIMITS.prefixes) throw invalid(`${field}.cwd_prefixes`);
+    const prefixes = entry.cwd_prefixes.map((raw, j) => {
+      const path = policyPath(raw, `${field}.cwd_prefixes[${j}]`, ctx);
+      if (path === '/') throw invalid(`${field}.cwd_prefixes[${j}]`);
+      return path;
+    });
+    const programs = [...new Set(entry.programs)];
+    const unique = [...new Set(prefixes)];
+    return Object.freeze({ grant_id: permanentGrantId(ctx.host, programs, unique), host: ctx.host, programs: Object.freeze(programs),
+      cwd_prefixes: Object.freeze(unique) });
+  });
 }
 
 // Canonical form of a root: the realpath when it exists (/tmp is /private/tmp on macOS), else
@@ -148,6 +183,7 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
   // PATH entries: absolute, no ":" (the PATH separator), at most 16.
   const runPath = list(raw.run_path, 'run_path', item => { policyPath(item, 'run_path', ctx); return !item.includes(':'); }, { max: 16 })
     .map(item => policyPath(item, 'run_path', ctx));
+  const permanent = permanentGrants(raw.permanent_grants, ctx);
   const auditFile = policyPath(raw.audit_file, 'audit_file', ctx);
   const stateDir = raw.state_dir === undefined ? dirname(auditFile) : policyPath(raw.state_dir, 'state_dir', ctx);
   const read = canonicalRoots([...readPaths, ...writePaths], realpath);
@@ -174,6 +210,7 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
     rootHelper,
     repositories,
     runPath: Object.freeze(runPath),
+    permanentGrants: Object.freeze(permanent),
     home
   });
 }
@@ -243,6 +280,9 @@ export function policySummary(policy) {
     repository_guard: policy.repositories !== null,
     run_env_allow: [...policy.runEnvAllow],
     root_helper: policy.rootHelper !== null,
-    run_path: [...(policy.runPath ?? [])]
+    run_path: [...(policy.runPath ?? [])],
+    // Owner-set, no TTL (issue #48): calls they cover never ask Telegram.
+    permanent_grants: (policy.permanentGrants ?? []).map(g => ({ grant_id: g.grant_id, host: g.host, programs: [...g.programs],
+      cwd_prefixes: [...g.cwd_prefixes], source: 'permanent', expires_at: null }))
   };
 }

@@ -11,6 +11,8 @@
 //      equal the signed tier, and be at most the local policy's max_tier (the hub cannot raise
 //      it); then, when the local approval_mode says this call needs the owner's approval
 //      (operator-dangerous.mjs), the signature must carry an approval id (approval_required);
+//      a standing or permanent id never for a hard or root call, and a permanent id (ap_pm_)
+//      only when this file's permanent_grants cover the call with that grant (approval_scope);
 //   3. kill switch and rate limit: FROZEN file, auto-freeze, per-tier limits (operator-guard.mjs);
 //   4. arguments: the shared schema (server/tools/operator-tools.mjs), and host == this host;
 //   5. the tool (operator-tools.mjs), then redaction and the 128 KiB bound (operator-output.mjs);
@@ -25,7 +27,8 @@
 import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { z } from 'zod/v4';
 import { operatorCallTier, OPERATOR_OPERATION_CAPABILITY } from '../server/coordinator/policy.mjs';
-import { approvalInScope, needsApproval } from './operator-dangerous.mjs';
+import { approvalInScope, isPermanentApproval, needsApproval } from './operator-dangerous.mjs';
+import { permanentCovers } from './operator-grants.mjs';
 import { finalizeResult } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
 import { TRANSFER_SOURCE_SCHEMAS } from './operator-transfer-source.mjs';
@@ -110,6 +113,10 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
       // A standing approval never stands for a hard call or a root one (spec D-R5).
       if (!approvalInScope(signed.approval, op, args, tier)) return refuse('approval_scope');
+      // A permanent id (issue #48) only for a call this host's own policy file covers with that
+      // very grant: the hub's copy never widens it.
+      if (isPermanentApproval(signed.approval) && permanentCovers(policy.permanentGrants, { host: policy.host, op, args },
+        policy.host === 'mac' ? { mac: policy.home } : {}) !== signed.approval) return refuse('approval_scope');
       const schema = schemas[op];
       const parsed = schema ? schema.safeParse(args ?? {}) : { success: false };
       if (!parsed.success) return refuse('invalid_arguments');

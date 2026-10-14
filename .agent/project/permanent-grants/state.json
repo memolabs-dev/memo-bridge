@@ -1,0 +1,20 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "Permanent grants in the host policy, owner-owned, no TTL (memo-bridge #48 feat/permanent-grants, lab-infra feat/operator-permanent-grants)",
+  "updated": "2026-10-14",
+  "requirements": { "total": 9, "verified_offline": 9, "pending_runtime": ["PG-A1 to PG-A4 on the real hosts after deploy"] },
+  "todos": [
+    { "id": "T1", "title": "loader: permanent_grants schema and refusals", "priority": "P0", "status": "DONE", "evidence": "tests/operator-permanent-grants.test.mjs PG-R1, PG-R2" },
+    { "id": "T2", "title": "coverage shared with standing grants (permanentCovers, grantableCall)", "priority": "P0", "status": "DONE", "evidence": "PG-R3" },
+    { "id": "T3", "title": "agent checks ap_pm_ against its file; root helper refuses ap_pm_; single-use ids never ap_pm_", "priority": "P0", "status": "DONE", "evidence": "PG-R4, PG-R5, operator-docker.test.mjs" },
+    { "id": "T4", "title": "hub: read grants from operator_policy, sign covered calls, approval_source, sessions_overview", "priority": "P0", "status": "DONE", "evidence": "PG-R6" },
+    { "id": "T5", "title": "Mac installer renders the Mac defaults", "priority": "P0", "status": "DONE", "evidence": "PG-R1, PG-R6" },
+    { "id": "T6", "title": "lab-infra renders the lab defaults behind a switch, release check", "priority": "P0", "status": "DONE", "evidence": "lab-infra PermanentGrantTests, scripts/tests.sh 115 green" },
+    { "id": "T7", "title": "docs OPERATOR.md, instructions, help, spec", "priority": "P1", "status": "DONE", "evidence": "diff" },
+    { "id": "T8", "title": "one mutation check per rule", "priority": "P1", "status": "DONE", "evidence": "spec.md mutation table, 22/22 caught" },
+    { "id": "T9", "title": "owner: merge memo-bridge, bump lab memo_bridge_version, make deploy-memo-operator, reinstall the Mac agent", "priority": "P1", "status": "OWNER" }
+  ],
+  "open_risks": ["Mac: a covered interpreter call can rewrite the owner-owned 0444 policy for the next agent start (documented, medium)"],
+  "pushed": false,
+  "deployed": false
+}

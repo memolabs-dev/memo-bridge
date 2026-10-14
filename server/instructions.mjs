@@ -53,6 +53,7 @@ export const OPERATOR_FLOW_INSTRUCTIONS = 'Operator work session: read-only comm
   'Before running programs that can do anything (git, node, pnpm, npm, python3, make, bash, ssh, scp, rsync), call ' +
   'operator_grant action request ONCE with the programs, the cwd_prefixes you will work in and ttl_hours (default 8): the ' +
   'owner approves it in Telegram, then operator_run and operator_script calls with a cwd under a prefix run without asking. ' +
+  'The owner\'s permanent_grants (operator_policy) already cover their programs under their prefixes, so no grant is needed there. ' +
   'Always pass cwd. ssh to lab is root on lab. The destructive list (rm, disks, sudoers, gh pr merge, gh api writes on ' +
   'protected endpoints, force push, push to main, reset --hard, clean -f) and every as_root call still ask each time: ' +
   'on pending_approval poll approval_status, then repeat the exact call. operator_script runs as the agent user ' +

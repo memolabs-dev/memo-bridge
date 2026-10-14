@@ -202,6 +202,40 @@ each `git`, `node`, `pnpm`, `python3`, `make` or `ssh` call would have been abou
    (`approval_scope`), whatever the hub signed.
 5. Grants live in hub memory: a hub restart drops them; ask again.
 
+## Permanent grants (owner decision 2026-10-14 21:29, issue #48)
+
+Everyday programs asked too often even with standing approvals. A permanent grant is a standing
+approval with no TTL, written by the owner in the host policy file (`permanent_grants`), never by
+a tool: `operator_grant` cannot make, extend or revoke one, and the policy file is root-owned on
+lab and 0444 under the denied `~/.memo-operator` on the Mac.
+
+| Host | Programs | Under | Set by |
+|---|---|---|---|
+| Mac | `python3`, `node`, `bash`, `zsh`, `git`, `pnpm`, `npm`, `make` | `~/memolabs` | `deploy/mac/operator-mac.mjs` (`macPolicy`, `PERMANENT_PROGRAMS`) |
+| lab | the same | `/srv`, `/opt` | lab-infra `memo_operator_permanent_programs`, `memo_operator_permanent_prefixes` (switch `memo_operator_permanent_grants`) |
+
+- Coverage is exactly a standing approval's: `operator_run` or `operator_script` as the agent
+  user, with a `cwd` under a prefix, every wrapper and remote program of the call named. The hard
+  list and every `as_root` call still ask each time; `ssh` is not in the defaults.
+- The loader refuses (the agent and the root helper then refuse to start) an entry that names a
+  hard-listed program (`rm`, `dd`, `mkfs*`, `kill`, disk and user tools...), a privilege tool
+  (`sudo`, `su`, `doas`, `pkexec`, `runuser`, `chroot`, `nsenter`), a path instead of a bare
+  name, `/` as a prefix, another host, or any other key (`as_root`, `root`, `ttl_hours`). At most
+  8 entries, 16 programs and 4 prefixes each.
+- Each entry gets a stable id `ap_pm_<hash of host, programs, prefixes>`. The hub reads the
+  entries from the agent's `operator_policy` (on need, at most every 5 minutes and after each
+  reconnect) and signs a covered call with that id instead of asking Telegram. The agent checks
+  the id against its own file and answers `approval_scope` when that grant does not cover the
+  call; the root helper refuses any `ap_pm_` id. A stale or forged hub copy never widens a grant.
+- Journals: the hub's `operator_call` line carries `approval_id: ap_pm_...` and
+  `approval_source: "permanent"` (`single_use` and `standing` for the others); the host journal
+  carries the `ap_pm_` id. `operator_policy` (`policy.permanent_grants`) and `sessions_overview`
+  (`permanent_grants`) show them with `source: "permanent"` and `expires_at: null`.
+- To change one: edit the defaults above, then rerun the Mac installer
+  (`deploy/mac/install-operator-agent.sh --install`, which rewrites the policy and restarts the
+  agent) or `make deploy-memo-operator`. lab-infra refuses to render them for a pinned
+  `memo_bridge_version` whose loader predates them.
+
 Hard list additions (repatriation D-R1 to D-R3, D-R9), wherever the program appears in argv and
 inside the strings of shells and `ssh`: `gh pr merge`, `gh repo delete|archive|rename|edit`,
 `gh release delete`, `gh secret`, `gh variable set|delete`, `gh auth`, `gh ssh-key`,
@@ -416,6 +450,11 @@ the root tree, the state and the socket; keeps `/var/log/memo-operator`), then
   `pnpm` or `git` can run anything as the agent user; `ssh` is root on lab. The cwd prefix bounds
   where a call starts, not what it touches. The hard list still asks, but an argv classifier
   cannot see inside scripts, `make` targets, package scripts or `ssh` strings beyond their words.
+- **A permanent grant on an interpreter is owner power without a prompt.** Under `~/memolabs` on
+  the Mac (and `/srv`, `/opt` on lab) `python3 -c ...` or `bash script.sh` may do anything the
+  agent user can. On the Mac the agent user is the owner, who owns the 0444 policy: such a call
+  can rewrite `~/.memo-operator/policy.json`, and the change takes effect at the agent's next
+  start. lab's policy is root-owned and out of reach. A root-owned Mac policy would close this.
 - **Whole home writable on the Mac.** The T1 tools may now rewrite `~/.zshrc`, `~/.gitconfig`
   and the like; the denylist keeps keys, keychains, browser profiles, `~/.memo-operator` and the
   agents' own code under `~/.local/share/memo-bridge` out of reach.

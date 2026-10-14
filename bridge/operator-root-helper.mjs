@@ -48,7 +48,7 @@ import { chmod, chown, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { operatorCallTier } from '../server/coordinator/policy.mjs';
-import { isStandingApproval, needsApproval } from './operator-dangerous.mjs';
+import { isGrantApproval, needsApproval } from './operator-dangerous.mjs';
 import { checkCwd, checkRun } from './operator-exec.mjs';
 import { createDenylist, catalogProjects } from './operator-paths.mjs';
 import { finalizeResult, untrusted } from './operator-output.mjs';
@@ -150,8 +150,8 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const admitted = guard.admit(tier);
     if (admitted) return refuse(admitted);
     if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
-    // Standing approvals cover user runs only, never what reaches the root helper (spec D-R5).
-    if (isStandingApproval(signed.approval)) return refuse('approval_scope');
+    // Standing and permanent grants cover user runs only, never what reaches the root helper (D-R5, #48).
+    if (isGrantApproval(signed.approval)) return refuse('approval_scope');
     const parsed = OPERATOR_SCHEMAS[op].safeParse(args);
     if (!parsed.success || parsed.data.host !== host) return refuse('invalid_arguments');
     const a = parsed.data;

@@ -13,7 +13,7 @@
 // The hub signs the consumed approval id into the request; the agent and the root helper refuse
 // a call their own approval_mode requires approval for when that id is missing.
 import { randomBytes } from 'node:crypto';
-import { APPROVAL_TTL_MS, STANDING_APPROVAL_MS } from './operator-dangerous.mjs';
+import { APPROVAL_TTL_MS, STANDING_APPROVAL_MS, isGrantApproval } from './operator-dangerous.mjs';
 
 export const MAX_PENDING_APPROVALS = 20;
 const ID_RE = /^ap_[A-Za-z0-9_-]{16,40}$/;
@@ -41,9 +41,9 @@ export function createApprovalStore({ now = Date.now, random = randomBytes, maxP
       const key = keyOf(call);
       for (const a of items.values()) if (a.key === key && effective(a) === 'pending') return { approval: a, created: false };
       if ([...items.values()].filter(a => effective(a) === 'pending').length >= maxPending) return { error: 'approval_backlog' };
-      // Never ap_st_: that prefix marks a standing approval (operator-grants.mjs, D-R5).
+      // Never ap_st_ or ap_pm_: those prefixes mark standing and permanent grants (D-R5, #48).
       let id;
-      do { id = `ap_${random(18).toString('base64url')}`; } while (id.startsWith('ap_st_'));
+      do { id = `ap_${random(18).toString('base64url')}`; } while (isGrantApproval(id));
       const a = { id, key, host: call.host, op: call.op, argsSha256: call.argsSha256, principal: call.principal, reason: call.reason ?? null,
         status: 'pending', created: now(), expires: now() + APPROVAL_TTL_MS, consumed: false, standingUntil: null, decidedBy: null };
       items.set(id, a);
