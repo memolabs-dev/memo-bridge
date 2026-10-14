@@ -10,8 +10,8 @@ from `origin/main` 255b3dc. Not pushed.
   -> tests 514, pass 514, fail 0, skipped 0 (30 new tests: memory 8, transfer 7, media 9,
   snapshot/help/staged edit 6).
 - EV-2: `pnpm run build` emits `plugin/server/dist/index.mjs` and `job-runner.mjs`;
-  `pnpm run smoke` -> `{"ok":true,"tools":56,"roundTrip":true,...}` (48 + 4 memory tools + the
-  smoke's own count; the smoke saves, finds and reads a memory through the bundle).
+  `pnpm run smoke` -> `{"ok":true,"tools":56,"roundTrip":true,...}` (the stdio list of main
+  plus the 4 memory tools; the smoke saves, finds and reads a memory through the bundle).
 - EV-3: `node scripts/build-operator.mjs --out <scratch>` bundles the Mac operator agent with the
   new tools (PDFKit script, read_chunk, snapshot, staged edit found in the bundle).
 - EV-4 mutation checks, each caught by a test, then restored:
