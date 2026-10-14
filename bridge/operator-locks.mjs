@@ -29,7 +29,8 @@ import { isRemotePrincipal } from '../server/coordinator/policy.mjs';
 
 export const LOCK_KINDS = Object.freeze(['path', 'unit', 'container', 'global']);
 export const LOCK_TTL = Object.freeze({ default: 900, min: 30, max: 7200 });
-export const LOCK_LIMITS = Object.freeze({ perWorkspace: 8, total: 64, reason: 200, listed: 64, uploads: 256 });
+// total 32: sessions_overview with 20 workspaces and every lock stays under the 24 KiB remote budget.
+export const LOCK_LIMITS = Object.freeze({ perWorkspace: 8, total: 32, reason: 200, listed: 32, uploads: 256 });
 export const LOCK_OPS = Object.freeze(['operator_lock', 'operator_unlock']);
 const UPLOAD_TTL_MS = 24 * 3600_000;
 const WS_RE = /^ws_[A-Za-z0-9_-]{16}$/;
@@ -303,8 +304,14 @@ export function mergeOverview(data, view) {
   const byWorkspace = new Map();
   for (const l of view.locks) byWorkspace.set(l.workspace_id, [...(byWorkspace.get(l.workspace_id) ?? []), l]);
   const sessions = data.sessions.map(s => ({ ...s, operator_locks: (byWorkspace.get(s.workspace_id) ?? [])
-    .map(({ lock_id, host, kind, target, reason, expires_at }) => ({ lock_id, host, kind, target, reason, expires_at })),
+    .map(({ lock_id, host, kind, target, reason, expires_at }) => ({ lock_id, host, kind, target, reason: reason ? reason.slice(0, 80) : null,
+      expires_at })),
   ...(s.session_tag && view.last_call_at[s.session_tag] ? { last_call_at: view.last_call_at[s.session_tag] } : {}) }));
-  return { ...data, sessions, operator_locks: view.locks, ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),
+  // Bounded for the 24 KiB remote budget: the details sit on each workspace shown; the list
+  // repeats them only for a workspace beyond the ones shown.
+  const shown = new Set(data.sessions.map(s => s.workspace_id));
+  const list = view.locks.map(({ lock_id, host, kind, target, workspace_id, session_tag, you, reason, expires_at }) => ({ lock_id, workspace_id,
+    session_tag, ...(you !== undefined ? { you } : {}), ...(shown.has(workspace_id) ? {} : { host, kind, target, reason, expires_at }) }));
+  return { ...data, sessions, operator_locks: list, ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),
     locks_since: view.locks_since };
 }

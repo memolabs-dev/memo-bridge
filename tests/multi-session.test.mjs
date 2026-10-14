@@ -340,6 +340,26 @@ test('MS-R8: a restart drops the locks; the holder\'s next write answers lock_re
   assert.equal((await lock(restarted.locks, WS_A, SA, { kind: 'path', target: '/srv/x' })).error, 'locked_by_other_session');
 });
 
+test('MS-R1/R2: the overview stays under the remote budget with 20 workspaces and the maximum of locks', async t => {
+  const { coordinator } = setup(t, { stateDir: await tempStateDir(t) });
+  const ids = [];
+  for (let i = 0; i < 21; i += 1) ids.push(await open(coordinator, `budget-${i}-${'l'.repeat(60)}`));
+  const runtime = await coordinator.sessionsOverview({}, meta('budget-0'));
+  const bound = Object.fromEntries(ids.map((id, i) => [id, session(`budget-${i}`)]));
+  const { locks } = locksTable({ bound });
+  let taken = 0;
+  for (const [i, id] of ids.slice(0, 4).entries()) {
+    for (let k = 0; k < 8; k += 1) {
+      const out = await lock(locks, id, bound[id], { kind: 'path', target: `/srv/${'d'.repeat(120)}/${i}/${k}`, reason: 'r'.repeat(200) });
+      taken += out.ok ? 1 : 0;
+    }
+  }
+  assert.equal(taken, 32);
+  assert.equal((await lock(locks, ids[5], bound[ids[5]], { kind: 'unit', target: 'x' })).error, 'lock_limit');
+  const merged = mergeOverview(runtime, locks.overview(CHAT, bound[ids[0]]));
+  assert.ok(Buffer.byteLength(JSON.stringify(merged)) < 24 * 1024, `${Buffer.byteLength(JSON.stringify(merged))} bytes`);
+});
+
 test('lock paths: normalized, ~ on the Mac, case folded on the Mac, refused when malformed', () => {
   assert.deepEqual(normalizePath('vps', '/srv/./a/../b/'), { key: '/srv/b', shown: '/srv/b' });
   assert.equal(normalizePath('mac', '~/Docs/X').key, '/users/memo/docs/x');
@@ -360,6 +380,7 @@ test('MS-R2: sessions_overview gets the locks per workspace and as a list, with 
   assert.deepEqual(merged.sessions[1].operator_locks, []);
   assert.equal(merged.operator_locks[0].you, false);
   assert.equal(merged.operator_locks[0].session_tag, sessionTag(SA));
+  assert.equal(merged.operator_locks[0].target, undefined, 'details sit on the workspace shown');
   assert.ok(merged.locks_since);
   assert.equal(locks.overview(CHAT, SA).locks[0].you, true);
   assert.deepEqual(mergeOverview({ ok: false, error: 'x' }, locks.overview(CHAT, SA)), { ok: false, error: 'x' });
