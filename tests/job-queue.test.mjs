@@ -283,7 +283,9 @@ test('AC-P4-18: a job whose worktree plus output outgrows the budget is stopped 
   v.startUnit(job.job_id);
   await v.supervisor.tick();
   assert.equal((await v.row(job.job_id)).status, 'running');
-  assert.deepEqual(v.reading.usageCalls.at(-1), [v.wts[0], join(v.root, 'jobs', v.did(job.job_id), 'out')]);
+  // The worktree, the output and the install phase's per-job cache.
+  assert.deepEqual(v.reading.usageCalls.at(-1), [v.wts[0], join(v.root, 'jobs', v.did(job.job_id), 'out'),
+    join(v.root, 'jobs', v.did(job.job_id), 'cache')]);
   v.reading.usage = { bytes: 1.5 * GIB, partial: false };
   v.clock.t += 30_000;
   await v.supervisor.tick();

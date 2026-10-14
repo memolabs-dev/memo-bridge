@@ -153,7 +153,7 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
         if (job.status === 'dispatched') {
           await write((repo, t) => {
             if (repo.updateJob(job.id, { status: 'running', started_at: t }, 'dispatched')) {
-              event(repo, job.id, t, 'started', { unit: job.unit, active_state: s.active_state });
+              event(repo, job.id, t, 'started', { unit: job.unit, active_state: s.active_state, phase: s.phase ?? null });
             }
           });
         }
@@ -225,7 +225,8 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       // du -P never follows a symlink, operands included: measure the real worktree directory.
       let wt = null;
       try { wt = worktree?.path ? realpathSync(worktree.path) : null; } catch { wt = null; }
-      const usage = await resources.usage([wt, dirname(executor.logPath(job))].filter(Boolean));
+      // The job's cache folder (install phase: corepack, pnpm store, npm cache) counts too.
+      const usage = await resources.usage([wt, dirname(executor.logPath(job)), executor.cachePath?.(job)].filter(Boolean));
       if (usage) {
         view.disk = { job_id: job.id, used_gib: Math.round(usage.bytes / 1024 ** 3 * 100) / 100, budget_gib: cfg.disk_budget_gib,
           partial: usage.partial };

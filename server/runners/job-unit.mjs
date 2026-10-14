@@ -151,6 +151,10 @@ export function phaseEnvironment(plan, base, { home, tmp }) {
   const corepack = { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', COREPACK_ENABLE_AUTO_PIN: '0' };
   if (plan.phase === 'install') {
     return Object.assign(env, corepack, {
+      // Package managers also keep metadata under the XDG folders: keep it on disk, in this
+      // job's cache, rather than in the unit's /tmp (a tmpfs on Debian 13, charged to MemoryMax=).
+      XDG_CACHE_HOME: join(plan.cache, 'xdg-cache'), XDG_DATA_HOME: join(plan.cache, 'xdg-data'),
+      XDG_STATE_HOME: join(plan.cache, 'xdg-state'),
       COREPACK_HOME: join(plan.cache, 'corepack'),
       // pnpm 12 reads pnpm_config_*, not npm_config_*, for its own settings (checked with
       // `pnpm store path`); npm reads npm_config_cache.

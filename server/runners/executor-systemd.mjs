@@ -437,6 +437,7 @@ export function createSystemdExecutor({ root = DEFAULT_RUNNER_ROOT, systemctl = 
       return job;
     },
     logPath: job => logPath(didOf(job)),
+    cachePath: job => join(paths.jobs, didOf(job), 'cache'),
     logRoot: () => paths.jobs
   };
   return executor;

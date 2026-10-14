@@ -168,7 +168,7 @@ function installFixture(t, files = { 'package-lock.json': '{}' }, { manifest = {
     writeFileSync(join(bin, tool), `#!${process.execPath}
 require('fs').appendFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: [${JSON.stringify(tool)}, ...process.argv.slice(2)],
   cwd: process.cwd(), COREPACK_HOME: process.env.COREPACK_HOME, store: process.env.pnpm_config_store_dir,
-  npm_cache: process.env.npm_config_cache, GH_TOKEN: process.env.GH_TOKEN ?? null }) + '\\n');
+  npm_cache: process.env.npm_config_cache, xdg_cache: process.env.XDG_CACHE_HOME, GH_TOKEN: process.env.GH_TOKEN ?? null }) + '\\n');
 console.log('fake ${tool} ran');
 process.exit(${exitCode});
 `);
@@ -224,6 +224,7 @@ test('install phase runs the fixed argv without a shell, with per-job caches, an
   assert.equal(call.COREPACK_HOME, join(f.cache, 'corepack'));
   assert.equal(call.store, join(f.cache, 'pnpm-store'));
   assert.equal(call.npm_cache, join(f.cache, 'npm'));
+  assert.equal(call.xdg_cache, join(f.cache, 'xdg-cache'));
   assert.equal(call.GH_TOKEN, null);
   const log = f.log();
   assert.match(log, /\[memo-bridge\] phase install \(network on, scripts off\): pnpm install --frozen-lockfile --ignore-scripts/);
