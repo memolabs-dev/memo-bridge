@@ -129,7 +129,7 @@ export function sandboxProfile({ denyReadCount, gitCommon }) {
     // Reads: no private data, except the worktree, the job folder and the repository's Git data.
     // Only contents, listings and extended attributes are denied: metadata (lstat) stays
     // allowed, because toolchains resolve real paths through these folders (the worktree lives
-    // under the worktrees root, itself under ~/projects).
+    // under the worktrees root, itself under ~/memolabs).
     ...(denyReadCount ? [`(deny file-read-data file-read-xattr ${denyRead})`] : []),
     // (Same operations as the denial: Seatbelt does not let a wildcard allow override them.)
     `(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP"))${gitCommon ? ' (subpath (param "GIT_COMMON"))' : ''})`,

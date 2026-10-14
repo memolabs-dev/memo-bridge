@@ -70,12 +70,12 @@ export function macLayout(home) {
   });
 }
 
-// The project registry the catalog already uses (server/catalog.mjs): PROJECTS.md lives in
-// ~/memolabs, its Path column is relative to ~/projects, which the 2026-10-14 migration points at
-// ~/memolabs/.links (F-P6-02). The real checkouts sit under ~/memolabs (the layout root).
+// The project registry the catalog already uses (server/catalog.mjs): PROJECTS.md lives at the
+// one root, ~/memolabs (MEMOLABS_ROOT), and its Path column is relative to that root, where the
+// real checkouts sit. ~/projects and its .links aliases are retired (2026-10-14).
 export function macRepositories(home) {
   return {
-    projects_root: join(home, 'memolabs', '.links'),
+    projects_root: join(home, 'memolabs'),
     registry_file: join(home, 'memolabs', 'PROJECTS.md'),
     layout_root: join(home, 'memolabs')
   };

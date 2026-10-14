@@ -70,7 +70,7 @@ test('audit flags unregistered repos and aliases without authorizing access', as
   assert.equal((await projectInfo('emargo', options)).error,'unknown_project');
 });
 
-test('a repository moved into the layout root and linked back from ~/projects stays available', async t => {
+test('a registry row that is a link into the layout root stays available', async t => {
   const {root, options} = await fixture(t, [
     '| moved | moved | repo | active | app | JS | - |',
     '| escaped | escaped | repo | active | app | JS | - |'

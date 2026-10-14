@@ -1,7 +1,7 @@
 // Isolated Git worktrees for workspaces (Phase 3, Mac runner).
 //
 // A workspace (ws_...) gets its own worktree of a registered repository, on its own branch,
-// under ~/projects/_worktrees/<project>/<branch>. Models read, list and write files only inside
+// under $MEMOLABS_ROOT/workspace/worktrees/<project>/<branch>. Models read, list and write files only inside
 // that worktree, then commit and push the branch. Rules enforced here:
 // - the worktree belongs to the workspace's principal, and writes need an active workspace;
 // - repository writes need a live claim on the worktree's Issue (local mirror on every write;
@@ -31,11 +31,11 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { constants as fsConstants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectInfo } from '../catalog.mjs';
+import { memolabsRoot } from '../memolabs-root.mjs';
 import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
 import { PUSH_CREDENTIAL, credentialsRequired } from '../coordinator/credentials.mjs';
 import { parseIssueRef } from '../coordinator/issue-lease.mjs';
@@ -173,7 +173,7 @@ async function readRegular(path, maxBytes) {
 export function worktreesRoot(env = process.env) {
   const override = env.MEMO_BRIDGE_WORKTREES_ROOT;
   if (override !== undefined && override !== '') return isAbsolute(override) ? resolve(override) : null;
-  return join(homedir(), 'projects', '_worktrees');
+  return join(memolabsRoot(env), 'workspace', 'worktrees');
 }
 
 // ---------------------------------------------------------------------------------------------

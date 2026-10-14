@@ -14,11 +14,11 @@ export const FAKE_GH_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fake-g
 // The canonical ledger script from memolabs-dev/.github. CI checks it out and sets
 // MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 so a missing ledger fails instead of skipping.
 export const GOVERNANCE_ROOT = defaultGovernanceRoot();
-export const HAS_GOVERNANCE = existsSync(join(GOVERNANCE_ROOT, 'scripts', 'issue_lease.py'));
+export const HAS_GOVERNANCE = Boolean(GOVERNANCE_ROOT) && existsSync(join(GOVERNANCE_ROOT, 'scripts', 'issue_lease.py'));
 if (!HAS_GOVERNANCE && process.env.MEMO_BRIDGE_REQUIRE_GOVERNANCE === '1') {
   throw new Error(`issue_lease.py not found under ${GOVERNANCE_ROOT}`);
 }
-export const skipWithoutLedger = HAS_GOVERNANCE ? false : 'memolabs-dev/.github checkout not found (set MEMO_BRIDGE_GOVERNANCE_ROOT)';
+export const skipWithoutLedger = HAS_GOVERNANCE ? false : 'memolabs-dev/.github checkout not found (register memolabs-org-gh in $MEMOLABS_ROOT/PROJECTS.md or set MEMO_BRIDGE_GOVERNANCE_ROOT)';
 
 export const PROJECT_ORIGINS = { drop: 'memolabs-dev/drop', cuesheet: 'memolabs-dev/cuesheet' };
 

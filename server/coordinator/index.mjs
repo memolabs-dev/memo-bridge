@@ -252,6 +252,7 @@ export function parsePublicAllowlist(text) {
 }
 
 export async function readPublicAllowlist(root = defaultGovernanceRoot()) {
+  if (!root) return fail('ledger_unavailable', 'governance checkout not registered');
   try {
     const text = await readFile(join(root, 'scripts', 'issue_preflight.py'), 'utf8');
     const repos = text.length <= 256 * 1024 ? parsePublicAllowlist(text) : null;

@@ -1,6 +1,6 @@
 // Worktree tools end to end: a temporary registered repository with a bare origin, a private
 // state directory per test, a stub lease ledger, and workspace/claim rows inserted directly.
-// Nothing here touches the user's real state, ~/projects or GitHub.
+// Nothing here touches the user's real state, the real registry root or GitHub.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

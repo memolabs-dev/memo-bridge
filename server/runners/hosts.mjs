@@ -9,8 +9,9 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
-import { arch, cpus, freemem, homedir, hostname, loadavg, platform, release, totalmem } from 'node:os';
+import { arch, cpus, freemem, hostname, loadavg, platform, release, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { memolabsRoot } from '../memolabs-root.mjs';
 import { collectHost } from '../probe.mjs';
 import { ACTIVE_JOB_STATUSES, JOB_STATUSES, executorKindFromEnv, runnerStatus } from './executor.mjs';
 import { createResourceReader, summarizeSnapshot } from './resources.mjs';
@@ -328,4 +329,4 @@ export function createHostService({ run = execProbe, collect = collectHost, now 
   };
 }
 
-export const defaultProjectsRoot = (env = process.env) => env.MEMO_BRIDGE_PROJECTS_ROOT || join(homedir(), 'projects');
+export const defaultProjectsRoot = (env = process.env) => env.MEMO_BRIDGE_PROJECTS_ROOT || memolabsRoot(env);

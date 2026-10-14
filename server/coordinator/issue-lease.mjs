@@ -4,8 +4,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { resolveRegisteredPathSync } from '../catalog.mjs';
 import { LEDGER_CREDENTIAL, credentialsRequired, ghChildEnv, privateConfigDir } from './credentials.mjs';
 import { LEDGER_REPO, createGitHubCredentials } from '../integrations/github-app.mjs';
 
@@ -32,8 +32,11 @@ export function parseIssueRef(value) {
   return match ? { ref: value, repo: `${match[1]}/${match[2]}`, number: match[3] } : null;
 }
 
+// The governance checkout (memolabs-dev/.github): MEMO_BRIDGE_GOVERNANCE_ROOT, else the project
+// registered as memolabs-org-gh in $MEMOLABS_ROOT/PROJECTS.md. null when neither resolves; the
+// ledger then reports ledger_unavailable instead of guessing a folder.
 export function defaultGovernanceRoot(env = process.env) {
-  return env.MEMO_BRIDGE_GOVERNANCE_ROOT || join(homedir(), 'projects', 'memolabs-org-gh');
+  return env.MEMO_BRIDGE_GOVERNANCE_ROOT || resolveRegisteredPathSync('memolabs-org-gh', { env });
 }
 
 function cleanDetail(text) {
@@ -81,6 +84,7 @@ export function createIssueLeaseClient({ root = defaultGovernanceRoot(), python 
   let script = null;
   function locate() {
     if (script) return script;
+    if (!root) throw new Error('ledger_root_unresolved');
     const candidate = join(root, 'scripts', 'issue_lease.py');
     if (!existsSync(candidate)) throw new Error('ledger_script_missing');
     script = realpathSync(candidate);

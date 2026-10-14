@@ -3,7 +3,7 @@
 // Everything is local and temporary: a registry with one project whose origin is a bare
 // repository, a private state directory, a worktrees root, a sandboxed Git configuration, and an
 // offline GitHub (tests/helpers/fake-gh) behind the canonical lease ledger script. Nothing reads
-// or writes the user's real state, ~/projects or GitHub.
+// or writes the user's real state, the real registry root or GitHub.
 //
 // Round trip: workspace_open -> task_claim -> worktree_create -> worktree_write_file ->
 // jobs_submit test -> job succeeded -> worktree_commit -> worktree_push -> task_complete ->

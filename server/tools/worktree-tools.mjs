@@ -76,7 +76,7 @@ export function registerWorktreeTools(server, getRuntime) {
   }, call('worktrees_list', 'list'));
 
   server.registerTool('worktree_create', {
-    description: 'Create an isolated Git worktree of the workspace project (a registered repository) on a new branch, under ~/projects/_worktrees/<project>/. Runs "git fetch origin" and "git ls-remote origin" first. Pass the claimed Issue to be able to write, commit and push later; branch defaults to agent/<issue number>-<workspace suffix>, base to origin/<default branch>. Refuses the default branch (local or as the remote reports it), main, master, an existing branch (local or remote), all compared without case, and an existing path.',
+    description: 'Create an isolated Git worktree of the workspace project (a registered repository) on a new branch, under $MEMOLABS_ROOT/workspace/worktrees/<project>/. Runs "git fetch origin" and "git ls-remote origin" first. Pass the claimed Issue to be able to write, commit and push later; branch defaults to agent/<issue number>-<workspace suffix>, base to origin/<default branch>. Refuses the default branch (local or as the remote reports it), main, master, an existing branch (local or remote), all compared without case, and an existing path.',
     inputSchema: z.object({
       workspace_id: workspaceId,
       issue: z.string().max(160).optional().describe('GitHub Issue the workspace holds a live claim on, e.g. memolabs-dev/drop#7.'),

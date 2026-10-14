@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,22 +30,21 @@ function tls(dir) {
   return { tlsKey: readFileSync(join(dir, 'tls.key'), 'utf8'), tlsCert: readFileSync(join(dir, 'tls.crt'), 'utf8') };
 }
 
-// A Mac home: the registry layout of 2026-10-14 (~/memolabs/PROJECTS.md, ~/memolabs/.links/<name>
-// -> the checkout), one registered checkout on main, the probe agent's hub CA, and a hub
+// A Mac home: the one registry at the one root (~/memolabs/PROJECTS.md, Path relative to
+// ~/memolabs, no alias folder), one registered checkout on main, the probe agent's hub CA, and a hub
 // operator signing key given to the script with --hub-pub.
 function macHome(t) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'memo-op-mac-')));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const p = (...parts) => join(home, ...parts);
-  for (const d of ['memolabs/.links', 'memolabs/os/app/.git', 'Desktop', 'Documents', 'Downloads', '.config/memo-bridge', 'outside', 'tmp']) {
+  for (const d of ['memolabs/os/app/.git', 'Desktop', 'Documents', 'Downloads', '.config/memo-bridge', 'outside', 'tmp']) {
     mkdirSync(p(d), { recursive: true });
   }
   writeFileSync(p('memolabs/os/app/.git/HEAD'), 'ref: refs/heads/main\n');
   writeFileSync(p('memolabs/os/app/README.md'), 'tracked\n');
-  symlinkSync(p('memolabs/os/app'), p('memolabs/.links/app'));
   writeFileSync(p('memolabs/PROJECTS.md'), ['# Registre', '## Projets appartenant à Memo Labs',
     '| Name | Path | Kind | Status | Nature | Stack | Vault note |', '|---|---|---|---|---|---|---|',
-    '| app | app | repo | active | tool | JS | - |', ''].join('\n'));
+    '| app | os/app | repo | active | tool | JS | - |', ''].join('\n'));
   writeFileSync(p('Documents/note.txt'), 'hello from the Mac\n');
   const { tlsKey, tlsCert } = tls(p('outside'));
   writeFileSync(p('.config/memo-bridge/hub-ca.crt'), tlsCert);

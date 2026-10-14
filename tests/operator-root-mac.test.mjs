@@ -278,7 +278,7 @@ test('R-MR-07: the agent policy is exec without the root policy, root with its s
   const base = trustedBase(t);
   if (!base) return t.skip('no trusted temporary directory');
   const home = join(base, 'home');
-  for (const d of ['memolabs/.links', 'Desktop', 'Documents', 'Downloads']) mkdirSync(join(home, d), { recursive: true });
+  for (const d of ['memolabs', 'Desktop', 'Documents', 'Downloads']) mkdirSync(join(home, d), { recursive: true });
   const rootLayout = macRootLayout(join(base, 'operator-root'));
   const read = async () => ({ projects: [{ available: true, path: join(home, 'memolabs', 'app') }] });
   const first = await writePolicy(home, { read, rootLayout });
