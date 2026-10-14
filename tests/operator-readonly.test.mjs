@@ -77,10 +77,12 @@ async function until(fn, ms = 5000) {
 }
 
 // A hub with a fake Mac operator agent that records what reaches it, and a stubbed runtime.
+// operator_edit waits for `gate` when the test sets one, to observe a call in flight.
 async function hubWith(t, { sessionWorkspace } = {}) {
   const { tlsKey, tlsCert } = tls(t);
   const id = generateAgentIdentity();
   const audit = []; const reached = []; const opened = [];
+  const ctl = { gate: null };
   const verifyWorkspace = async (principal, ws) => ({ ok: true, workspace: { workspace_id: ws, status: 'active', session_tag: null, project: 'ops' } });
   const hub = createHub({ tlsKey, tlsCert, tokenSha256: 'a'.repeat(64), port: 0, audit: ev => audit.push(ev),
     allowedAgentKeys: { mac: generateAgentIdentity().publicKey, vps: generateAgentIdentity().publicKey, 'operator-mac': id.publicKey },
@@ -88,13 +90,15 @@ async function hubWith(t, { sessionWorkspace } = {}) {
       sessionWorkspace: sessionWorkspace ?? (async (principal, session) => { opened.push(session); return { ok: true, workspace_id: `ws_auto${session.slice(0, 12)}`, opened: true, project: 'ops' }; }) } });
   const { port } = await hub.start();
   t.after(() => hub.stop());
-  const record = op => async args => { reached.push({ op, args }); return { ok: true, op }; };
+  const record = op => async args => { reached.push({ op, args }); if (ctl.gate) await ctl.gate; return { ok: true, op }; };
   const agent = createAgent({ host: 'operator-mac', url: `wss://127.0.0.1:${port}/agent`, privateKey: id.privateKey, ca: tlsCert, reconnectMs: 100_000,
-    operations: { host_status: async () => ({ host: 'operator-mac', online: true }), operator_run: record('operator_run'), operator_edit: record('operator_edit') } });
+    operations: { host_status: async () => ({ host: 'operator-mac', online: true }), operator_run: record('operator_run'), operator_edit: record('operator_edit'),
+      operator_script: record('operator_script') } });
   t.after(() => agent.stop());
   await until(() => hub.agentInfo('operator-mac')?.version === 2);
-  const call = (op, args, session) => hub.requestOperator(undefined, op, { args, principal: CHAT, clientSession: session });
-  return { hub, audit, reached, opened, call };
+  const call = (op, args, session) => hub.requestOperator(op === 'operator_script' ? 'mac' : undefined, op,
+    { args: op === 'operator_script' ? { host: 'mac', ...args } : args, principal: CHAT, clientSession: session });
+  return { hub, audit, reached, opened, call, ctl };
 }
 
 test('RR-16 hub: ps on the Mac from a remote chat needs no workspace and no lock, and is journaled as a read', async t => {
@@ -108,39 +112,77 @@ test('RR-16 hub: ps on the Mac from a remote chat needs no workspace and no lock
   // Another conversation's global lock does not block a read either.
   assert.equal((await s.hub.requestOperator('mac', 'operator_lock', { args: { host: 'mac', workspace_id: 'ws_holder0000000001', kind: 'global' }, principal: CHAT, clientSession: SB })).ok, true);
   assert.equal((await s.call('operator_run', { argv: ['git', 'status'], cwd: '/Users/memo/memolabs' }, SA)).ok, true);
-  // A command that can write is not a read: it is locked out by the global lock.
-  assert.equal((await s.call('operator_run', { argv: ['touch', '/Users/memo/x'], cwd: '/Users/memo' }, SA)).error, 'locked_by_other_session');
+  // A command that can write is not a read: the other conversation's lock refuses it, with a next step.
+  const refused = await s.call('operator_run', { argv: ['touch', '/Users/memo/x'], cwd: '/Users/memo' }, SA);
+  assert.equal(refused.error, 'locked_by_other_session');
+  assert.match(refused.next_step, /tell the owner/);
 });
 
-test('RR-17 hub: a remote write without a workspace gets the chat\'s workspace and a lock, journaled; conflicts and global needs stay explicit', async t => {
+test('RR-17 hub: a remote write just works: the chat\'s workspace, an implicit lock held for the call only, both journaled', async t => {
   const s = await hubWith(t);
-  const out = await s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'x' }, SA);
+  // Bench 20:04: "create ~/memolabs/workspace/bench-mb/note.md on the Mac" in one call.
+  const out = await s.call('operator_edit', { path: '~/memolabs/workspace/bench-mb/note.md', mode: 'write', new_text: 'x', create: true }, SA);
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.equal(out.auto.workspace_id, `ws_auto${SA.slice(0, 12)}`);
   assert.equal(out.auto.workspace_opened, true);
-  assert.equal(out.auto.locks_taken.length, 1);
   assert.ok(s.audit.some(e => e.event === 'workspace_auto_open' && e.workspace_id === out.auto.workspace_id));
-  assert.ok(s.audit.some(e => e.event === 'operator_lock_auto' && e.kind === 'path'));
+  assert.ok(s.audit.some(e => e.event === 'lock_implicit' && e.kinds.includes('path')));
+  assert.equal(s.hub.operatorLocks.size, 0, 'the implicit lock is released after the call');
   assert.equal(s.reached[0].args.workspace_id, undefined, 'the workspace never reaches the agent');
-  // A second conversation on the same file: locked out, with the holder.
-  const other = await s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'y' }, SB);
-  assert.equal(other.error, 'locked_by_other_session');
-  // A command without cwd would need a global lock: never taken automatically, one explicit step.
-  const global = await s.call('operator_run', { argv: ['touch', '/Users/memo/y'] }, SA);
-  assert.equal(global.error, 'lock_required');
-  assert.match(global.next_step, /pass a cwd|kind":"global/);
-  // With a cwd it is locked on that path and runs.
-  assert.equal((await s.call('operator_run', { argv: ['touch', 'y'], cwd: '/Users/memo/notes' }, SA)).ok, true);
-  // No session hint: no binding possible, one explicit next step.
+  // The same chat again: the workspace is remembered, not reopened.
+  assert.equal((await s.call('operator_edit', { path: '~/memolabs/a.md', mode: 'write', new_text: 'y', create: true }, SA)).ok, true);
+  assert.equal(s.opened.length, 1);
+  // While a call is in flight, its target is held: another chat on it is refused, elsewhere it runs.
+  let open; s.ctl.gate = new Promise(r => { open = r; });
+  const slow = s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'x' }, SA);
+  await until(() => s.hub.operatorLocks.size === 1);
+  const blocked = await s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'y' }, SB);
+  assert.equal(blocked.error, 'locked_by_other_session');
+  s.ctl.gate = null;
+  assert.equal((await s.call('operator_edit', { path: '/Users/memo/other/b.md', mode: 'append', new_text: 'y' }, SB)).ok, true);
+  open();
+  assert.equal((await slow).ok, true);
+  assert.equal(s.hub.operatorLocks.size, 0);
+  // Root calls, scripts and commands without cwd take the global lock implicitly, for the call.
+  assert.equal((await s.call('operator_run', { argv: ['touch', '/Users/memo/y'] }, SA)).ok, true);
+  // A script passes the lock gate and then waits for the owner (no bot here: fail closed), lock released.
+  assert.equal((await s.call('operator_script', { interpreter: 'bash', content: 'echo hi' }, SA)).error, 'approval_unavailable');
+  assert.equal((await s.hub.requestOperator('mac', 'operator_run', { args: { host: 'mac', argv: ['id'], as_root: true }, principal: CHAT, clientSession: SA })).ok, true);
+  assert.ok(s.audit.filter(e => e.event === 'lock_implicit').some(e => e.kinds.includes('global')));
+  assert.equal(s.hub.operatorLocks.size, 0);
+  // An explicit lock stays available for long work, and is kept.
+  assert.equal((await s.hub.requestOperator('mac', 'operator_lock', { args: { host: 'mac', workspace_id: out.auto.workspace_id, kind: 'path', target: '/Users/memo/long' },
+    principal: CHAT, clientSession: SA })).ok, true);
+  assert.equal((await s.call('operator_edit', { workspace_id: out.auto.workspace_id, path: '/Users/memo/long/f', mode: 'append', new_text: 'x' }, SA)).ok, true);
+  assert.equal(s.hub.operatorLocks.size, 1);
+  // No session hint: nothing to bind, one explicit next step.
   const blind = await s.call('operator_edit', { path: '/Users/memo/other/b.md', mode: 'append', new_text: 'x' }, undefined);
   assert.equal(blind.error, 'workspace_required');
   assert.match(blind.next_step, /workspace_open/);
 });
 
-test('RR-17 hub: when the runtime cannot give a workspace, the answer is one explicit step', async t => {
+test('RR-17 hub: when the runtime cannot give a workspace, the session still gets a coordination id and the call runs', async t => {
   const s = await hubWith(t, { sessionWorkspace: async () => ({ ok: false, error: 'not_allowed' }) });
   const out = await s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'x' }, SA);
-  assert.equal(out.error, 'workspace_required');
-  assert.match(out.next_step, /^workspace_open \{"project":"ops"\}/);
-  assert.equal(s.reached.length, 0);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.match(out.auto.workspace_id, /^ws_[A-Za-z0-9_-]{16}$/);
+  assert.ok(s.audit.some(e => e.event === 'workspace_implicit' && e.code === 'not_allowed'));
+  // A different chat gets a different id, so their implicit locks still conflict.
+  const other = await s.call('operator_edit', { path: '/Users/memo/notes/b.md', mode: 'append', new_text: 'x' }, SB);
+  assert.notEqual(other.auto.workspace_id, out.auto.workspace_id);
+});
+
+test('RR-14: the instructions and the skill teach the work-session grant, the read-only path and the destructive list', async () => {
+  const { OPERATOR_FLOW_INSTRUCTIONS } = await import('../server/instructions.mjs');
+  const { REMOTE_INSTRUCTIONS } = await import('../bridge/remote-surface.mjs');
+  const { readFileSync: read } = await import('node:fs');
+  const skill = read(new URL('../plugin/skills/memo-bridge-operations/SKILL.md', import.meta.url), 'utf8');
+  const doc = read(new URL('../docs/OPERATOR.md', import.meta.url), 'utf8');
+  assert.ok(REMOTE_INSTRUCTIONS.includes(OPERATOR_FLOW_INSTRUCTIONS));
+  for (const word of ['operator_grant', 'ONCE', 'cwd_prefixes', 'ps', 'git status', 'gh pr merge', 'force push', 'as_root', 'root on lab']) {
+    assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(word), word);
+  }
+  for (const word of ['operator_grant', 'operator_docker', 'read-only commands']) assert.ok(skill.includes(word), `skill: ${word}`);
+  for (const word of ['Standing approvals', '/grant', '/revoke', 'operator_docker', 'Read-only commands', 'workspace_auto_open']) assert.ok(doc.includes(word), `doc: ${word}`);
+  for (const text of [OPERATOR_FLOW_INSTRUCTIONS, skill, doc]) assert.equal(/[–—]/.test(text), false, 'no dashes');
 });

@@ -285,6 +285,32 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     return { ok: true };
   }
 
+  // Implicit per-call locks (repatriation D-R14, bench 2026-10-14 20:04): a remote call with no
+  // covering lock of its own holds its targets for the duration of the call only, refused only
+  // when ANOTHER workspace's lock overlaps. Never counted in the per-workspace limit, never
+  // verified with the runtime (they last one call). Returns {ok, ids, release()} or a refusal.
+  function acquireImplicit(host, targets, { principal, clientSession, workspaceId, ttlMs = 3_600_000 }) {
+    sweep();
+    const caller = session(clientSession);
+    const hostLocks = [...locks.values()].filter(l => l.host === host);
+    const mine = hostLocks.filter(l => l.workspaceId === workspaceId && l.principal === principal.id);
+    for (const need of targets) {
+      const blocking = hostLocks.find(l => (l.workspaceId !== workspaceId || l.principal !== principal.id) && overlaps(l, need));
+      if (blocking) return fail('locked_by_other_session', { holder: holderOf(blocking),
+        next_step: 'another conversation holds this target: tell the owner and wait, or work elsewhere' });
+    }
+    const t = now();
+    const ids = [];
+    for (const need of targets) {
+      if (mine.some(l => covers(l, need))) continue;
+      const lock = { id: newId(), host, kind: need.kind, key: need.key, shown: need.shown, workspaceId, principal: principal.id, session: caller,
+        project: null, reason: 'implicit (one call)', taken: t, expires: t + ttlMs, implicit: true };
+      locks.set(lock.id, lock);
+      ids.push(lock.id);
+    }
+    return { ok: true, ids, release: () => { for (const id of ids) locks.delete(id); } };
+  }
+
   // A started upload belongs to the path it was started for (operator_upload_init answer).
   function recordUpload(args, data) {
     if (data?.ok !== true || typeof data.upload_id !== 'string' || typeof args?.path !== 'string') return;
@@ -304,7 +330,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
       locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
   }
 
-  return Object.freeze({ handle, check, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
+  return Object.freeze({ handle, check, acquireImplicit, recordUpload, overview, seen, get size() { sweep(); return locks.size; } });
 }
 
 // Merge the hub's view into a sessions_overview answer of the runtime.

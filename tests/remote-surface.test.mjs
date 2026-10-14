@@ -134,15 +134,15 @@ test('a read call forwards to the VPS runtime as the minted remote principal, wi
   assert.equal(call.hasCtx, true, 'the MCP request context reaches the forwarder (session hash)');
 });
 
-test('AC-P5-08 (hub side): workspace_open gets the server client_type and host vps; mac is refused before forwarding', async () => {
+test('AC-P5-08 (hub side): workspace_open gets the server client_type and host vps; a requested mac is kept as a label (repatriation D-R14)', async () => {
   const s = surface({ config: { ...CONFIG, remote_writes: 'enabled' }, authInfo: auth({ scopes: ALL }) });
-  const refused = await s.call('workspace_open', { project: 'drop', client_type: 'codex', host: 'mac' });
-  assert.deepEqual(refused.data, { ok: false, error: 'host_not_remote_enabled' });
-  assert.deepEqual(s.calls, []);
-  assert.deepEqual(s.events.map(e => [e.event, e.op, e.reason]), [['remote_denied', 'workspace_open', 'host_not_remote_enabled']]);
+  const mac = await s.call('workspace_open', { project: 'drop', client_type: 'codex', host: 'mac' });
+  assert.deepEqual(s.calls[0].args, { project: 'drop', client_type: 'chatgpt', client_label: '(host mac)', host: 'vps' });
+  assert.equal(mac.data.note.host_requested, 'mac');
+  assert.match(mac.data.note.detail, /operator tools still act on the host you name/);
   assert.equal(JSON.stringify(s.events).includes('codex'), false, 'arguments never reach the audit');
   await s.call('workspace_open', { project: 'drop', client_type: 'codex', client_label: 'chat 1' });
-  assert.deepEqual(s.calls[0].args, { project: 'drop', client_type: 'chatgpt', client_label: 'chat 1', host: 'vps' });
+  assert.deepEqual(s.calls[1].args, { project: 'drop', client_type: 'chatgpt', client_label: 'chat 1', host: 'vps' });
 });
 
 test('the factory refuses anyone but the owner through an allowed client, and never widens the verifier', async () => {

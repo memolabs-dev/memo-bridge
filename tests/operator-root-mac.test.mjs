@@ -398,9 +398,12 @@ test('hub: Mac root calls need host "mac", a workspace and a global lock, and ap
   // No host: refused, even with the Mac connected (a root call is never defaulted).
   assert.equal((await call(undefined, { argv: ['id'], as_root: true })).error, 'host_required');
   assert.equal((await call(undefined, { argv: ['diskutil', 'list'] })).error, 'host_required', 'the Mac dangerous list reaches the hub');
-  // Named: the workspace, then the global lock.
-  assert.equal((await call('mac', { host: 'mac', argv: ['id'], as_root: true })).error, 'workspace_required');
-  assert.equal((await call('mac', { host: 'mac', workspace_id: WS, argv: ['id'], as_root: true })).error, 'lock_required');
+  // Named, without workspace or lock (repatriation D-R14): the conversation's workspace and an
+  // implicit global lock for this call only, released after it.
+  const implicit = await call('mac', { host: 'mac', argv: ['id'], as_root: true });
+  assert.deepEqual([implicit.ok, implicit.host, implicit.auto?.lock], [true, 'mac', 'implicit, released after this call']);
+  assert.equal(hub.operatorLocks.size, 0);
+  seen.length = 0;
   const lock = await hub.requestOperator('mac', 'operator_lock', { args: { host: 'mac', workspace_id: WS, kind: 'global', reason: 'mac root' },
     principal: CHAT, clientSession: S });
   assert.equal(lock.ok, true, JSON.stringify(lock));

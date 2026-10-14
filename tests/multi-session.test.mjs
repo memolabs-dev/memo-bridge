@@ -429,7 +429,8 @@ test('hub: a lock refuses another workspace before anything is signed; workspace
   assert.equal(refused.error, 'locked_by_other_session');
   assert.equal(refused.holder.reason, 'migration');
   assert.equal(refused.host, 'vps');
-  assert.equal((await call('operator_edit', { path: '/srv/a/f', mode: 'append', new_text: 'x' }, SB)).error, 'workspace_required');
+  // Repatriation D-R14: without a workspace the call gets an implicit one and an implicit lock, which the held lock still refuses.
+  assert.equal((await call('operator_edit', { path: '/srv/a/f', mode: 'append', new_text: 'x' }, SB)).error, 'locked_by_other_session');
   // The holder passes the gate: the call goes on to the (absent) agent.
   assert.equal((await call('operator_edit', { workspace_id: WS_A, path: '/srv/a/f', mode: 'append', new_text: 'x' }, SA)).error, 'host_offline');
   assert.ok(audit.some(e => e.event === 'operator_refused' && e.reason === 'locked_by_other_session'));

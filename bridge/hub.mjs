@@ -20,6 +20,7 @@ import { createServer } from 'node:https';
 import WebSocket, { WebSocketServer } from 'ws';
 import { McpServer, WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
+import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { bearerValid, nonce, verifyChallenge, keyFingerprint } from './crypto.mjs';
 import {
@@ -261,18 +262,30 @@ export function createHub(options) {
     // rate limit, both journals; the agent checks its paths).
     const readOnly = op === 'operator_run' && args.as_root !== true && readOnlyCommand(args.argv) !== null;
     let auto = null;
+    let implicit = null;
     if (tier > 0 && !readOnly) {
       let gate = locks.check(op, args, { principal, clientSession });
+      // Repatriation D-R14: a remote call without workspace or lock gets the conversation's
+      // workspace and implicit locks for this call only.
       if (!gate.ok && ['workspace_required', 'lock_required'].includes(gate.error) && isRemotePrincipal(principal)) {
-        const out = await autoWorkspaceAndLock(host, op, args, principal, clientSession);
-        if (out.ok) { args = { ...args, workspace_id: out.workspace_id }; lockedArgs = args; auto = out.auto; gate = locks.check(op, args, { principal, clientSession }); }
-        else gate = out;
+        const out = await implicitGate(host, op, args, principal, clientSession);
+        if (out.ok) {
+          args = { ...args, workspace_id: out.workspace_id }; lockedArgs = args; auto = out.auto; implicit = out.implicit;
+          gate = locks.check(op, args, { principal, clientSession });
+          if (!gate.ok) implicit.release();
+        } else gate = out;
       }
       if (!gate.ok) {
         record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: gate.error});
         return gate;
       }
     }
+    try {
+      return await signedCall(host, op, { args, lockedArgs, principal, requestId, clientSession, tier, readOnly, auto, frozen });
+    } finally { implicit?.release(); }
+  }
+
+  async function signedCall(host, op, { args, lockedArgs, principal, requestId, clientSession, tier, readOnly, auto, frozen }) {
     if (Object.hasOwn(args, 'workspace_id')) { const { workspace_id: _ws, ...rest } = args; args = rest; }
     const hash = argsSha256(args);
     let approval = null;
@@ -340,38 +353,48 @@ export function createHub(options) {
     return transfers.start(args, { principal, clientSession, requestId });
   }
 
-  // D-R14: the conversation's workspace (found or opened) and locks on what the call touches.
-  // A call that would need a global lock (root, scripts and commands without cwd) is not locked
-  // automatically: it would stop every other conversation on that host. Returns {ok, workspace_id,
-  // auto} or a refusal with one explicit next step.
-  async function autoWorkspaceAndLock(host, op, args, principal, clientSession) {
-    const step = detail => ({ ok: false, error: args.workspace_id === undefined ? 'workspace_required' : 'lock_required', next_step: detail });
+  // D-R14 (bench 2026-10-14 19:57 and 20:04): the conversation's workspace, keyed by its session
+  // hash: its own active one (runtime sessions_overview "you"), else one opened on
+  // autoWorkspaceProject (journaled workspace_auto_open), else a coordination id derived from the
+  // session (the runtime could not open one; journaled workspace_implicit). Then implicit locks on
+  // what the call touches, the global one for root calls, scripts and commands without cwd,
+  // released when the call returns (journaled lock_implicit). Without a session hint nothing can be
+  // bound: one explicit next step.
+  const sessionWorkspaces = new Map(); // session hash -> {workspaceId, opened}
+  async function implicitGate(host, op, args, principal, clientSession) {
     let workspaceId = args.workspace_id;
     let opened = false;
     if (workspaceId === undefined) {
-      if (!clientSession) return step(`workspace_open {"project":"${autoProject}"}, then repeat this call with its workspace_id`);
-      let found;
-      try { found = await sessionWorkspace(principal, clientSession); } catch { found = { ok: false }; }
-      if (!found?.ok || typeof found.workspace_id !== 'string') return step(`workspace_open {"project":"${autoProject}"}, then repeat this call with its workspace_id`);
-      workspaceId = found.workspace_id;
-      opened = found.opened === true;
-      if (opened) record('workspace_auto_open', null, { principal: principal.id, workspace_id: workspaceId, project: found.project ?? autoProject, op });
+      if (!clientSession) {
+        return { ok: false, error: 'workspace_required', next_step: `call workspace_open {"project":"${autoProject}"}, then repeat this call with its workspace_id` };
+      }
+      const known = sessionWorkspaces.get(clientSession);
+      if (known) workspaceId = known.workspaceId;
+      else {
+        let found;
+        try { found = await sessionWorkspace(principal, clientSession); } catch { found = { ok: false }; }
+        if (found?.ok && /^ws_[A-Za-z0-9_-]{16}$/.test(String(found.workspace_id))) {
+          workspaceId = found.workspace_id;
+          opened = found.opened === true;
+          if (opened) record('workspace_auto_open', null, { principal: principal.id, workspace_id: workspaceId, project: found.project ?? autoProject, op });
+        } else {
+          workspaceId = `ws_${createHash('sha256').update(`memo-bridge/implicit-workspace|${clientSession}`).digest('base64url').slice(0, 16)}`;
+          record('workspace_implicit', null, { principal: principal.id, workspace_id: workspaceId, code: typeof found?.error === 'string' ? found.error.slice(0, 64) : null });
+        }
+        sessionWorkspaces.set(clientSession, { workspaceId });
+        while (sessionWorkspaces.size > 256) sessionWorkspaces.delete(sessionWorkspaces.keys().next().value);
+      }
     }
     const targets = operatorTargets(op, { ...args, host }, { homes: operator?.homes ?? DEFAULT_HOMES });
-    if (targets.error || targets.unknownUpload) return { ok: false, error: targets.error ?? 'lock_required', workspace_id: workspaceId };
-    const taken = [];
-    for (const target of targets) {
-      if (target.kind === 'global') {
-        return { ok: false, error: 'lock_required', workspace_id: workspaceId, next_step: `pass a cwd for a path lock, or operator_lock {"host":"${host}","workspace_id":"${workspaceId}","kind":"global"} (it blocks every other conversation on ${host}), then repeat this call with workspace_id` };
-      }
-      const got = await locks.handle('operator_lock', { host, workspace_id: workspaceId, kind: target.kind, target: target.shown, reason: `auto: ${op}` },
-        { principal, clientSession });
-      if (!got.ok) return { ...got, workspace_id: workspaceId };
-      if (!got.renewed) taken.push(got.lock.lock_id);
-      record('operator_lock_auto', OPERATOR_AGENT_IDS[host], { principal: principal.id, workspace_id: workspaceId, kind: target.kind, op });
-    }
-    return { ok: true, workspace_id: workspaceId, auto: { workspace_id: workspaceId, workspace_opened: opened, locks_taken: taken,
-      detail: 'pass this workspace_id on your next operator calls; release the locks with operator_unlock when done' } };
+    if (targets.error) return { ok: false, error: targets.error };
+    if (targets.unknownUpload) return { ok: false, error: 'lock_required', next_step: 'start the upload again with operator_upload_init' };
+    const ttlMs = ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 120) * 1000;
+    const held = locks.acquireImplicit(host, targets, { principal, clientSession, workspaceId, ttlMs });
+    if (!held.ok) return held;
+    if (held.ids.length) record('lock_implicit', OPERATOR_AGENT_IDS[host], { principal: principal.id, workspace_id: workspaceId, op,
+      kinds: targets.map(t => t.kind) });
+    return { ok: true, workspace_id: workspaceId, implicit: held,
+      auto: { workspace_id: workspaceId, workspace_opened: opened, lock: 'implicit, released after this call' } };
   }
 
   // operator_grant (D-R4): list, request (the owner decides in Telegram), revoke. Answered here,
