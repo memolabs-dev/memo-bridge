@@ -428,6 +428,36 @@ function tasksStub(items, { total } = {}) {
   };
 }
 
+test('tasks_list with App credentials: one search per repository with its read token; fails closed (VPS, 2026-10-14)', async t => {
+  const stateDir = await tempStateDir(t);
+  const minted = [];
+  const credentials = { token: async (purpose, repo) => { minted.push(`${purpose} ${repo}`); return { token: `ghs_${repo.split('/')[1]}_${'x'.repeat(30)}`, source: 'app' }; } };
+  const seen = [];
+  const items = { 'memolabs-dev/drop': [ghItem('memolabs-dev/drop', 11, READY('p1'))], 'memolabs-dev/cuesheet': [ghItem('memolabs-dev/cuesheet', 4, READY('p0'))] };
+  const searchIssues = async (query, { env } = {}) => {
+    const repo = /repo:(\S+)$/.exec(query)[1];
+    seen.push({ query, token: env?.GH_TOKEN ?? null, config: env?.GH_CONFIG_DIR ?? null });
+    return { ok: true, total_count: items[repo].length, incomplete: false, items: items[repo] };
+  };
+  const scratchDir = join(stateDir, 'gh-pr');
+  const { store, coordinator } = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: { searchIssues, credentials, scratchDir } });
+  t.after(() => store.close());
+  const listed = await coordinator.tasksList({});
+  assert.equal(listed.ok, true, JSON.stringify(listed));
+  assert.deepEqual(listed.tasks.map(x => x.issue), ['memolabs-dev/cuesheet#4', 'memolabs-dev/drop#11']);
+  assert.deepEqual(minted, ['read memolabs-dev/cuesheet', 'read memolabs-dev/drop']);
+  assert.deepEqual(seen.map(s => s.query), ['is:issue is:open label:"agent:ready" repo:memolabs-dev/cuesheet',
+    'is:issue is:open label:"agent:ready" repo:memolabs-dev/drop']);
+  assert.ok(seen[0].token.startsWith('ghs_cuesheet_') && seen[1].token.startsWith('ghs_drop_'));
+  assert.ok(seen.every(s => s.config.startsWith(scratchDir)));
+  assert.equal(process.env.GH_TOKEN === seen[0].token, false, 'never process-wide');
+
+  const down = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: { searchIssues: async () => { throw new Error('must not search'); },
+    credentials: { token: async () => ({ error: 'app_token_http_403', credential: 'app-key' }) }, scratchDir } });
+  t.after(() => down.store.close());
+  assert.deepEqual(await down.coordinator.tasksList({}), { ok: false, error: 'credential_unavailable', detail: 'app-key app_token_http_403' });
+});
+
 test('tasks_list ranks claimable Issues of registered and allowlisted repositories only', async t => {
   const stateDir = await tempStateDir(t);
   const items = [

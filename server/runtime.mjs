@@ -75,7 +75,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const coordinatorFor = p => {
     if (!coordinators.has(p)) {
       coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host,
-        remotePolicy: policy(), projectSync: projectSyncOf(),
+        remotePolicy: policy(), projectSync: projectSyncOf(), credentials, scratchDir: join(stateDir, 'gh-pr'),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
     }
     return coordinators.get(p);
