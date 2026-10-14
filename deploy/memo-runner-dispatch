@@ -29,15 +29,20 @@ What a valid start request does, in order:
      (memo-job:memo-runner 0750), and writes jobs/<id>/dispatch.json (root, 0640);
      a refusal for a well-formed id writes jobs/<id>/status.json with
      service_result "dispatch_refused" instead, which the executor reads as the job's end;
-  3. writes a runtime drop-in /run/systemd/system/memo-job@<id>.service.d/50-dispatch.conf
-     with WorkingDirectory=, ReadWritePaths=, RuntimeMaxSec= and Environment= built only from
-     validated values, and checks with `systemctl show -p DropInPaths` that systemd sees it
-     (a `daemon-reload` is issued once if it does not);
-  4. runs `systemctl start --no-block memo-job@<id>.service`.
+  3. writes two runtime drop-ins, built only from validated values:
+     /run/systemd/system/memo-job-install@<id>.service.d/50-dispatch.conf (phase 1, dependency
+     install: WorkingDirectory=, ReadWritePaths=, TimeoutStartSec=, Environment= with the fixed
+     install argv shapes) and /run/systemd/system/memo-job@<id>.service.d/50-dispatch.conf
+     (phase 2, the recipe: the same plus RuntimeMaxSec=, PrivateNetwork=yes and
+     MEMO_JOB_NETWORK=private), and checks with `systemctl show -p DropInPaths` that systemd
+     sees both (a `daemon-reload` is issued once if it does not);
+  4. runs `systemctl start --no-block memo-job@<id>.service`; the template's Requires= and
+     After= on memo-job-install@<id>.service run the install first, and the recipe only after
+     a successful install.
 
 A cancel writes the root-owned marker jobs/<id>/cancel.json (read by record-result, so a
 stopped job ends `cancelled` or `budget_exceeded` instead of looking like a clean exit) and
-runs `systemctl stop --no-block memo-job@<id>.service`. A cancel for a request still in the
+runs `systemctl stop --no-block memo-job@<id>.service memo-job-install@<id>.service`. A cancel for a request still in the
 queue removes it, and the job ends `cancelled_before_start` without any unit.
 
 `--status` prints a JSON summary (queue depth, active job, free disk, last result) and
@@ -97,6 +102,22 @@ TEMP_WAIT_SECONDS = 2.0
 JOB_ID_RE = re.compile(r'job_[A-Za-z0-9_-]{16}')
 UNIT_PREFIX = 'memo-job@'
 UNIT_PATTERN = 'memo-job@*.service'
+# Phase 1 of every job: the dependency install (lab-infra memo-job-install@.service, Type=oneshot,
+# network as memo-job@ had it before). memo-job@ Requires= and After= it, so `systemctl start
+# memo-job@<id>` runs the install first and never runs the recipe after a failed install.
+INSTALL_UNIT_PREFIX = 'memo-job-install@'
+INSTALL_UNIT_PATTERN = 'memo-job-install@*.service'
+JOB_UNIT_PREFIXES = (UNIT_PREFIX, INSTALL_UNIT_PREFIX)
+# The install argv shapes, pinned into the install unit as MEMO_JOB_ALLOWED_ARGV. Must match
+# server/runners/recipes.mjs INSTALL_ARGV: a fixed argv, never a shell, never install scripts.
+INSTALL_ARGV = (
+    ('npm', 'ci', '--ignore-scripts'),
+    ('pnpm', 'install', '--frozen-lockfile', '--ignore-scripts'),
+)
+# Bound of the install phase (TimeoutStartSec= of the oneshot install unit; RuntimeMaxSec= has
+# no effect on Type=oneshot, systemd.service(5)). Must match executor-systemd.mjs
+# INSTALL_TIMEOUT_SECONDS, which the supervisor adds to its deadline.
+INSTALL_TIMEOUT_SECONDS = 600
 # Must match lab-infra's memo-job@.service AssertPathExists= and runner.json job_unit.dropin.
 DROPIN_NAME = '50-dispatch.conf'
 
@@ -556,25 +577,31 @@ def unit_name(dispatch_id):
     return f'{UNIT_PREFIX}{dispatch_id}.service'
 
 
+def install_unit_name(dispatch_id):
+    return f'{INSTALL_UNIT_PREFIX}{dispatch_id}.service'
+
+
 def busy_units(cfg):
-    """Units of the memo-job@ template that are active or about to be. Raises Refusal when
-    systemd cannot be asked: fail closed."""
+    """Units of the memo-job@ and memo-job-install@ templates that are active or about to be.
+    Raises Refusal when systemd cannot be asked: fail closed."""
     units = set()
     code, out = run_systemctl(cfg, 'list-units', '--all', '--plain', '--no-legend', '--no-pager',
-                              '--type=service', UNIT_PATTERN)
+                              '--type=service', UNIT_PATTERN, INSTALL_UNIT_PATTERN)
     if code != 0:
         raise Refusal('busy_check_failed')
     for line in out.splitlines():
         parts = line.split(None, 4)
-        if len(parts) >= 4 and parts[0].startswith(UNIT_PREFIX) and parts[2] in ACTIVE_STATES:
+        if len(parts) >= 4 and parts[0].startswith(JOB_UNIT_PREFIXES) and parts[2] in ACTIVE_STATES:
             units.add(parts[0])
-    # A unit started with --no-block may still be inactive with a pending start job.
-    code, out = run_systemctl(cfg, 'list-jobs', '--plain', '--no-legend', '--no-pager', UNIT_PATTERN)
+    # A unit started with --no-block may still be inactive with a pending start job (memo-job@
+    # waits that way for its install unit).
+    code, out = run_systemctl(cfg, 'list-jobs', '--plain', '--no-legend', '--no-pager', UNIT_PATTERN,
+                              INSTALL_UNIT_PATTERN)
     if code != 0:
         raise Refusal('busy_check_failed')
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[1].startswith(UNIT_PREFIX):
+        if len(parts) >= 2 and parts[1].startswith(JOB_UNIT_PREFIXES):
             units.add(parts[1])
     return sorted(units)
 
@@ -731,17 +758,21 @@ def job_dir(state, dispatch_id, create, with_out=False):
     return fd
 
 
-def dropin_path(cfg, dispatch_id):
-    return f'{cfg.dropin_dir}/{unit_name(dispatch_id)}.d/{DROPIN_NAME}'
+def dropin_path(cfg, dispatch_id, unit=None):
+    return f'{cfg.dropin_dir}/{unit or unit_name(dispatch_id)}.d/{DROPIN_NAME}'
 
 
-def dropin_text(cfg, request):
+def dropin_text(cfg, request, phase='recipe'):
+    """The runtime drop-in of one phase. recipe: memo-job@<id> (RuntimeMaxSec=, and
+    PrivateNetwork=yes: its own loopback, no other device, systemd.exec(5)); install:
+    memo-job-install@<id> (TimeoutStartSec=, the install argv shapes, network as before)."""
     dispatch_id = request['id']
     out = f'{cfg.root}/jobs/{dispatch_id}/out'
     worktree = request['worktree']
+    shapes = request['allowed_argv'] if phase == 'recipe' else sorted(list(shape) for shape in INSTALL_ARGV)
     # "npm:test,python3:-m:pytest:-q": tokens joined by ':', shapes by ','. No token contains
     # either character (checked below).
-    allowed = ','.join(':'.join(shape) for shape in request['allowed_argv'])
+    allowed = ','.join(':'.join(shape) for shape in shapes)
     env = [
         f'MEMO_JOB_ID={request["job_id"]}',
         f'MEMO_JOB_DISPATCH_ID={dispatch_id}',
@@ -751,27 +782,43 @@ def dropin_text(cfg, request):
         f'MEMO_JOB_OUT={out}',
         f'MEMO_JOB_TIMEOUT_SECONDS={request["timeout_seconds"]}',
     ]
-    tokens = [token for shape in request['allowed_argv'] for token in shape]
+    if phase == 'recipe':
+        # The job-runner refuses to run the recipe when it still sees a device other than lo:
+        # PrivateNetwork= "might be impossible" to implement (systemd.exec(5)).
+        env.append('MEMO_JOB_NETWORK=private')
+    tokens = [token for shape in shapes for token in shape]
     values = [dispatch_id, request['job_id'], request['recipe'], worktree, out, *tokens]
     if not all(UNIT_VALUE_RE.fullmatch(value) for value in values) \
             or any(':' in token or ',' in token for token in tokens):
         # Unreachable after validation; refuse rather than write something systemd would parse
         # differently (specifiers, quotes, whitespace).
         raise Refusal('unsafe_unit_value')
+    unit = unit_name(dispatch_id) if phase == 'recipe' else install_unit_name(dispatch_id)
+    if phase == 'recipe':
+        bounds = f'RuntimeMaxSec={request["timeout_seconds"]}\nPrivateNetwork=yes\n'
+    else:
+        bounds = f'TimeoutStartSec={INSTALL_TIMEOUT_SECONDS}\n'
     return (
-        f'# Written by {PROG} for {unit_name(dispatch_id)}; removed by record-result.\n'
+        f'# Written by {PROG} for {unit}; removed by record-result.\n'
         '# Every value below was validated by the dispatcher (spool request + runner.json).\n'
         '[Service]\n'
         f'WorkingDirectory={worktree}\n'
         f'ReadWritePaths={worktree} {out}\n'
-        f'RuntimeMaxSec={request["timeout_seconds"]}\n'
+        f'{bounds}'
         f'Environment={" ".join(env)}\n'
     )
 
 
-def write_dropin(state, request):
+def write_dropins(state, request):
+    """Both phases: the install unit's drop-in first, then the recipe unit's."""
+    write_dropin(state, request, 'install')
+    write_dropin(state, request, 'recipe')
+
+
+def write_dropin(state, request, phase='recipe'):
     cfg = state.cfg
-    directory = unit_name(request['id']) + '.d'
+    unit = unit_name(request['id']) if phase == 'recipe' else install_unit_name(request['id'])
+    directory = unit + '.d'
     try:
         os.mkdir(directory, 0o755, dir_fd=state.dropin_fd)
     except FileExistsError:
@@ -782,14 +829,19 @@ def write_dropin(state, request):
         if st.st_uid != os.geteuid() or st.st_mode & 0o022:
             raise Refusal('dropin_dir_untrusted')
         os.fchmod(fd, 0o755)
-        write_bytes_atomic(fd, DROPIN_NAME, dropin_text(cfg, request).encode('ascii'),
+        write_bytes_atomic(fd, DROPIN_NAME, dropin_text(cfg, request, phase).encode('ascii'),
                            os.geteuid(), os.getegid(), 0o644)
     finally:
         os.close(fd)
 
 
 def remove_dropin(dropin_fd, dispatch_id):
-    directory = unit_name(dispatch_id) + '.d'
+    """Remove the drop-ins of both phases."""
+    for unit in (unit_name(dispatch_id), install_unit_name(dispatch_id)):
+        _remove_unit_dropin(dropin_fd, unit + '.d')
+
+
+def _remove_unit_dropin(dropin_fd, directory):
     try:
         fd = os.open(directory, O_DIR, dir_fd=dropin_fd)
     except OSError:
@@ -807,8 +859,12 @@ def remove_dropin(dropin_fd, dispatch_id):
 
 
 def dropin_loaded(cfg, dispatch_id):
-    code, out = run_systemctl(cfg, 'show', '--property=DropInPaths', '--value', unit_name(dispatch_id))
-    return code == 0 and dropin_path(cfg, dispatch_id) in out.split()
+    """systemd sees the drop-in of both units (the install unit first)."""
+    for unit in (install_unit_name(dispatch_id), unit_name(dispatch_id)):
+        code, out = run_systemctl(cfg, 'show', '--property=DropInPaths', '--value', unit)
+        if code != 0 or dropin_path(cfg, dispatch_id, unit) not in out.split():
+            return False
+    return True
 
 
 # ------------------------------------------------------------------------------------------
@@ -913,7 +969,8 @@ def process_cancel(state, name):
         state.cancelled += 1
         log('notice', 'job_cancelled_before_start', id=dispatch_id, reason=reason)
         return
-    code, _ = run_systemctl(cfg, 'stop', '--no-block', unit_name(dispatch_id))
+    # The recipe unit first (its start job may still wait for the install), then the install.
+    code, _ = run_systemctl(cfg, 'stop', '--no-block', unit_name(dispatch_id), install_unit_name(dispatch_id))
     state.cancelled += 1
     log('notice' if code == 0 else 'err', 'job_stop_requested', id=dispatch_id, reason=reason,
         rc=code if code is not None else 'timeout')
@@ -971,7 +1028,7 @@ def process_request(state, name):
             pass
         finally:
             os.close(fd)
-        write_dropin(state, request)
+        write_dropins(state, request)
         if not dropin_loaded(cfg, dispatch_id):
             run_systemctl(cfg, 'daemon-reload', timeout=120)
             if not dropin_loaded(cfg, dispatch_id):
