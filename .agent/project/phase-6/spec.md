@@ -418,3 +418,49 @@ it disagrees with the text above; each entry says what changed and why.
   at `~/projects`: without the variable, 17 coordinator tests fail and the smoke round trip is
   skipped. With `MEMO_BRIDGE_GOVERNANCE_ROOT=~/memolabs/os/integrations/github` the suite is
   green. Not changed here (out of scope); flagged for the owner.
+
+### Lot 3 deviations and decisions (2026-10-14)
+
+- DEV-P6-25 (D5 list, the Mac). `osascript`, `launchctl`, `open` and `security` join the wrappers
+  (AppleScript runs shell lines, launchctl and open start programs outside the call, security
+  reads the keychain). Any argument or write path naming `.memo-operator`, `/etc/memo-operator`
+  or `~/Library/LaunchAgents` is a sensitive path, in any letter case. Reason: T2 on the Mac runs
+  as the owner, so without this a command could rewrite the agent's policy (its directory is the
+  owner's) or plant a launchd job without asking. Other paths (`cp`, `mv`, `chmod` elsewhere)
+  still do not ask; stated in `docs/OPERATOR.md`.
+- DEV-P6-26 (§4 "remote and stdio", DEV-P6-10). Decision: the local stdio server does **not**
+  list the operator tools. Evidence: (1) its clients are Claude Code and Codex on the Mac, which
+  run as `memo` and already hold a shell and file tools, so the tools would add no capability
+  there; (2) operator calls are signed by the hub key on lab (D4) and the stdio process holds no
+  signing key; serving them locally would mean an unsigned path around R-P6-05, the hub journal,
+  the hub freeze and the approvals, or a hub client holding the owner bearer on the Mac for no
+  gain; (3) the 9443 hub already lists them for `hub:owner` (DEV-P6-10, DEV-P6-23). The smoke tool
+  count stays 51. The plugin skill says the operator tools are on the remote connector only.
+- DEV-P6-27 (D2, F-P6-01). The Mac agent URL is `wss://127.0.0.1:9444/agent`, not `localhost`: the
+  tunnel listens on 127.0.0.1 only, the hub certificate names both `DNS:localhost` and
+  `IP:127.0.0.1`, and the live probe agent's plist uses the address form.
+- DEV-P6-28 (R-P6-14, code location). launchd runs a pinned bundle in
+  `~/.local/share/memo-bridge/operator` (built by `scripts/build-operator.mjs`, files 0444), the
+  way `scripts/install-local.mjs` installs the stdio server and the probe agent runs from
+  `~/.local/share/memo-bridge/runtime`. Not the checkout under `~/memolabs`: that is a write root
+  of the Mac policy, and the code that enforces the policy must not sit in one, nor change with
+  a branch switch. The bundle inlines ws and zod and gets a `require` banner for ws.
+- DEV-P6-29 (O-P6-5, Mac policy). As briefed for Lot 3: `max_tier: exec`, `approval_mode:
+  dangerous`, write roots `~/memolabs`, `~/Desktop`, `~/Downloads`, `~/Documents`, `/tmp`, read
+  root `~`. `~/Documents` is a write root, unlike the O-P6-5 proposal; `~/Vault` stays outside the
+  write roots. The denylist adds browser profiles and cookies, Local and Session Storage, Mail,
+  Messages, group containers, `~/.config/memo-bridge`, `~/.codex/auth.json`, cloud CLI
+  credentials, `*.p8`, `*.p12` to the built-in list. `repositories` points at
+  `~/memolabs/PROJECTS.md` with `~/memolabs/.links` as projects root and `~/memolabs` as layout
+  root: on 2026-10-14 the catalog reader finds 68 registered checkouts there, memo-bridge at
+  `~/memolabs/os/core/bridge` answering `use_dev_flow` on `main`. `~/projects` holds only `_data`
+  today (F-P6-02), so it cannot be the projects root.
+- DEV-P6-30 (key path). The Mac public key is `~/.memo-operator/operator-mac.pub`, the path the
+  lab-infra role reads (`memo_operator_mac_pub_path`, branch `feat/memo-operator-role`), not
+  `~/.config/memolabs/secrets/memo-bridge/operator-mac.pub`.
+- DEV-P6-31 (D6 b, D7 on the Mac). The Mac FROZEN file is `~/.memo-operator/FROZEN`, the
+  auto-freeze marker `~/.memo-operator/state/AUTO-FROZEN`, the host journal
+  `~/Library/Logs/memo-operator/audit.jsonl`, written by the agent itself (no root helper on the
+  Mac): the owner's user can rewrite it; the hub's 15 min anchoring detects a rewrite of lines
+  already anchored, as long as the agent's own code is not altered too (its bundle is 0444 but
+  the owner's). lab-infra `make memo-operator-freeze` freezes the Mac too, through the hub file.
