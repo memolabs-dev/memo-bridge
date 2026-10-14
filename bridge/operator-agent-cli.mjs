@@ -11,8 +11,11 @@
 //                          policy (owner root, or the owner on the Mac; not writable by others)
 //   MEMO_OPERATOR_POLICY   policy file (default /etc/memo-operator/policy.json on lab,
 //                          ~/.memo-operator/policy.json on the Mac)
-//   MEMO_OPERATOR_STATE    writable directory for the auto-freeze marker (default: the
-//                          directory of the policy's audit_file)
+//   MEMO_OPERATOR_STATE    writable directory for background runs, uploads and the auto-freeze
+//                          marker (default: the policy's state_dir)
+// With a root_helper section in the policy (lab), T3 calls and the host journal go through the
+// helper's socket (bridge/operator-root-helper.mjs): the agent cannot rewrite the journal.
+// lab-infra must run this unit with KillMode=process so background runs outlive a restart.
 //   MEMO_BRIDGE_AGENT_URL  hub agent endpoint (default wss://localhost:9443/agent)
 //   CREDENTIALS_DIRECTORY  systemd credentials: `agent-key`, this agent's Ed25519 identity
 //                          (lab). Otherwise MEMO_OPERATOR_CONFIG/agent.key (Mac).
@@ -20,14 +23,18 @@
 // with them stops the process before it connects (fail closed).
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { createAgent, localStatus } from './agent.mjs';
 import { OPERATOR_AGENT_IDS } from './ops.mjs';
 import { DEFAULT_POLICY_PATHS, loadOperatorPolicy, readTrustedFile } from './operator-policy.mjs';
 import { createOperatorVerifier } from './operator-signing.mjs';
 import { createOperatorGuard } from './operator-guard.mjs';
-import { createAuditChain, fileAuditStore } from './operator-audit.mjs';
+import { createAuditChain, fileAuditStore, helperAuditChain } from './operator-audit.mjs';
 import { createOperatorTools } from './operator-tools.mjs';
+import { createOperatorWriteTools } from './operator-write.mjs';
+import { createOperatorExecTools } from './operator-exec.mjs';
+import { createJobStore } from './operator-jobs.mjs';
+import { createRootHelperClient } from './operator-root-helper.mjs';
 import { createOperatorOperations } from './operator-agent.mjs';
 
 const env = process.env;
@@ -59,13 +66,15 @@ const policy = loadOperatorPolicy({ path: policyPath, expectedHost: host, truste
 const hubKeys = readTrustedFile(join(dir, 'operator-hub.pub'), { trustedUids })
   .split(/(?=-----BEGIN PUBLIC KEY-----)/).map(s => s.trim()).filter(Boolean);
 const verifier = createOperatorVerifier({ publicKeys: hubKeys, host });
-const stateDir = env.MEMO_OPERATOR_STATE || dirname(policy.auditFile);
+const stateDir = env.MEMO_OPERATOR_STATE || policy.stateDir;
 const guard = createOperatorGuard(policy, { autoFrozenFile: join(stateDir, 'AUTO-FROZEN'), log });
-// Lot 1: the agent appends to its own journal file. Lot 2 routes the append through the root
-// helper on lab, which owns the file (spec D7; bridge/operator-audit.mjs header).
-const chain = createAuditChain({ store: fileAuditStore(policy.auditFile) });
-const tools = createOperatorTools(policy, { guard, chain });
-const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, log });
+// On lab the root helper owns the journal (spec D7); on the Mac the agent appends to its own.
+const rootHelper = policy.rootHelper ? createRootHelperClient({ socketPath: policy.rootHelper.socket }) : null;
+const chain = rootHelper ? helperAuditChain(rootHelper) : createAuditChain({ store: fileAuditStore(policy.auditFile) });
+const jobs = createJobStore({ dir: join(stateDir, 'jobs') });
+const tools = { ...createOperatorTools(policy, { guard, chain }), ...createOperatorWriteTools(policy, { stateDir }),
+  ...createOperatorExecTools(policy, { jobs }) };
+const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, rootHelper, log });
 
 const ca = readSmall(join(dir, 'hub-ca.crt'));
 const credentialsDir = env.CREDENTIALS_DIRECTORY;
@@ -85,6 +94,6 @@ const agent = createAgent({
   },
   log: (event, h, details = {}) => log(event, details)
 });
-log('operator_ready', { max_tier: policy.maxTierName, ops: Object.keys(handlers).length, chain_head: chain.head.slice(0, 16),
+log('operator_ready', { max_tier: policy.maxTierName, ops: Object.keys(handlers).length, root_helper: Boolean(rootHelper),
   missing_roots: policy.missingRoots.length });
 process.on('SIGTERM', () => { agent.stop(); process.exit(0); });

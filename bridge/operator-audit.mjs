@@ -1,20 +1,21 @@
 // Hash-chained host audit journal (Phase 6, TODO-P6-06, spec D7).
 //
 // One JSON line per operator call, each carrying the hash of the line before it:
-//   {seq, at, prev, request_id, ref, op, tier, principal, args_sha256, args, outcome, code, ms,
-//    output_sha256, hash}
+//   {seq, at, prev, source, request_id, ref, op, tier, principal, args_sha256, args, approval,
+//    outcome, code, ms, output_sha256, hash}
+// source is "agent" or "root-helper" (Lot 2): who reported the line.
 // hash = SHA-256 of the canonical JSON of the line without `hash` (prev included), so changing,
 // removing or inserting a line breaks the chain at that line. The first line's prev is 64 zeros.
 // Arguments are kept only redacted (operator-output.mjs) and cut to 256 characters per string;
 // the output is kept as its SHA-256 only.
 //
-// Who writes the file. Spec D7 wants a log the agent user cannot rewrite. On lab that is the
-// root helper (Lot 2, TODO-P6-10): it owns /var/log/memo-operator/audit.jsonl (root, 0600) and
-// appends on the agent's behalf. Until it exists, the agent appends through an injectable
-// writer: the default appends to policy.audit_file itself (O_APPEND, 0600), which the agent
-// user CAN rewrite; operator_audit_verify still detects an edit that does not recompute the
-// whole tail, and the hub keeps every call in its own journal (forward.mjs). Lot 2 replaces the
-// writer with the helper's socket; nothing else here changes.
+// Who writes the file. Spec D7 wants a log the agent user cannot rewrite. On lab the root helper
+// (bridge/operator-root-helper.mjs, Lot 2) owns /var/log/memo-operator/audit.jsonl (root, 0600)
+// and appends on the agent's behalf: the agent sends the fields over the helper's socket
+// (helperAuditChain below) and can add lines, never change or remove one. On the Mac (no root,
+// spec non-goals) the agent appends to its own file, which the owner's account can rewrite;
+// operator_audit_verify still reports an edit that does not recompute the whole tail, and the
+// hub anchors the head every 15 min (bridge/hub.mjs), so a rewrite of anchored lines shows.
 import { appendFileSync, closeSync, constants as fsConstants, fstatSync, openSync, readSync } from 'node:fs';
 import { canonicalJson } from './operator-signing.mjs';
 import { redactDeep, sha256Hex } from './operator-output.mjs';
@@ -98,9 +99,10 @@ export function createAuditChain({ store, now = Date.now } = {}) {
     // fields: {request_id, ref, op, tier, principal, args, args_sha256, outcome, code, ms, output}
     append(fields) {
       const line = {
-        seq: seq + 1, at: new Date(now()).toISOString(), prev,
+        seq: seq + 1, at: new Date(now()).toISOString(), prev, source: fields.source ?? 'agent',
         request_id: fields.request_id ?? null, ref: fields.ref ?? null, op: fields.op, tier: fields.tier ?? null,
         principal: fields.principal ?? null, args_sha256: fields.args_sha256 ?? null, args: journalArgs(fields.args),
+        approval: fields.approval ?? null,
         outcome: fields.outcome, code: fields.code ?? null, ms: fields.ms ?? null,
         output_sha256: fields.output === undefined ? null : sha256Hex(fields.output)
       };
@@ -109,6 +111,40 @@ export function createAuditChain({ store, now = Date.now } = {}) {
       seq = line.seq; prev = line.hash;
       return { seq: line.seq, hash: line.hash };
     },
-    verify() { return verifyChain(store.read()); }
+    verify() { return verifyChain(store.read()); },
+    // For anchoring (bridge/hub.mjs): the current head and the hash of line `since`.
+    headInfo(since) { return headInfoOf(store.read(), since); }
+  });
+}
+
+export function headInfoOf(text, since) {
+  const v = verifyChain(text);
+  let at = null;
+  if (Number.isInteger(since) && since > 0) {
+    const line = text.split('\n')[since - 1];
+    try { at = { seq: since, hash: JSON.parse(line).hash ?? null }; } catch { at = { seq: since, hash: null }; }
+  }
+  return { chain_ok: v.ok, seq: v.lines, head: v.head, at, ...(v.ok ? {} : { first_broken_line: v.first_broken_line }) };
+}
+
+// The agent's view of a chain the root helper owns: every call goes over the helper's socket
+// (client: bridge/operator-root-helper.mjs createRootHelperClient). Async.
+export function helperAuditChain(client) {
+  return Object.freeze({
+    async append(fields) {
+      const out = await client.request({ type: 'audit_append', fields });
+      if (!out?.ok) throw new Error('audit_unavailable');
+      return out;
+    },
+    async verify() {
+      const out = await client.request({ type: 'audit_verify' });
+      if (!out?.ok) throw new Error('audit_unavailable');
+      return out.verify;
+    },
+    async headInfo(since) {
+      const out = await client.request({ type: 'audit_head', since_seq: since ?? null });
+      if (!out?.ok) throw new Error('audit_unavailable');
+      return out.head;
+    }
   });
 }

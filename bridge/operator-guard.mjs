@@ -6,14 +6,15 @@
 //    creates or removes it), ~/.memo-operator/FROZEN on the Mac. Checked with one lstat per
 //    call: no cache, so `touch` takes effect on the next call (R-P6-06 "within one call");
 //  - auto-freeze: 5 signature or policy refusals within 5 minutes freeze the agent above T0.
-//    The flag is kept in memory and written to a marker file next to the audit journal
-//    (auto_frozen_file), so a restart does not clear it. Nothing over the wire clears it: the
-//    owner removes the marker over SSH (Lot 2 adds the Telegram /unfreeze through the hub);
+//    The flag is kept in memory and written to a marker file in the state directory
+//    (auto_frozen_file), so a restart does not clear it. The owner clears it by removing the
+//    marker over SSH, or with Telegram /unfreeze from the owner chat, which the hub turns into
+//    a signed internal op (operator_owner_unfreeze) no model can call (Lot 2);
 //  - per-tier rate limits (T1 120/min, T2 60/min, T3 20/min by default, policy.rate_limits),
 //    sliding window per host. T0 is not rate limited here (spec D6); the hub's own limiter
 //    (bridge/ratelimit.mjs) still counts it.
 // The hub keeps its own freeze flag on top (bridge/hub.mjs, owner-only setter).
-import { lstatSync, writeFileSync } from 'node:fs';
+import { lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { SIGNATURE_REFUSALS } from './operator-signing.mjs';
 
 export const AUTO_FREEZE = Object.freeze({ refusals: 5, windowMs: 5 * 60_000 });
@@ -23,7 +24,8 @@ const TIER_KEYS = Object.freeze([null, 'write', 'exec', 'root']);
 // Refusals that count towards auto-freeze: every signature refusal except a full nonce cache
 // (load, not forgery), a tier above the local policy, and a secret path request.
 export const COUNTED_REFUSALS = Object.freeze(new Set([
-  ...SIGNATURE_REFUSALS.filter(code => code !== 'nonce_cache_full'), 'tier_not_allowed', 'tier_mismatch', 'path_secret'
+  ...SIGNATURE_REFUSALS.filter(code => code !== 'nonce_cache_full'), 'tier_not_allowed', 'tier_mismatch', 'path_secret',
+  'approval_required'
 ]));
 
 const exists = path => {
@@ -36,7 +38,7 @@ const exists = path => {
 //   writeMarker     (path, text) => void
 //   log             (event, details) => void
 export function createOperatorGuard(policy, { autoFrozenFile = null, now = Date.now, fileExists = exists,
-  writeMarker = (path, text) => writeFileSync(path, text, { mode: 0o600 }), log = () => {} } = {}) {
+  writeMarker = (path, text) => writeFileSync(path, text, { mode: 0o600 }), removeMarker = path => unlinkSync(path), log = () => {} } = {}) {
   const refusals = [];
   const calls = { write: [], exec: [], root: [] };
   let autoFrozen = autoFrozenFile !== null && fileExists(autoFrozenFile);
@@ -63,6 +65,16 @@ export function createOperatorGuard(policy, { autoFrozenFile = null, now = Date.
       if (calls[key].length >= policy.rateLimits[key]) return 'rate_limited';
       calls[key].push(t);
       return null;
+    },
+    // The owner's unfreeze (signed internal op from Telegram /unfreeze): the auto-freeze only.
+    // The FROZEN file stays the owner's to remove on the host. Returns whether it was frozen.
+    clearAuto() {
+      const was = this.status().auto;
+      if (autoFrozenFile !== null) { try { removeMarker(autoFrozenFile); } catch { /* already gone */ } }
+      autoFrozen = false;
+      refusals.length = 0;
+      if (was) log('operator_auto_unfrozen', {});
+      return was;
     },
     // Record a refusal; returns true when this one froze the agent.
     refused(code) {
