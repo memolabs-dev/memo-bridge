@@ -11,7 +11,7 @@ Private open-source-ready MCP controller for Memo Labs, and the single MCP entry
 - `list_hosts`: check reachability for `mac` and `vps`
 - `host_status({host})`: bounded OS, load, CPU, disk, container-count inventory
 - `bridge_info`: capabilities, registered tools and limits
-- `projects_list`, `project_info`, `project_git_status`, `projects_audit`: the canonical `~/projects/PROJECTS.md` register, a registered project's verified location and live Git state, unregistered candidates
+- `projects_list`, `project_info`, `project_git_status`, `projects_audit`: the canonical `$MEMOLABS_ROOT/PROJECTS.md` register (default `~/memolabs`), a registered project's verified location and live Git state, unregistered candidates
 - Observers, never a new probe; each returns its source, its age and a stale flag: `observe_guardian` (infrastructure-guardian audit), `observe_agents` (VPS agent workflows), `observe_live_state` (operational sections of LIVE-STATE only), `observe_focus` (the active Stasis bet)
 
 ### Phase 2: coordination on GitHub Issues (`docs/COORDINATOR.md`)

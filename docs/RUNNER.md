@@ -22,7 +22,7 @@ A recipe runs the repository's own scripts (`package.json` scripts, a Makefile t
 
 ## Worktrees
 
-- **Location.** `~/projects/_worktrees/<project>/<branch with / replaced by ->`, or under `MEMO_BRIDGE_WORKTREES_ROOT` (absolute). The path never leaves the server: tools return a `worktree_id` (`wt_` plus 16 characters), never a filesystem path.
+- **Location.** `$MEMOLABS_ROOT/workspace/worktrees/<project>/<branch with / replaced by ->`, or under `MEMO_BRIDGE_WORKTREES_ROOT` (absolute). The path never leaves the server: tools return a `worktree_id` (`wt_` plus 16 characters), never a filesystem path.
 - **Branch.** Default `agent/<issue number>-<workspace suffix>` (`agent/ws-<suffix>` without an issue). Base default `origin/<default branch>`, after a fetch. Refused: `main`, `master`, the local `origin/HEAD` and the remote's own default branch (read with `git ls-remote --symref`, so a `--single-branch` clone hides nothing), a branch that exists locally or on origin, all compared without case (on APFS `refs/heads/Main` is the file `refs/heads/main`), and an existing path.
 - **Project.** Only registered repositories of `PROJECTS.md` (`kind: repo`, available on this host). The workspace must be yours, active, and on this host.
 - **Issue.** Pass the claimed issue to `worktree_create`. A worktree created without one is read-only: its writes fail with `no_live_claim`.
