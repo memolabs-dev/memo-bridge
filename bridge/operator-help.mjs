@@ -54,7 +54,7 @@ export const HELP_TOPICS = Object.freeze({
   files: {
     title: 'Reading and editing files',
     details: [
-      'operator_read reads 128 KiB at most per call; continue from next_offset. Binary files are flagged: use operator_read_media for images and PDFs.',
+      'operator_read reads 128 KiB at most per call; continue from next_offset. For the end of a large log pass tail_lines (1 to 2000) instead of offset. Binary files are flagged: use operator_read_media for images and PDFs.',
       'operator_edit: replace, regex, block, append, prepend, write; dry_run and diff first; a backup is kept next to the file; validator checks json, yaml, nginx, systemd, sh, python, toml, caddy, traefik.',
       'Content larger than one call: operator_upload_init {path, size, stage:true}, operator_upload_chunk (64 KiB each), operator_upload_complete; then operator_edit {path, mode, new_upload_id} (or old_upload_id for replace).',
       'Files of a project checkout on its default branch are refused (use_dev_flow): work in a worktree and open a pull request.',
