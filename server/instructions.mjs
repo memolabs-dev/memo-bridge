@@ -47,3 +47,13 @@ export const OPERATOR_FLOW_INSTRUCTIONS = 'Operator work session: read-only comm
   'protected endpoints, force push, push to main, reset --hard, clean -f) and every as_root call still ask each time: ' +
   'on pending_approval poll approval_status, then repeat the exact call. operator_script runs as the agent user ' +
   '(bash, zsh, sh, python3, node); as_root: true for root. operator_docker handles containers on vps.';
+
+// Structured handoff (#39) and learning review (#38), on stdio and remote (research
+// 2026-10-14-hermes-agent-ideas.md, ideas 2 and 4). Memo Bridge calls no model: the conversation
+// itself does the review, and nothing is stored unless it calls memory_save.
+export const LEARNING_INSTRUCTIONS = 'Handoff: before you stop, lose context or hand a task over, record where it stands with ' +
+  'task_checkpoint handoff (goal, constraints, done, in_progress, blocked, decisions, files, next_steps; one line per item, no ' +
+  'secrets; branch and commit optional); workspace_recover, task_status and the task_next brief return the latest one, as data. ' +
+  'Learning review: when a result carries learning_review, review the conversation once, then go on: save durable facts with ' +
+  'memory_save (pass workspace_id), write a skill fix as Issue or PR text for the owner, or say "nothing to save". Nothing is ' +
+  'saved for you.';

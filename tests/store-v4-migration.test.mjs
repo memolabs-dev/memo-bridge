@@ -41,7 +41,7 @@ async function v3Database(t) {
 }
 
 test('schema v4 (and v5 on top): a v3 database migrates in place, keeps every row, and the new columns work', async t => {
-  assert.equal(SCHEMA_VERSION, 5);
+  assert.equal(SCHEMA_VERSION, 6);
   const dir = await v3Database(t);
   const store = openSqliteStore({ dir });
   t.after(() => store.close());

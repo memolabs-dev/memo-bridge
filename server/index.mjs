@@ -17,8 +17,9 @@ import { HOST_TOOLS, registerHostTools } from './tools/host-tools.mjs';
 import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
 import { MEMORY_TOOLS, registerMemoryTools } from './tools/memory-tools.mjs';
+import { withLearning } from './tools/learning-hook.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
-import { MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
+import { LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
 
 const VERSION = '0.6.0';
 
@@ -51,7 +52,8 @@ const server = new McpServer({
     'branch, never force-push, never merge and never deploy. Jobs run the repository\'s own test/build/lint scripts, which you ' +
     'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +
     'only, no private data or credentials) and stop when the claim ends; elsewhere they are refused unless the owner set ' +
-    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent. ' + MULTI_SESSION_INSTRUCTIONS + ' ' + MEMORY_INSTRUCTIONS
+    'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent. ' + MULTI_SESSION_INSTRUCTIONS + ' ' + MEMORY_INSTRUCTIONS + ' ' +
+    LEARNING_INSTRUCTIONS
 });
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -168,12 +170,14 @@ server.registerTool('observe_focus', {
 
 // Phase 2 and 3 modules. Each one calls getRuntime() lazily, so the read-only tools above keep
 // working when the private state directory is unavailable.
-registerCoordinatorTools(server, getRuntime);
-registerWorktreeTools(server, getRuntime);
-registerJobTools(server, getRuntime);
-registerHostTools(server, getRuntime);
-registerGithubTools(server, getRuntime);
-registerAuditTools(server, getRuntime);
-registerMemoryTools(server, getRuntime);
+// Their calls are counted for the learning review (#38, server/tools/learning-hook.mjs).
+const counted = withLearning(server, getRuntime);
+registerCoordinatorTools(counted, getRuntime);
+registerWorktreeTools(counted, getRuntime);
+registerJobTools(counted, getRuntime);
+registerHostTools(counted, getRuntime);
+registerGithubTools(counted, getRuntime);
+registerAuditTools(counted, getRuntime);
+registerMemoryTools(counted, getRuntime);
 
 await server.connect(new StdioServerTransport());

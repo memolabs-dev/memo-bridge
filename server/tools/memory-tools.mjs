@@ -46,7 +46,8 @@ export function registerMemoryTools(server, getService) {
       tags: z.array(tag).max(MEMORY_LIMITS.tags).optional(),
       project: project.nullable().optional(),
       host: host.nullable().optional(),
-      issue: issue.nullable().optional().describe('The task this memory is about, owner/repo#n: task_next then lists it in the brief.')
+      issue: issue.nullable().optional().describe('The task this memory is about, owner/repo#n: task_next then lists it in the brief.'),
+      workspace_id: z.string().max(40).optional().describe('Your workspace (ws_...): resets its learning review counters. Not stored with the memory.')
     }),
     annotations: write
   }, call('memorySave'));

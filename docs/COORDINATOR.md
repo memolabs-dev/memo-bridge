@@ -30,7 +30,7 @@ The Mac runner that does the work of a claimed task (worktrees, files, jobs, pus
 | `task_status({issue})` | `coordinator:read` | Shared lease state of one task (holder, expiry, current fence) and its checkpoints. |
 | `task_claim({workspace_id, issue, ttl_seconds?})` | `coordinator:write` | Reserves the task through the ledger; returns `claim_id`, `fence`, `epoch`, `expires_at`. |
 | `task_renew({workspace_id, issue, claim_id, fence, ttl_seconds?})` | `coordinator:write` | Extends the lease (60 to 1800 s, default 300); returns a new fence. |
-| `task_checkpoint({workspace_id, issue, claim_id, fence, branch, commit, note?})` | `coordinator:write` | Records a Git-verified checkpoint under a live claim. |
+| `task_checkpoint({workspace_id, issue, claim_id, fence, branch?, commit?, note?, handoff?})` | `coordinator:write` | Records a Git-verified checkpoint and/or a structured handoff under a live claim (branch and commit required unless a handoff is given). |
 | `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `completed`, `blocked`, `failed` or `cancelled`, also from a closed workspace. |
 | `task_complete({workspace_id, issue, claim_id, fence, summary?})` | `coordinator:write` | `task_release` with outcome `completed` and an optional plain-text summary (at most 2000 characters) kept with the claim. |
 | `memory_save({id?, base_revision?, scope?, title?, body? \| body_patch?, evidence?, tags?, project?, host?, issue?, archived?})` | `coordinator:write` | Saves one fact for later conversations; see "Memory across conversations". |
@@ -202,6 +202,32 @@ every ChatGPT conversation of the owner shares it. Stdio clients use their local
   task (`issue`, or the issue as a tag).
 - **Ownership.** Entries belong to the principal that saved them. Every result says "Memory
   restores knowledge, not authorization".
+
+## Handoff and learning review
+
+After Hermes Agent's compression summary and periodic review (spec
+`.agent/project/handoff-learning/spec.md`; Issues #39 and #38). Stored in the same SQLite store
+(schema v6, tables `handoffs` and `learning_counters`). Memo Bridge calls no model.
+
+- **Handoff.** `task_checkpoint` takes `handoff: {goal, constraints, done, in_progress, blocked,
+  decisions, files, next_steps}`: goal one line of 500 characters, lists of at most 10 lines of 300
+  characters (files: 30 of 200), 3000 characters in all (`handoff_too_large`). The memory filters
+  apply to every line (`secret_detected`, `instruction_refused`), nothing is stored on a refusal.
+  `branch` and `commit` are optional with a handoff; the claim is verified with the ledger either
+  way. The latest handoff of a task, from any workspace, comes back in `workspace_recover`
+  (`handoffs`, the two most recently claimed tasks), `task_status` (`handoff`) and the `task_next`
+  brief (`handoff`). Older free-text checkpoints (`note`) are unchanged.
+- **Learning review.** Per workspace: tool calls, and user turns estimated as a call at least
+  90 s after the previous one (Memo Bridge sees no user turn). Every runtime tool naming the
+  workspace counts (a remote call without one counts for the workspace bound to its
+  conversation); operator calls do not reach the runtime and are not counted. A result carries the
+  fixed `learning_review` block on the call that reaches `MEMO_BRIDGE_LEARNING_TURNS` (default 10)
+  or `MEMO_BRIDGE_LEARNING_CALLS` (default 40), and on a successful `task_complete`,
+  `task_release` or `workspace_close` when a call happened since the last memory write or block.
+  `0` disables a counter, both `0` the block. Both counters reset on a `memory_save` naming the
+  workspace (`workspace_id`) and when a block is returned. The block is server text (at most
+  1536 bytes, reported by `pnpm run remote:toolsize`) asking the conversation to save facts with
+  `memory_save`, to write skill fixes as Issue or PR text, or to say "nothing to save".
 
 ## Local state
 

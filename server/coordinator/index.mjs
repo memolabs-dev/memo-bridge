@@ -23,6 +23,8 @@ import { ACTIVE_JOB_STATUSES } from '../runners/executor.mjs';
 import { cancelActiveJobs, stopCancelledJobs } from '../runners/jobs.mjs';
 import { COMMIT_RE, validBranch, verifyCheckpoint } from './checkpoints.mjs';
 import { MEMORY_NOTE, createMemoryOperations } from './memory.mjs';
+import { parseHandoff, publicHandoff } from './handoff.mjs';
+import { createLearning, learningThresholds as thresholdsFromEnv } from './learning.mjs';
 import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
 import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
   isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
@@ -98,7 +100,7 @@ const IN_FLIGHT_MAX = 1000;
 const REQUESTS_SHOWN = 10;
 // workspace_recover bounds: ledger status calls are slow (python + gh), so only the most
 // recent held claims are reconciled.
-const RECOVER = Object.freeze({ claims: 10, checkpoints: 10, jobs: 10, worktrees: 50, actions: 20 });
+const RECOVER = Object.freeze({ claims: 10, checkpoints: 10, jobs: 10, worktrees: 50, actions: 20, handoffs: 2 });
 // tasks_list bounds: projects scanned, repositories per search query, search calls per listing.
 // With App tokens (the VPS runner) a token covers one repository, so the search runs once per
 // repository, at most `repoQueries` of them.
@@ -319,7 +321,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
   readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
-  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null }) {
+  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
+  learningThresholds = thresholdsFromEnv() }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
   // Where the call came from and which client made it, as the server set them on the principal
@@ -353,6 +356,11 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   const write = fn => store.transaction(repo => fn(repo, now()));
   // Context memory across conversations (spec D4 of the repatriated tools): server/coordinator/memory.mjs.
   const memory = createMemoryOperations({ read, write, principal });
+  // Learning review counters (#38): server/coordinator/learning.mjs.
+  const learning = createLearning({ write, principal, thresholds: learningThresholds });
+  const latestHandoff = async issueRef => {
+    try { return publicHandoff(await read(repo => repo.latestHandoff(issueRef))); } catch { return null; }
+  };
 
   // Shared precondition for every operation that names a workspace.
   async function ownedWorkspace(workspaceId, { requireActive = true } = {}) {
@@ -474,7 +482,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   }
 
   // Short, deterministic hints for a session that lost its context.
-  function nextActions(workspace, claims, checkpoints, jobs, worktrees) {
+  function nextActions(workspace, claims, checkpoints, jobs, worktrees, handoffs = []) {
     const actions = [];
     const active = workspace.status === 'active';
     if (!active) actions.push('Workspace is closed: open a new one with workspace_open to keep working.');
@@ -482,6 +490,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (c.state === 'still_held') {
         if (active) {
           actions.push(`Renew ${c.issue} with task_renew (claim_id ${c.claim_id}, fence ${c.fence}) before ${c.expires_at}.`);
+          if (handoffs.some(h => h.issue === c.issue)) {
+            actions.push(`Resume ${c.issue} from its handoff (handoffs): check it against the branch, then follow its next_steps.`);
+          }
           const last = checkpoints.find(cp => cp.issue === c.issue);
           if (last && last.durability !== 'remote') {
             actions.push(`Push branch ${last.branch} and record a new task_checkpoint on ${c.issue}: the last one is ${last.durability}.`);
@@ -588,6 +599,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     const others = await othersOn(workspace.project_id, workspace.id);
     // What earlier conversations saved about this project or this task (titles only).
     const memories = await memory.related(workspace.project_id, task?.issue ?? null);
+    // Where the last conversation on this task stopped (#39), whichever workspace wrote it.
+    const handoff = task?.issue ? await latestHandoff(task.issue) : null;
     return { you: { session_tag: sessionTag(meta?.client_session) ?? sessionTag(workspace.client_session), workspace_id: workspace.id },
       task: task?.issue ?? null, title: task?.title ?? null, project: workspace.project_id,
       others_on_project: others,
@@ -595,6 +608,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         ? `You work on ${task.issue} in ${workspace.project_id}, and only on it. ${others.length} other conversation(s) work on this project` +
           `${others.some(o => o.task) ? ` (${others.filter(o => o.task).map(o => `${o.session_tag ?? o.workspace_id}: ${o.task}`).join(', ')})` : ''}.`
         : 'You hold no task: take one with task_next.',
+      ...(handoff ? { handoff } : {}),
       related_memories: memories,
       ...(memories.length ? { memories_hint: `memory_get these ids to resume where earlier conversations stopped. ${MEMORY_NOTE}` } : {}),
       rules: SESSION_RULES };
@@ -774,9 +788,12 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         .sort((a, b) => b.at - a.at || b.id - a.id).slice(0, RECOVER.checkpoints).map(publicCheckpoint);
       const worktrees = local.worktrees.map(publicWorktree);
       const jobs = local.jobs.map(publicJob);
+      // The latest structured handoff of the most recently claimed Issues (#39), from any workspace.
+      const recent = [...new Set(local.all.slice(-20).reverse().map(c => c.issue_ref))].slice(0, RECOVER.handoffs);
+      const handoffs = (await Promise.all(recent.map(latestHandoff))).filter(Boolean);
       return { ok: true, workspace: publicWorkspace(workspace), worker: workerFor(workspace), claims,
-        claims_truncated: local.held.length > held.length, worktrees, checkpoints, jobs,
-        next_actions: nextActions(workspace, claims, checkpoints, jobs, worktrees) };
+        claims_truncated: local.held.length > held.length, worktrees, checkpoints, handoffs, jobs,
+        next_actions: nextActions(workspace, claims, checkpoints, jobs, worktrees, handoffs) };
     },
 
     // Claimable Issues of the repositories that are both a registered project's GitHub origin
@@ -842,8 +859,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (remote && !(await remoteOrigins()).has(issue.repo.toLowerCase())) return fail('project_not_allowed');
       const lease = await ledger.status(issue);
       const checkpoints = await read(repo => repo.listCheckpoints(issue.ref, 20));
-      if (!lease.ok) return { ...lease, checkpoints: checkpoints.map(publicCheckpoint) };
-      return { ok: true, issue: issue.ref, lease: lease.receipt, checkpoints: checkpoints.map(publicCheckpoint) };
+      const handoff = await latestHandoff(issue.ref);
+      const extra = { checkpoints: checkpoints.map(publicCheckpoint), ...(handoff ? { handoff } : {}) };
+      if (!lease.ok) return { ...lease, ...extra };
+      return { ok: true, issue: issue.ref, lease: lease.receipt, ...extra };
     },
 
     async taskClaim(args, meta) {
@@ -934,24 +953,41 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     },
 
     // The checkpoint is a write boundary: the ledger verifies the fence immediately before it.
+    // With a handoff (#39) the commit is optional: work not committed yet still hands off.
     async taskCheckpoint(args) {
-      if (!validBranch(args.branch)) return fail('invalid_input', 'branch');
-      if (typeof args.commit !== 'string' || !COMMIT_RE.test(args.commit.toLowerCase())) return fail('invalid_input', 'commit');
-      const commit = args.commit.toLowerCase();
+      let handoff = null;
+      if (args.handoff !== undefined && args.handoff !== null) {
+        const parsed = parseHandoff(args.handoff);
+        if (!parsed.ok) return parsed;
+        handoff = parsed.fields;
+      }
+      const withCommit = !handoff || args.branch !== undefined || args.commit !== undefined;
+      if (withCommit && !validBranch(args.branch)) return fail('invalid_input', 'branch');
+      if (withCommit && (typeof args.commit !== 'string' || !COMMIT_RE.test(args.commit.toLowerCase()))) return fail('invalid_input', 'commit');
+      const commit = withCommit ? args.commit.toLowerCase() : null;
       const note = cleanText(args.note, 500, { multiline: true });
-      if (note === undefined) return fail('invalid_input', 'note');
+      if (note === undefined || (note && !withCommit)) return fail('invalid_input', 'note');
       const held = await heldClaim(args);
       if (held.error) return held.error;
       // Git first (it can be slow), then the ledger verify, then the insert at once.
-      const project = await resolveProject(held.workspace.project_id);
-      const check = await verifyCheckpoint({ repoPath: project.ok ? project.project.repoPath : null, branch: args.branch, commit });
-      if (!check.ok) return fail(check.error);
+      let check = null;
+      if (withCommit) {
+        const project = await resolveProject(held.workspace.project_id);
+        check = await verifyCheckpoint({ repoPath: project.ok ? project.project.repoPath : null, branch: args.branch, commit });
+        if (!check.ok) return fail(check.error);
+      }
       const verified = await ledger.verify(held.issue, workerFor(held.workspace), args.claim_id, args.fence);
       if (!verified.ok) return verified;
       return write((repo, at) => {
+        if (handoff) {
+          repo.insertHandoff({ issue_ref: held.issue.ref, claim_id: args.claim_id, workspace_id: held.workspace.id, fence_sha: args.fence,
+            branch: withCommit ? args.branch : null, commit_sha: commit, fields_json: JSON.stringify(handoff), at });
+        }
+        if (!withCommit) return { ok: true, issue: held.issue.ref, handoff: 'recorded' };
         repo.insertCheckpoint({ issue_ref: held.issue.ref, claim_id: args.claim_id, workspace_id: held.workspace.id,
           fence_sha: args.fence, branch: args.branch, commit_sha: commit, durability: check.durability, note, at });
         return { ok: true, issue: held.issue.ref, branch: args.branch, commit, durability: check.durability,
+          ...(handoff ? { handoff: 'recorded' } : {}),
           ...(check.durability === 'remote' ? {} : {
             warning: check.durability === 'local_only'
               ? 'Commit is not reachable from origin/<branch> locally; another machine cannot resume from it yet.'
@@ -1261,5 +1297,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       return result;
     };
   }
+  // Learning review bookkeeping (#38), called by server/tools/learning-hook.mjs after a tool call:
+  // not a tool, never authorizes anything, never throws. Returns the block to add, or null.
+  api.learningTick = async (info = {}, rawMeta = null) => {
+    try { return await learning.tick(info ?? {}, requestMeta(rawMeta)); } catch { return null; }
+  };
   return Object.freeze(api);
 }
