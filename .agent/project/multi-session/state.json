@@ -1,0 +1,11 @@
+{
+  "phase": "IMPLEMENTING",
+  "scope": "Multi-session coordination for up to 10 ChatGPT conversations (branch feat/multi-session-coordination)",
+  "started": "2026-10-14T18:31:26+02:00",
+  "baseline": {"commit": "254c151", "pnpm_test": "451/451"},
+  "requirements": {"total": 13, "covered": 13},
+  "acceptance": {"total": 13, "verified": [], "pending": ["MS-R1", "MS-R2", "MS-R3", "MS-R4", "MS-R5", "MS-R6", "MS-R7", "MS-R8", "MS-R9", "MS-R10", "MS-R11", "MS-R12", "MS-R13"], "failed": []},
+  "todos": {"done": ["MS-01"], "open": ["MS-02", "MS-03", "MS-04", "MS-05", "MS-06", "MS-07", "MS-08"]},
+  "risks": {"critical_open": 0, "high_open": 1, "high_ids": ["enforce before U-P5-05 is measured (owner sequencing)"]},
+  "ready_for_manual_acceptance": false
+}
