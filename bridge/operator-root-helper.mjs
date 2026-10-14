@@ -238,7 +238,9 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
       try {
         switch (msg.type) {
           case 'call': return await call(msg);
-          case 'audit_append': return appendFromAgent(msg.fields);
+          // On the Mac the agent keeps its own journal (DEV-P6-36): the root chain takes no line from
+          // the socket, so the user that may connect cannot pad it either.
+          case 'audit_append': return systemd ? appendFromAgent(msg.fields) : fail('invalid_request');
           case 'audit_verify': return { ok: true, verify: chain.verify() };
           case 'audit_head': return { ok: true, head: chain.headInfo(Number.isInteger(msg.since_seq) ? msg.since_seq : null) };
           case 'owner_unfreeze': return await ownerUnfreeze(msg);

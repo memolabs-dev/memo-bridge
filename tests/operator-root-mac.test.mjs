@@ -89,7 +89,7 @@ function macRoot(t, { policy: overrides = {}, hubKeyMode = 0o444 } = {}) {
 test('R-MR-01: the helper refuses to start unless it is root, runs from a root-owned tree, and its policy grants root with approval', async t => {
   const r = macRoot(t);
   if (!r) return;
-  await assert.rejects(r.start({ getuid: () => UID || 501 }), /runs as root/);
+  await assert.rejects(r.start({ check: true, getuid: () => UID || 501 }), /runs as root/);
   // A group-writable root directory: whoever is in the group could swap the code under root.
   chmodSync(r.L.dir, 0o775);
   await assert.rejects(r.start({ check: true }), /root_dir_untrusted:writable_by_others/);
@@ -166,6 +166,9 @@ test('R-MR-02, R-MR-06: over the socket, only signed fresh T3 calls run; every c
   for (const code of ['signature_missing', 'unknown_key', 'replayed', 'args_mismatch', 'tier_mismatch', 'unsupported_op', 'frozen', 'approval_required']) {
     assert.ok(lines.some(l => l.code === code), code);
   }
+  // The agent user may connect, but cannot add lines to the root chain (the Mac agent journals itself).
+  assert.deepEqual(await client.request({ type: 'audit_append', fields: { op: 'operator_run', outcome: 'ok' } }), { ok: false, error: 'invalid_request' });
+  assert.equal(readFileSync(r.auditFile, 'utf8'), text);
   // One edited line breaks the chain at that line.
   const edited = text.split('\n');
   edited[1] = edited[1].replace('"denied"', '"ok"');
