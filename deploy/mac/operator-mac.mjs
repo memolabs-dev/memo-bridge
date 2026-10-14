@@ -132,7 +132,8 @@ export function macPolicy(home, { repositories = macRepositories(home) } = {}) {
 
 const xml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
-// The launchd job, every path absolute (launchd expands no "~"). Same shape as the live
+// The launchd job, every path absolute (launchd expands no "~"). launchd.plist(5) on this Mac:
+// Umask takes a decimal integer (63 = 077), ThrottleInterval is in seconds. Same shape as the live
 // dev.memolabs.memo-bridge-agent: KeepAlive, RunAtLoad, ThrottleInterval 30, logs under
 // ~/Library/Logs; plus Umask 077 so what the agent creates (jobs, audit) is private.
 export function renderPlist({ home, node, label = LABEL, url = AGENT_URL }) {
@@ -275,7 +276,9 @@ export async function writePolicy(home, { read = readProjectRegistry, now = Date
 // Copy the bundle built by scripts/build-operator.mjs; files 0444, one atomic rename each.
 export function installRuntime(home, from, { commit = null } = {}) {
   const L = macLayout(home);
-  ensureDir(dirname(L.runtime), 0o755);
+  // The parent (~/.local/share/memo-bridge) also holds the probe agent's runtime: created if
+  // missing, its mode never changed.
+  mkdirSync(dirname(L.runtime), { recursive: true, mode: 0o755 });
   ensureDir(L.runtime, 0o755);
   ensureDir(join(L.runtime, 'bridge'), 0o755);
   const states = {};
