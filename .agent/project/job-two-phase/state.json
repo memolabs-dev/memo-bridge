@@ -1,0 +1,11 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "Two-phase VPS jobs: dependency install with network, recipe with PrivateNetwork (memo-bridge feat/job-install-phase, lab-infra feat/memo-job-private-network)",
+  "updated": "2026-10-14",
+  "requirements": { "total": 9, "verified_offline": 9, "pending_runtime": ["R3", "R4", "R6", "R8"] },
+  "todos": { "p0_open": 0, "p1_open": 0, "external": ["T10 deploy (owner)", "T11 runtime checks on lab"] },
+  "risks": { "critical_open": 0, "high_open": 0, "medium_open": 2 },
+  "mutation_checks": { "memo-bridge": "12/12 caught", "lab-infra": "8/8 caught" },
+  "pushed": false,
+  "deployed": false
+}
