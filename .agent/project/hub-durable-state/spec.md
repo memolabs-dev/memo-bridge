@@ -35,4 +35,4 @@ one dropping the emergency stop, the locks, the `/grant` approvals and the inbox
 | HS-R5 | 0600 files, 0700 directory, atomic writes, corrupt documents set aside | "state" tests |
 | HS-R6 | No state directory: behaviour unchanged | "state", "hub" |
 | HS-R7 | Whole suite, build, smoke green | evidence.md |
-| HS-R8 | lab: `StateDirectory=memo-bridge-hub` (0700), hub logs `durable_state: true`, a live `/freeze` survives `systemctl restart memo-bridge-hub` | pending: lab-infra PR and deploy |
+| HS-R8 | lab: `StateDirectory=memo-bridge-hub` (0700), hub logs `durable_state: true`, a live `/freeze` survives `systemctl restart memo-bridge-hub` | evidence.md, "Live on lab" |
