@@ -8,8 +8,27 @@
   succeeded, exit 0. Install phase: `pnpm install --frozen-lockfile --ignore-scripts`, network
   on, 4 s. Recipe phase: `npm test` with `PrivateNetwork=yes` and `IPAddressAllow=localhost`
   only, 2 min, 595 tests, 0 failed, 33 skipped.
-- 2026-10-15 10:40 Paris: this file was written, committed, pushed and opened as a pull request
-  from ChatGPT through the VPS runner (worktree, GitHub App token, PR by memo-labs-automation).
-  The Mac was still on, so this is not the Mac-off proof (AC-P4-01), which stays open.
-- Open from this cycle: the `worktree_push` checkpoint failed with `session_required`, and
-  `host_status mac` answered "unknown" from the VPS instead of online or offline.
+
+## Mac off (AC-P4-01)
+
+This file was written, committed, pushed and opened as a pull request from ChatGPT through the VPS
+runner while the Mac was asleep with its lid closed. Times in UTC:
+
+| Time | Event | Source |
+|---|---|---|
+| 08:39:21 | Mac enters `Clamshell Sleep` | `pmset -g log` on the Mac |
+| 08:39:40 | hub: `agent_ping_timeout` then `agent_disconnected` for `mac` and `operator-mac` | `journalctl -u memo-bridge-hub` on lab |
+| 08:40:26 | commit `c034cce` | GitHub commit committer date |
+| 08:40:41 | `app_token_minted` for memolabs-dev/memo-bridge on host `vps` | runner journal |
+| 08:40:45 | PR #59 opened by `memo-labs-automation` | GitHub |
+| 08:41:10 | Mac wakes (lid) | `pmset -g log` |
+| 08:41:35 | hub: `agent_connected` for `operator-mac`, then `mac` at 08:41:38 | hub journal |
+
+The Mac was asleep, not powered off: what matters is that no Mac agent was connected to the hub
+from 08:39:40 to 08:41:35, and the whole write cycle ran in that window.
+
+## Open from this cycle
+
+- The `worktree_push` checkpoint failed with `session_required`; push and PR were not affected.
+- `host_status mac` answered "unknown" from the VPS instead of offline, right after the
+  disconnect.
