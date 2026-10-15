@@ -25,8 +25,10 @@ validated dispatch id.
 What a valid start request does, in order:
   1. checks that no memo-job@*.service is active, activating, deactivating or has a pending
      job (concurrency 1, D4; the runtime store owns the queue, this is the second check);
-  2. creates /var/lib/memo-runner/jobs/<id>/ (root:memo-runner 0751) and its out/ folder
-     (memo-job:memo-runner 0750), and writes jobs/<id>/dispatch.json (root, 0640);
+  2. creates /var/lib/memo-runner/jobs/<id>/ (root:memo-runner 0751), its out/ folder
+     (memo-job:memo-runner 0750) and its cache/ folder (memo-job:memo-job 0750, named by the
+     install unit's ReadWritePaths=, so it must exist before that unit starts),
+     and writes jobs/<id>/dispatch.json (root, 0640);
      a refusal for a well-formed id writes jobs/<id>/status.json with
      service_result "dispatch_refused" instead, which the executor reads as the job's end;
   3. writes two runtime drop-ins, built only from validated values:
@@ -479,7 +481,7 @@ def load_config(path):
     runner = _user(values['runner_user'], 'runner_user')
     job = _user(values['job_user'], 'job_user')
     cfg.runner_uid, cfg.runner_gid = runner.pw_uid, runner.pw_gid
-    cfg.job_uid = job.pw_uid
+    cfg.job_uid, cfg.job_gid = job.pw_uid, job.pw_gid
     if os.geteuid() == 0:
         # Root as runner or job user, or one user for both, would make the checks here
         # meaningless (D2: memo-runner holds the credentials, memo-job holds none).
@@ -735,26 +737,32 @@ def job_dir(state, dispatch_id, create, with_out=False):
         os.fchown(fd, os.geteuid(), cfg.runner_gid)
         os.fchmod(fd, 0o751)
     if with_out:
-        try:
-            os.mkdir('out', 0o750, dir_fd=fd)
-        except FileExistsError:
-            pass
-        try:
-            out_fd = os.open('out', O_DIR, dir_fd=fd)
-        except OSError:
-            os.close(fd)
-            raise Refusal('job_dir_untrusted')
-        try:
-            out_st = os.fstat(out_fd)
-            if out_st.st_uid not in (os.geteuid(), cfg.job_uid):
+        # out/ for the job's results (memo-job:memo-runner, read by the runner) and cache/ for
+        # phase 1 (memo-job:memo-job, as the install unit's ExecStartPre= sets it). Both must
+        # exist before the install unit starts: its ReadWritePaths= names them, and systemd sets
+        # up the mount namespace before any ExecStartPre=, "+" ones included, failing with
+        # 226/NAMESPACE on a missing path (job j338067f, 2026-10-15).
+        for name, gid in (('out', cfg.runner_gid), ('cache', cfg.job_gid)):
+            try:
+                os.mkdir(name, 0o750, dir_fd=fd)
+            except FileExistsError:
+                pass
+            try:
+                sub_fd = os.open(name, O_DIR, dir_fd=fd)
+            except OSError:
+                os.close(fd)
                 raise Refusal('job_dir_untrusted')
-            os.fchown(out_fd, cfg.job_uid, cfg.runner_gid)
-            os.fchmod(out_fd, 0o750)
-        except BaseException:
-            os.close(fd)
-            raise
-        finally:
-            os.close(out_fd)
+            try:
+                sub_st = os.fstat(sub_fd)
+                if sub_st.st_uid not in (os.geteuid(), cfg.job_uid):
+                    raise Refusal('job_dir_untrusted')
+                os.fchown(sub_fd, cfg.job_uid, gid)
+                os.fchmod(sub_fd, 0o750)
+            except BaseException:
+                os.close(fd)
+                raise
+            finally:
+                os.close(sub_fd)
     return fd
 
 
