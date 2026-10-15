@@ -174,6 +174,7 @@ export function createHub(options) {
     return lists.flat();
   }
   const agents = new Map();   // host -> connection
+  const presence = new Map(); // host -> {connected, since}: last change seen by this hub (#61)
   const pending = new Map();  // request id -> {conn, op, host, resolve, timer}
   const wss = new WebSocketServer({noServer:true, maxPayload:MAX_FRAME_BYTES, clientTracking:true, perMessageDeflate:false});
   const gate = { runtimeEnabled: runtimeHost !== null, mutatingOps };
@@ -202,6 +203,29 @@ export function createHub(options) {
     return ops.sort();
   }
 
+  // What the hub sees of an agent: connected now or not, and since when (this hub process).
+  function hubPresence(host) {
+    const conn = agents.get(host);
+    const seen = presence.get(host);
+    const online = Boolean(conn && conn.ws.readyState === WebSocket.OPEN);
+    return { source: 'hub', via: 'agent_connection', online,
+      since: seen && seen.connected === online ? new Date(seen.since).toISOString() : null,
+      detail: online ? 'the agent of this host is connected to the hub'
+        : 'no agent of this host is connected to the hub (asleep, off or offline); a lost connection shows within about 30 s (one missed ping, every 15 s)' };
+  }
+  // Only an answer that could not observe the host (online: null) is completed; a runtime that
+  // saw the host itself keeps its own answer.
+  function withHubPresence(out, op, host) {
+    if (out?.ok !== true || out.local !== false) return out;
+    if (op === 'host_capabilities' && out.reachability?.online === null) return { ...out, reachability: hubPresence(host) };
+    if (op === 'host_resources' && out.online === null) {
+      const seen = hubPresence(host);
+      const { detail: _detail, ...rest } = out;
+      return { ...rest, source: seen.source, via: seen.via, online: seen.online, since: seen.since, detail: seen.detail };
+    }
+    return out;
+  }
+
   // Forward one op to `host`. Resolves with the agent's checked data, or {ok:false, error}.
   // requestId and clientSession (Phase 5, bridge/forward.mjs) travel in the envelope's meta,
   // never in args; the wire id stays the hub's own.
@@ -218,6 +242,11 @@ export function createHub(options) {
         const { ok: _ok, ...inbox } = notifier.check(who.id);
         return { ...merged, standing_approvals: grants.list(who.id), permanent_grants: await allPermanentGrants(), notifications: inbox };
       });
+    }
+    // #61: a runtime on the VPS cannot reach the Mac and answers online: null for it. The hub
+    // holds the Mac agent's connection, so it fills in what it sees.
+    if ((op === 'host_capabilities' || op === 'host_resources') && options.args?.host === 'mac') {
+      return sendAgent(host, op, options).then(out => withHubPresence(out, op, 'mac'));
     }
     // Issue #35: notify is the hub's, never the runtime's; the job is watched once it is accepted.
     if (op === 'jobs_submit' && options.args && Object.hasOwn(options.args, 'notify')) {
@@ -698,6 +727,7 @@ export function createHub(options) {
         const existing=agents.get(conn.host);
         if(existing && existing.ws!==ws) existing.ws.close(1000,'reconnected');
         agents.set(conn.host,conn);
+        presence.set(conn.host, {connected:true, since:Date.now()});
         record('agent_connected',conn.host,{fingerprint:keyFingerprint(permitted.get(conn.host))});
         ws.send(JSON.stringify({type:'authenticated'}));
         return;
@@ -722,6 +752,7 @@ export function createHub(options) {
       conn.parts.clear();
       if (agents.get(conn.host)===conn){
         agents.delete(conn.host);
+        presence.set(conn.host, {connected:false, since:Date.now()});
         record('agent_disconnected',conn.host);
       }
     });
