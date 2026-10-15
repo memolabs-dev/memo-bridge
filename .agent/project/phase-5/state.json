@@ -1,10 +1,11 @@
 {
   "phase": "VERIFYING",
   "scope": "Phase 5: ChatGPT Chat conversations on Memo Bridge (memo-bridge v0.6.0, branch feat/phase-5-chatgpt-remote; lab-infra branch feat/phase-5-chatgpt-ingress)",
-  "summary": "Code integrated and green offline in both repositories. Independent review (verdict BLOCK) findings F1 to F6 fixed with regression tests (memo-bridge npm test 339/339, smoke ok, test:deploy 113 OK, build ok; lab-infra 58 + 49 unit tests, tests.sh 112 green). Nothing pushed or deployed. Runtime and manual acceptance are blocked on owner actions (enrollment, deploys, ChatGPT connection) and, for the write stage, on lab-infra #161 and the P2 landing-contract check.",
-  "updated": "2026-10-14",
+  "summary": "Merged (#20; client certificate required by #55 and #56) and deployed on lab (memo_bridge_version a8f5a60, 2026-10-15). ChatGPT connects through Pocket ID OIDC and calls tools with a client certificate (public_request 200, 2026-10-15 09:22 Paris). Writes are live: the hub forwards mutating ops for the owner and on 2026-10-15 ChatGPT committed, pushed and opened PR #59 through the VPS runner. lab-infra #161 closed 2026-10-14. Most runtime acceptance checks are not recorded yet: see remaining.",
+  "summary_2026_10_14": "Code integrated and green offline in both repositories. Independent review (verdict BLOCK) findings F1 to F6 fixed with regression tests (memo-bridge npm test 339/339, smoke ok, test:deploy 113 OK, build ok; lab-infra 58 + 49 unit tests, tests.sh 112 green). Nothing pushed or deployed. Runtime and manual acceptance are blocked on owner actions (enrollment, deploys, ChatGPT connection) and, for the write stage, on lab-infra #161 and the P2 landing-contract check.",
+  "updated": "2026-10-15",
   "ready_for_manual_acceptance": false,
-  "blocked_on": [
+  "blocked_on_2026_10_14": [
     "owner actions O5-02 to O5-12 (spec section 9)",
     "lab-infra #161 (write stage only)"
   ],
@@ -34,7 +35,8 @@
     "partial": [
       "AC-P5-18",
       "AC-P5-21",
-      "AC-P5-22"
+      "AC-P5-22",
+      "AC-P5-19"
     ],
     "not_started": [
       "AC-P5-01",
@@ -42,13 +44,15 @@
       "AC-P5-05",
       "AC-P5-11",
       "AC-P5-12",
-      "AC-P5-19",
       "AC-P5-20"
     ],
     "failed": 0,
     "notes": {
-      "AC-P5-21": "Node 24.21.0 only; Node 22 is not installed on this Mac",
-      "AC-P5-18": "AC-P4-14 and REQ-P4-14 amended in .agent/project/phase-4/spec.md; make check after deploy pending"
+      "AC-P5-21": "partial: CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14). Not recorded: the Phase 4 AC suite re-run (runtime part).",
+      "AC-P5-18": "AC-P4-14 and REQ-P4-14 amended in .agent/project/phase-4/spec.md; make check after deploy pending",
+      "AC-P5-19": "partial: ChatGPT connected through Pocket ID OIDC and calls tools (public_request 200 with client certificate, 2026-10-15 09:22 Paris). Not recorded: decoded aud, scope, typ, client_id, exp minus iat, refresh after twice the token lifetime.",
+      "AC-P5-20": "not started as written (two conversations). One conversation ran commit, push and PR #59 on 2026-10-15 (.agent/project/vps-runner-proof/evidence.md).",
+      "AC-P5-01": "not started as written: the hub logs client_cert require and ChatGPT calls carry a certificate (#55, #56), but the negative curl checks without a certificate are not recorded here."
     }
   },
   "todos": {
@@ -98,23 +102,28 @@
       },
       "TODO-P5-30": {
         "p": "P0",
-        "blocked_on": "O5-04, O5-07 (owner IP, deploy)"
+        "blocked_on": "O5-04, O5-07 (owner IP, deploy)",
+        "status": "deployed in fact (auth route serves ChatGPT logins); the owner IP allowlist and the negative test before enrollment are not recorded"
       },
       "TODO-P5-31": {
         "p": "P0",
-        "blocked_on": "O5-05 (enrollment)"
+        "blocked_on": "O5-05 (enrollment)",
+        "status": "enrollment inferred from the accepted owner token (2026-10-15 09:22 Paris); signup refused, real client IPs logged, /setup closed and CIMD discovery are not recorded"
       },
       "TODO-P5-32": {
         "p": "P0",
-        "blocked_on": "TODO-P5-31, a memo-bridge release with v0.6.0 pinned in lab-infra, memo_runner_enabled, O5-07"
+        "blocked_on": "TODO-P5-31, a memo-bridge release with v0.6.0 pinned in lab-infra, memo_runner_enabled, O5-07",
+        "status": "deployed in fact (#20 in a8f5a60, ChatGPT calls through the public route, client_cert require logged); AC-P5-01, 02, 03 live runs are not recorded"
       },
       "TODO-P5-33": {
         "p": "P0",
-        "blocked_on": "TODO-P5-32, O5-06"
+        "blocked_on": "TODO-P5-32, O5-06",
+        "status": "connection done (2026-10-15); client_id, redirect, claims, tool-list fit, timeout, session stability and refresh measurements are not recorded"
       },
       "TODO-P5-34": {
         "p": "P0",
-        "blocked_on": "lab-infra #161 (TODO-P4-25), TODO-P4-40, TODO-P5-33"
+        "blocked_on": "lab-infra #161 (TODO-P4-25), TODO-P4-40, TODO-P5-33",
+        "status": "gate open in fact: hub mutating_ops owner and ChatGPT writes live (PR #59, 2026-10-15). Preconditions met: #161 closed (TODO-P4-25), TODO-P4-40, TODO-P5-08/09/10 in code. Not verified: the full amended AC-P4-14, U-P5-01 and the self-check run on lab; FU-P5-G decided by the owner on 2026-10-15"
       },
       "TODO-P5-35": {
         "p": "P0",
@@ -153,7 +162,10 @@
       "FU-P5-G": {
         "p": "P1",
         "what": "P2 of the review: confirm the merge contract never merges a ChatGPT-opened PR without human review before remote_writes is enabled",
-        "blocks": "TODO-P5-34"
+        "blocks": "TODO-P5-34",
+        "observed_2026_10_15": "PR #59, opened by ChatGPT through the VPS runner, was merged by the Land workflow at 08:44Z, about 3 minutes after it was opened. .github/workflows/land.yml squash-merges a PR once CI is green unless it carries the hold-merge label. Whether the landing contract requires a human review was not checked.",
+        "owner_decision_2026_10_15": "Guillaume decided on 2026-10-15: main is PR-only, and a PR merges automatically once CI is green (\"PR oblige mais auto-merge si tout vert\"). A ChatGPT-opened PR merging without human review is therefore intended. What still needs a human merge: Land refuses protected paths (deploy/ and the CI workflows), observed on #58 (land: false, reason protected_paths); and memo-bridge's own tools refuse to push protected CI paths (AC-P5-09).",
+        "status": "decided by the owner (not a verification): auto-merge on green is the contract; protected paths need the owner"
       },
       "FU-P5-H": {
         "p": "P2",
@@ -183,8 +195,7 @@
   "risks": {
     "critical_open": [
       "R-P5-01 setup takeover (mitigated in code: enroll stage allowlist, public stage refused without an admin; open until TODO-P5-30/31)",
-      "R-P5-02 public exposure (mitigated in code: mTLS required by default and enforced by the ingress role, fix F2; open until AC-P5-01 runs live)",
-      "R-P5-03 writes before #161 (three-layer gate in code; open until #161)"
+      "R-P5-02 public exposure (mitigated in code: mTLS required by default and enforced by the ingress role, fix F2; open until AC-P5-01 runs live)"
     ],
     "high_open": [
       "R-P5-04 token theft",
@@ -197,18 +208,21 @@
       "R-P5-19": "Not run on Node 22 (engines >=22.16). Low likelihood, medium impact.",
       "R-P5-20": "The hub reads the JWKS from 127.0.0.1:1411: if the Pocket ID port mapping changes, every token gets 500 (fail closed). Low likelihood, medium impact.",
       "R-P5-21": "Traefik behaviour on X-Forwarded-For (append or replace) and clientAuth on HTTP/3 are inferred, not verified. Medium likelihood, low to medium impact."
-    }
+    },
+    "closed_2026_10_15": [
+      "R-P5-03 writes before #161: lab-infra #161 closed 2026-10-14 13:03; ps on lab 2026-10-15: GitHub Actions runners run as github-runner-* users, none as root",
+      "R-P5-19 Node 22 never run: CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14)"
+    ],
+    "notes_2026_10_15": [
+      "R-P5-01 is the setup takeover risk (spec section 10), not a root runner risk, so the runner facts do not close it. The owner token accepted on 2026-10-15 implies enrollment happened; /setup closure is not recorded."
+    ]
   },
   "owner_actions_open": [
     "O5-02 hostname confirmation",
     "O5-03 no DNS change",
     "O5-04 public exposure approval and owner IP",
     "O5-05 Pocket ID enrollment, API, CIMD access, owner sub",
-    "O5-06 ChatGPT connection (read stage)",
-    "O5-07 review and merge lab-infra and memo-bridge branches, run deploys",
     "O5-08 PR token permission",
-    "O5-09 #161 maintenance window",
-    "O5-10 opening the write gate",
     "O5-11 decisions: session binding, project allowlist, coordinator:write before #161",
     "O5-12 manual acceptance"
   ],
@@ -238,5 +252,44 @@
       "P6": ".github symlink committed by a job: unverified whether GitHub follows it",
       "P7": "Origin check ignores scheme and port (SDK validateOriginHeader); informational, bearer still required"
     }
+  },
+  "owner_actions_done_2026_10_15": {
+    "O5-06": "ChatGPT connected and calls tools (public_request 200 with client certificate, 2026-10-15 09:22 Paris)",
+    "O5-07": "memo-bridge #20 merged, deployed in memo_bridge_version a8f5a60 (2026-10-15)",
+    "O5-09": "lab-infra #161 closed 2026-10-14 13:03",
+    "O5-10": "write gate open: hub mutating_ops owner, ChatGPT pushed and opened PR #59 on 2026-10-15"
+  },
+  "unverified": [
+    "O5-02 hostname, O5-03 DNS, O5-04 public exposure: the public route works, so probably done, but not in the 2026-10-15 fact sheet",
+    "O5-05 enrollment: inferred from the accepted owner token, details not recorded",
+    "O5-08 PR token permission: PRs now go through the GitHub App (app_token_minted, PR #59 by memo-labs-automation), so the PAT permission is probably moot; not confirmed",
+    "O5-11 decisions and O5-12 manual acceptance: no fact"
+  ],
+  "next_steps_note": "next_steps date from 2026-10-14: the merges, the deploys and the ChatGPT connection have happened (see reality); the measurements and live checks in them have not been recorded",
+  "remaining": [
+    "TODO-P5-01 doc unknowns (P0)",
+    "TODO-P5-30, 31, 32 live verification steps after deploy (P0)",
+    "TODO-P5-33 read-stage measurements (P0)",
+    "TODO-P5-34 unverified gate preconditions: full AC-P4-14, U-P5-01 (P0); FU-P5-G decided by the owner on 2026-10-15",
+    "TODO-P5-35 scenario runs A, C, D and the G sweep (P0)",
+    "TODO-P5-36 kill-switch drill (P1)",
+    "TODO-P5-40 evidence, Vault, manual checklist (P1)",
+        "critical risks R-P5-01, R-P5-02 and high risks R-P5-04, R-P5-06, R-P5-14 open"
+  ],
+  "reality": {
+    "verified_on": "2026-10-15",
+    "merged": "#20",
+    "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris); services memo-bridge-hub, memo-bridge-runner, memo-operator-agent, memo-operator-root active",
+    "notes": [
+      "client certificate required on the public listener: #55, #56; hub logs client_cert require",
+      "hub logs mutating_ops owner, runtime_host vps, durable_state true",
+      "first full ChatGPT cycle on 2026-10-14 (PR #29)",
+      "ChatGPT connected through Pocket ID OIDC, public_request 200 with client certificate, 2026-10-15 09:22 Paris",
+      "2026-10-15: Mac asleep (lid closed) 08:39:21Z to 08:41:10Z, hub saw agents mac and operator-mac disconnected 08:39:40Z to 08:41:35Z; in that window ChatGPT committed, pushed and opened PR #59 through the VPS runner (bot memo-labs-automation), merged by Land at 08:44Z (.agent/project/vps-runner-proof/evidence.md)",
+      "lab-infra #161 closed 2026-10-14 13:03; ps on lab 2026-10-15: GitHub Actions runners run as github-runner-* users, none as root",
+      "CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14)",
+      "Telegram approvals, /freeze, /unfreeze and /status work live (2026-10-15; /freeze survived a hub restart, .agent/project/hub-durable-state/evidence.md)",
+      "pnpm run smoke: 61 stdio tools (2026-10-15); pnpm run remote:toolsize at a8f5a60: 28 read-stage tools, 49 write-stage tools"
+    ]
   }
 }

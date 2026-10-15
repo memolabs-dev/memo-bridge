@@ -6,10 +6,12 @@ workspace and works through Memo Bridge tools only; the Coordinator in the VPS r
 single coordination owner. Spec: `.agent/project/phase-5/spec.md`. Lab side: lab-infra
 `docs/memo-bridge-public.md`.
 
-**Status (2026-10-14).** Code complete and tested offline (`npm test`, `npm run smoke:remote`).
-Nothing is deployed: the lab-infra roles ship off (`memo_bridge_remote_listener: false`,
-`memo_bridge_public: false`, `memo_bridge_auth_stage: adopt`). The live steps below are owner
-actions (spec section 9).
+**Status (2026-10-15).** Merged (#20; client certificate required since #55 and #56) and deployed
+on lab (`memo_bridge_version` a8f5a60). ChatGPT connects through Pocket ID OIDC and calls tools
+with a client certificate (`public_request` 200, 2026-10-15 09:22 Paris). Writes are live: on
+2026-10-15 a ChatGPT conversation committed, pushed and opened PR #59 through the VPS runner.
+Until 2026-10-14 the code was tested offline only and the lab-infra roles shipped off. The owner
+steps below record how it was set up (spec section 9).
 
 **Measured fact that drives the design (EV-P5-01, 2026-10-14).** On the owner's ChatGPT Plus
 account, a Chat conversation called a remote write tool with no confirmation prompt. So nothing
@@ -54,15 +56,15 @@ hub.
 
 ## The remote tool set
 
-Read stage (24 tools before #47, plus `delegation_status`): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`, `sessions_overview`,
+Read stage (28 tools; `delegation_status` since #47): `projects_list`, `workspace_status`, `workspace_list`, `workspace_recover`, `sessions_overview`,
 `tasks_list`, `task_status`, `batch_status`, `worktrees_list`, `worktree_status`, `worktree_list_files`,
 `worktree_read_file`, `worktree_diff`, `jobs_list`, `job_status`, `job_events`, `job_results`,
 `host_capabilities`, `github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`,
-`audit_events`, `audit_operation`.
+`audit_events`, `audit_operation`, and `memory_search`, `memory_get`, `memory_list`.
 
-Write stage adds 16 (plus `workspace_delegate`, `delegation_join`, `delegation_report`, `delegation_end` since #47): `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
+Write stage adds 21 (`workspace_delegate`, `delegation_join`, `delegation_report`, `delegation_end` since #47): `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
 `task_release`, `task_complete`, `task_checkpoint`, `batch_create`, `task_next`, `worktree_create`, `worktree_write_file`,
-`worktree_commit`, `worktree_push`, `jobs_submit`, `job_cancel`, `github_create_pr`.
+`worktree_commit`, `worktree_push`, `jobs_submit`, `job_cancel`, `github_create_pr`, `memory_save`.
 
 Never remote: `observe_*`, `host_resources`, `worktree_remove`, `list_hosts`, `host_status`,
 `bridge_info`, `project_info`, `project_git_status`, `projects_audit`. There is no merge tool on
@@ -70,8 +72,9 @@ any surface.
 
 Names, descriptions, schemas and annotations are the stdio ones (one registry,
 `server/registry.mjs`; a test compares them). `pnpm run remote:toolsize` prints what ChatGPT
-receives: on 2026-10-14, 23 tools in 15 627 bytes (about 3 900 tokens) for the read stage and
-39 tools in 34 502 bytes (about 8 600 tokens) for the write stage. No ChatGPT limit is
+receives (operator tools excluded): at a8f5a60 on 2026-10-15, 28 tools in 20 527 bytes (about
+5 100 tokens) for the read stage and 49 tools in 49 976 bytes (about 12 500 tokens) for the write
+stage. Rerun the script for the current figures. No ChatGPT limit is
 documented; the TODO-P5-33 window checks that every tool shows after Refresh.
 
 ## Conductor workflow: one chat splits, N chats work (TODO-P5-50 to 52)

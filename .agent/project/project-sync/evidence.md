@@ -3,6 +3,9 @@
 Short-form Whole Project Protocol record. Branch `feat/project-sync`, from `origin/main` c2592bd.
 Nothing pushed, nothing deployed, no write to the real board.
 
+2026-10-15: merged into main as #22 and deployed on lab in `memo_bridge_version` a8f5a60
+(2026-10-15 11:10 Paris). No live write to the board is recorded.
+
 ## Change
 
 The Coordinator mirrors its tasks onto a GitHub Projects (v2) board, "Memo Labs OS"

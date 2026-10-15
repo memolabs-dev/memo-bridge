@@ -1,8 +1,8 @@
 # Memo Bridge
 
-Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Since v0.5 the same tools can run on the VPS behind the private hub, with jobs queued one at a time in an unprivileged systemd unit, so work continues with the Mac off (`docs/RUNNER_VPS.md`; not deployed yet). Since v0.6 ChatGPT Chat conversations can use a fixed subset of those tools through a public, OAuth-protected endpoint served by the hub (`docs/REMOTE_CHATGPT.md`; not deployed yet). Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
+Private open-source-ready MCP controller for Memo Labs, and the single MCP entry point of Memo Labs OS. It observes hosts and projects read-only, coordinates parallel AI sessions on **GitHub Issues**, and, since v0.4, does the work of a claimed task on the Mac: isolated worktrees, file edits, the repository's own test/build/lint recipes, commit, push and pull request. Since v0.5 the same tools can run on the VPS behind the private hub, with jobs queued one at a time in an unprivileged systemd unit, so work continues with the Mac off (`docs/RUNNER_VPS.md`; deployed on lab, runner on, 2026-10-15). Since v0.6 ChatGPT Chat conversations can use a fixed subset of those tools through a public, OAuth-protected endpoint served by the hub (`docs/REMOTE_CHATGPT.md`; deployed on lab, ChatGPT connected, 2026-10-15). Reservations use the shared Git-ref lease ledger of `memolabs-dev/.github`, so the Mac and the VPS see the same claims. It runs on the Mac, reaches the VPS via the existing `ssh lab` configuration, and does not touch current Sentinel X agents. Architecture and ownership: Vault `1-Projects/memo-labs-os.md`.
 
-## Tools (v0.6.0, 51 tools)
+## Tools (v0.6.0, 61 stdio tools)
 
 `bridge_info` returns the same list, grouped, with the capability each group needs.
 
@@ -39,11 +39,11 @@ No new tool: the runtime tools above run on the VPS as `memo-bridge-runner.servi
 - the runner keeps the claim's lease alive while its job waits or runs, and stops the job when the lease is lost.
 - GitHub writes (ledger, push, pull request) use short-lived installation tokens of the GitHub App `memo-labs-automation`, minted on demand from the `app-key` credential, each narrowed to one repository and the minimal permissions; fine-grained PATs (`ledger-gh`, `push-gh`) remain an optional fallback (`docs/RUNNER_VPS.md`, "GitHub App installation tokens").
 
-Write tools stay off the hub until the root CI runners on the VPS are isolated (the write gate in `docs/HUB_SECURITY.md`).
+Write tools stay off the hub until the root CI runners on the VPS are isolated (the write gate in `docs/HUB_SECURITY.md`). On 2026-10-15 no GitHub Actions runner on lab runs as root (lab-infra #161 closed 2026-10-14) and the hub forwards mutating ops for the owner.
 
 ### Phase 5: ChatGPT conversations (`docs/REMOTE_CHATGPT.md`)
 
-No new tool: a fixed subset of the runtime tools (22 read tools, plus 14 write tools once the write gate opens) is served to ChatGPT Chat at `https://bridge.memolabs.dev/mcp`, through a separate, OAuth-only hub listener (Pocket ID tokens for the owner only, mTLS to OpenAI's connector certificate at Traefik). Every remote call runs on the VPS runner. The server enforces the write gate, the project allowlist, the protected CI paths, the branch rules, response bounds, rate limits and the per-conversation workspace binding, whatever the model sends. Configuration is one `remote.json` rendered by lab-infra. Not deployed yet.
+No new tool: a fixed subset of the runtime tools (28 read tools, plus 21 write tools once the write gate opens, per `server/registry.mjs`) is served to ChatGPT Chat at `https://bridge.memolabs.dev/mcp`, through a separate, OAuth-only hub listener (Pocket ID tokens for the owner only, mTLS to OpenAI's connector certificate at Traefik). Every remote call runs on the VPS runner. The server enforces the write gate, the project allowlist, the protected CI paths, the branch rules, response bounds, rate limits and the per-conversation workspace binding, whatever the model sends. Configuration is one `remote.json` rendered by lab-infra. Deployed on lab (2026-10-15).
 
 ### What Memo Bridge never does
 
