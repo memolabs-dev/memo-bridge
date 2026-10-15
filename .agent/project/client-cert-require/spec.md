@@ -50,7 +50,7 @@ has seen ChatGPT connect and call tools after the deploy.
 | CC-R7 | `log` mode unchanged (never refuses) | "client certificate logging" |
 | CC-R8 | Whole suite, build, smoke green | evidence.md |
 | CC-R9 | lab-infra renders require, removes the window, asserts on both roles and the deployed file | lab-infra test_memo_bridge_public.py, scripts/tests.sh |
-| CC-R10 | ChatGPT connects and calls tools after deploy; curl with a token and no certificate gets 403 | **pending: deploy and owner** |
+| CC-R10 | ChatGPT connects and calls tools after deploy; curl with a token and no certificate gets 403 | evidence.md, "Live, after deploy" |
 
 ## Risks
 
