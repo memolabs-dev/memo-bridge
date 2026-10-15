@@ -84,12 +84,45 @@ export function telegramText(n) {
 
 // poll(watch) -> the job's raw status answer (hub-provided, per kind). send(notification) -> the
 // bot's notifyJob, or null when there is no bot. record(event, details) -> the hub journal.
-export function createNotifier({ poll, send = () => null, record = () => {}, now = Date.now, random = randomBytes, limits = {} } = {}) {
+// initial: {inboxes, watches} saved by onChange before a restart (hub durable state): the inbox
+// survives, and a watch on a job still running is polled again and notified once it ends.
+export function createNotifier({ poll, send = () => null, record = () => {}, now = Date.now, random = randomBytes, limits = {},
+  initial = null, onChange = () => {} } = {}) {
   const L = { ...NOTIFY_LIMITS, ...limits };
   const inboxes = new Map(); // principal id -> notification[] (oldest first)
   const watches = new Map(); // `${kind}:${job_id}` -> watch
   let timer = null;
   let polling = false;
+  restore(initial);
+  // A watch keeps only what polling needs of its principal: the id and client type travel on
+  // the wire (bridge/protocol.mjs makeRequest), nothing else.
+  const savedWatch = w => ({ kind: w.kind, host: w.host, job_id: w.job_id, label: w.label, timeout_s: w.timeout_s ?? null,
+    clientSession: w.clientSession ?? null, principal: { id: w.principal.id, ...(w.principal.client_type ? { client_type: w.principal.client_type } : {}) },
+    started: w.started, deadline: w.deadline });
+  function changed() {
+    try { onChange({ inboxes: [...inboxes.entries()], watches: [...watches.values()].map(savedWatch) }); } catch { /* journaled by the state module */ }
+  }
+  function restore(saved) {
+    const str = (v, max) => typeof v === 'string' && v.length <= max;
+    for (const entry of Array.isArray(saved?.inboxes) ? saved.inboxes.slice(-L.principals) : []) {
+      if (!Array.isArray(entry) || !str(entry[0], 130) || !Array.isArray(entry[1])) continue;
+      const box = entry[1].filter(n => n && NOTIFICATION_ID_RE.test(n.notification_id ?? '') && str(n.status, 40) && str(n.job_id, 80))
+        .slice(-L.perPrincipal).map(n => ({ notification_id: n.notification_id, kind: str(n.kind, 16) ? n.kind : 'runtime', host: str(n.host, 16) ? n.host : null,
+          job_id: n.job_id, label: str(n.label, 64) ? n.label : null, status: n.status, exit_code: Number.isInteger(n.exit_code) ? n.exit_code : null,
+          duration_ms: Number.isFinite(n.duration_ms) ? n.duration_ms : null, ended_at: str(n.ended_at, 40) ? n.ended_at : null,
+          output_tail: str(n.output_tail, L.tailChars) ? n.output_tail : '', principal: entry[0], acked: n.acked === true,
+          telegram: str(n.telegram, 16) ? n.telegram : 'unknown' }));
+      if (box.length) inboxes.set(entry[0], box);
+    }
+    for (const w of Array.isArray(saved?.watches) ? saved.watches.slice(0, L.watches) : []) {
+      if (!w || !['operator', 'runtime'].includes(w.kind) || !str(w.host, 16) || !str(w.job_id, 80) || !str(w.principal?.id, 130)) continue;
+      if (!Number.isFinite(w.started) || !Number.isFinite(w.deadline)) continue;
+      const principal = { id: w.principal.id, ...(str(w.principal.client_type, 32) ? { client_type: w.principal.client_type } : {}) };
+      watches.set(`${w.kind}:${w.job_id}`, { kind: w.kind, host: w.host, job_id: w.job_id, label: str(w.label, 64) ? w.label : 'job',
+        timeout_s: Number.isInteger(w.timeout_s) ? w.timeout_s : null, clientSession: str(w.clientSession, 64) ? w.clientSession : null,
+        principal, started: w.started, deadline: w.deadline, errors: 0, nextAt: 0 });
+    }
+  }
 
   function inboxOf(principalId, create = false) {
     let box = inboxes.get(principalId);
@@ -112,6 +145,7 @@ export function createNotifier({ poll, send = () => null, record = () => {}, now
     const started = now();
     const budget = (Number.isInteger(w.timeout_s) ? w.timeout_s : 900) * 1000 + WATCH_GRACE_MS + (w.kind === 'runtime' ? RUNTIME_QUEUE_MS : 0);
     watches.set(key, { ...w, started, deadline: started + budget, errors: 0, nextAt: 0 });
+    changed();
     record('notify_watch', { kind: w.kind, host: w.host, job_id: w.job_id, principal: w.principal.id });
     return { registered: true };
   }
@@ -124,6 +158,7 @@ export function createNotifier({ poll, send = () => null, record = () => {}, now
     const box = inboxOf(w.principal.id, true);
     box.push(n);
     while (box.length > L.perPrincipal) box.shift();
+    changed();
     let sending = null;
     try { sending = send(n); } catch { sending = Promise.reject(new Error('telegram_error')); }
     if (!sending) {
@@ -140,6 +175,7 @@ export function createNotifier({ poll, send = () => null, record = () => {}, now
           reason: String(error?.message ?? 'telegram_error').split(':').slice(0, 2).join(':').slice(0, 64) });
       }
     }
+    changed();
     return n;
   }
 
@@ -201,6 +237,7 @@ export function createNotifier({ poll, send = () => null, record = () => {}, now
         const n = box.find(x => x.notification_id === id);
         if (!n) unknown.push(id); else if (!n.acked) { n.acked = true; acked++; }
       }
+      if (acked) changed();
       return { ok: true, acked, unread: box.filter(n => !n.acked).length, ...(unknown.length ? { unknown } : {}) };
     },
     start(pollMs = L.pollMs) {

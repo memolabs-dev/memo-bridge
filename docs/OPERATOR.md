@@ -48,7 +48,8 @@ pass a token redactor and come back wrapped as untrusted data.
   conversation's T1 to T3 call names its `workspace_id` and needs a covering lock of that
   workspace (`workspace_required`, `lock_required`); another workspace's overlapping lock answers
   `locked_by_other_session`. The 9443 principals need no workspace and are refused only under
-  another workspace's lock. A hub restart drops the locks. Details: `docs/REMOTE_CHATGPT.md`,
+  another workspace's lock. Locks are saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) and survive a hub restart; implicit
+  per-call locks do not. Details: `docs/REMOTE_CHATGPT.md`,
   "Ten conversations at once".
 
 ## Tools repatriated from SentinelX (part 2, 2026-10-14)
@@ -133,9 +134,11 @@ takes a chat id or a recipient. Without the bot, or when `sendMessage` fails, th
 in the inbox (`telegram: unavailable` or `failed`) and the hub journals `notification_unsent`
 with the reason; a delivered one is journaled `notification_sent`.
 
-**Inbox.** In hub memory, like approvals, grants and locks: the last 50 notices per principal, 256
-principals. A hub restart drops the inbox and the watches; the results themselves stay on the
-hosts and in the runtime store (`operator_job_status`, `job_status`, `job_results`). A principal
+**Inbox.** Saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`), like grants, locks and the `/freeze` flag: the last 50 notices
+per principal, 256 principals. The inbox, its acks and the watches of running notify jobs survive
+a hub restart; a restored watch is polled again and notifies once. Without a state directory they
+live in memory and a restart drops them. The results themselves stay on the hosts and in the
+runtime store (`operator_job_status`, `job_status`, `job_results`). A principal
 reads and acknowledges only its own notices.
 
 **tail_lines.** The file is resolved by the same read policy and denylist as a byte read, then
@@ -200,7 +203,8 @@ each `git`, `node`, `pnpm`, `python3`, `make` or `ssh` call would have been abou
    `/` as a prefix, nor `sudo`, `su`, `doas`, `rm`, `dd` and the other destructive programs.
    The agent and the root helper refuse a standing id on a hard or root call themselves
    (`approval_scope`), whatever the hub signed.
-5. Grants live in hub memory: a hub restart drops them; ask again.
+5. Grants are saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) and survive a hub restart, active or still pending, until
+   they expire or are revoked. Without a state directory a restart drops them; ask again.
 
 ## Permanent grants (owner decision 2026-10-14 21:29, issue #48)
 
@@ -306,8 +310,10 @@ Any one switch stops every call above T0 on the next call; reads keep working.
 | auto-freeze: 5 signature or policy refusals in 5 min | that host (or the root helper) | automatic, marker `AUTO-FROZEN` in the state directory | read the journal first; `/unfreeze`, or `make memo-operator-unfreeze auto=1` on lab, or `rm ~/.memo-operator/state/AUTO-FROZEN` on the Mac |
 | agent key removed from the hub | that agent, entirely | remove `operator-mac.pub` or `operator-vps.pub` from `/var/lib/memo-bridge/secrets`, restart the hub | put it back |
 
-The hub flag set by `/freeze` lives in memory: a hub restart drops it. The files are the
-durable switches. The model has no freeze or unfreeze tool.
+The hub flag set by `/freeze` is saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) before it is journaled: a hub restart or a
+deploy keeps the hub frozen (journal `operator_frozen` with `by: restored`) until `/unfreeze`.
+Without a state directory it lives in memory and a restart drops it. The files stay the switches
+no tool can lift. The model has no freeze or unfreeze tool.
 
 ## Install on the Mac (TODO-P6-13)
 
@@ -472,8 +478,9 @@ the root tree, the state and the socket; keeps `/var/log/memo-operator`), then
   Do not grant it Full Disk Access.
 - **Node path.** The plist names the absolute node that ran the install (an nvm path today). If
   that version is removed, the job fails to start: rerun the script with the new node.
-- **Approvals and the hub flag live in hub memory**: a hub restart drops pending approvals,
-  the `/freeze` flag, the job notification inbox and the watches of running notify jobs. The FROZEN files are durable.
+- **Pending approvals live in hub memory**: a hub restart drops them, since the call waiting for
+  them ended with the process. The `/freeze` flag, grants, locks, the notification inbox and the
+  watches are durable with a state directory, as are the FROZEN files.
 - **Transfers move data between the hosts.** A file readable on one host can be written on the
   other, inside its write roots. The source denylist and roots, the destination lock and both
   journals are the barriers; there is no content filter on what a transfer carries.

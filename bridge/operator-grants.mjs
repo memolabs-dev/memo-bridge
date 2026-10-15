@@ -105,14 +105,39 @@ export function checkGrantRequest({ host, programs, cwd_prefixes: prefixes, ttl_
 
 const under = (child, parent) => parent === '/' || child === parent || child.startsWith(`${parent}/`);
 
-export function createGrantStore({ now = Date.now, random = randomBytes, homes = DEFAULT_HOMES } = {}) {
+// A grant read back from the hub's durable state (bridge/hub-state.mjs): only well-formed rows.
+function restoredGrant(g) {
+  const str = (v, max = 200) => typeof v === 'string' && v.length <= max;
+  const time = v => Number.isFinite(v) && v > 0;
+  if (!g || typeof g !== 'object' || !str(g.id, 80) || !g.id.startsWith(GRANT_PREFIX) || !str(g.host, 16)) return null;
+  if (!Array.isArray(g.programs) || g.programs.length > GRANT_LIMITS.programs || !g.programs.every(p => typeof p === 'string' && PROGRAM_RE.test(p))) return null;
+  if (!Array.isArray(g.prefixes) || g.prefixes.length > GRANT_LIMITS.prefixes || !g.prefixes.every(p => str(p?.key, 1024) && str(p?.shown, 1024))) return null;
+  if (!['pending', 'active', 'revoked', 'denied'].includes(g.status) || !Number.isInteger(g.hours) || !time(g.created) || !time(g.pendingUntil)) return null;
+  if (g.expires !== null && !time(g.expires)) return null;
+  return { id: g.id, host: g.host, programs: [...g.programs], prefixes: g.prefixes.map(p => ({ key: p.key, shown: p.shown })), hours: g.hours,
+    reason: str(g.reason) ? g.reason : null, principal: str(g.principal, 130) ? g.principal : null, status: g.status,
+    by: str(g.by, 64) ? g.by : null, created: g.created, pendingUntil: g.pendingUntil, expires: g.expires };
+}
+
+// initial: the rows saved by onChange before a restart. onChange(rows) is called after every
+// change, with every row still worth keeping (hub durable state).
+export function createGrantStore({ now = Date.now, random = randomBytes, homes = DEFAULT_HOMES, initial = [], onChange = () => {} } = {}) {
   const items = new Map(); // id -> grant
+  for (const row of Array.isArray(initial) ? initial : []) {
+    const g = restoredGrant(row);
+    if (g && items.size < GRANT_LIMITS.active + GRANT_LIMITS.pending + 64) items.set(g.id, g);
+  }
+  const changed = () => { try { onChange([...items.values()]); } catch { /* journaled by the state module */ } };
   const state = g => {
     if (g.status === 'revoked' || g.status === 'denied') return g.status;
     if (g.status === 'pending') return now() > g.pendingUntil ? 'expired' : 'pending';
     return now() > g.expires ? 'expired' : 'active';
   };
-  const sweep = () => { for (const [id, g] of items) if (state(g) !== 'active' && state(g) !== 'pending' && now() - g.created > 24 * 3600_000) items.delete(id); };
+  const sweep = () => {
+    let removed = 0;
+    for (const [id, g] of items) if (state(g) !== 'active' && state(g) !== 'pending' && now() - g.created > 24 * 3600_000) { items.delete(id); removed++; }
+    if (removed) changed();
+  };
   const newId = () => `${GRANT_PREFIX}${random(16).toString('base64url')}`;
   const view = g => ({ grant_id: g.id, host: g.host, programs: [...g.programs], cwd_prefixes: g.prefixes.map(p => p.shown), status: state(g),
     ttl_hours: g.hours, expires_at: state(g) === 'pending' ? null : new Date(g.expires).toISOString(), created_at: new Date(g.created).toISOString(),
@@ -126,6 +151,7 @@ export function createGrantStore({ now = Date.now, random = randomBytes, homes =
     const g = { id: newId(), host: checked.host, programs: checked.programs, prefixes: checked.prefixes, hours: checked.hours, reason: checked.reason,
       principal: principal ?? null, status, by, created: t, pendingUntil: t + GRANT_LIMITS.pendingMs, expires: status === 'active' ? t + checked.hours * 3600_000 : null };
     items.set(g.id, g);
+    changed();
     return { ok: true, grant: g };
   }
   return Object.freeze({
@@ -145,6 +171,7 @@ export function createGrantStore({ now = Date.now, random = randomBytes, homes =
       if (decision === 'approve') { g.status = 'active'; g.expires = now() + g.hours * 3600_000; } else if (decision === 'deny') g.status = 'denied';
       else return fail('invalid_decision');
       g.by = by;
+      changed();
       return { ok: true, status: state(g) };
     },
     revoke(id, { principal } = {}) {
@@ -152,11 +179,13 @@ export function createGrantStore({ now = Date.now, random = randomBytes, homes =
       if (!g || (principal !== undefined && g.principal !== null && g.principal !== principal)) return fail('unknown_grant');
       if (!['active', 'pending'].includes(state(g))) return fail(`grant_${state(g)}`);
       g.status = 'revoked';
+      changed();
       return { ok: true, grant_id: id, status: 'revoked' };
     },
     revokeAll() {
       let n = 0;
       for (const g of items.values()) if (['active', 'pending'].includes(state(g))) { g.status = 'revoked'; n++; }
+      if (n) changed();
       return n;
     },
     get(id) { const g = items.get(id); return g ? view(g) : null; },

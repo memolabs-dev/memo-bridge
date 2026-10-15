@@ -167,9 +167,11 @@ Rules the server enforces, whatever the model sends:
   carries the `host` it ran on.
 - The 9443 hub principals (Claude Code or Codex on the Mac through the private hub) need no
   workspace, and are refused only where another workspace holds a lock.
-- Locks live in the hub's memory, for both hosts. A hub restart drops them (approvals too); a
-  remote holder's next write then answers `lock_required` and it takes the lock again, or learns
-  that another conversation took it. `sessions_overview` shows `locks_since`.
+- Locks are kept by the hub for both hosts, saved in its state directory
+  (`bridge/hub-state.mjs`): they survive a hub restart or a deploy. Pending approvals and implicit
+  per-call locks do not. Without a state directory a restart drops the locks; a remote holder's
+  next write then answers `lock_required` and it takes the lock again, or learns that another
+  conversation took it. `sessions_overview` shows `locks_since` (the start of this hub process).
 - Locks compare paths as text (`..` resolved, `~/` as `/Users/memo` on the Mac, case folded on
   the Mac); they coordinate conversations, they do not replace the host policy, the signature or
   the approvals.
