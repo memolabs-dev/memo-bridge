@@ -1,10 +1,12 @@
 {
   "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "updated": "2026-10-15",
   "scope": "Repatriated SentinelX tools, part 2: operator_transfer, operator_read_media, operator_help + playbooks, memory_*, operator_snapshot, staged edits",
   "branch": "feat/operator-repatriate-tools",
   "requirements": { "total": 10, "covered": 10 },
   "acceptance": { "total": 10, "verified_automated": 10, "pending_manual": ["AC-3 ChatGPT image visibility", "AC-1 real tunnel transfer"] },
-  "todos": { "p0_open": 0, "p1_open": 3, "open": ["T11 lab-infra deploy and poppler-utils (owner)", "T12 manual acceptance from ChatGPT", "T13 merge with part 1"] },
+  "todos": { "p0_open": 0, "p1_open": 2, "open": ["T11 poppler-utils on lab (deploy done 2026-10-15; poppler-utils not verified)", "T12 manual acceptance from ChatGPT"], "done_2026_10_15": { "T13": "part 2 merged as #45, part 1 as #46", "T11 deploy part": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris)" } },
   "risks": { "critical_open": 0, "high_open": 0, "medium_open": ["R1 transfer moves data between hosts (denylist, roots, lock, journals)", "R3 ChatGPT may not show images", "memory edits not owner-approved (journaled and reversible instead)"] },
-  "verification": { "pnpm_test": "514/514", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "3/3 caught" }
+  "verification": { "pnpm_test": "514/514", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "3/3 caught" },
+  "reality": { "verified_on": "2026-10-15", "merged": "#45", "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris)", "notes": ["part 1 (repatriate) merged as #46"] }
 }

@@ -1,10 +1,11 @@
 {
   "phase": "READY_FOR_MANUAL_ACCEPTANCE",
   "scope": "One-way sync from the Coordinator to the GitHub Projects board memolabs-dev/1 (branch feat/project-sync)",
-  "updated": "2026-10-14",
+  "updated": "2026-10-15",
   "acceptance": { "total": 10, "verified": 10, "failed": 0, "pending_manual": ["live mutations on memolabs-dev/1 with MEMO_BRIDGE_PROJECT set"] },
   "todos": { "p0_open": 0, "p1_open": 0 },
   "risks": { "critical_open": 0, "high_open": 0, "notes": "board writes run under the operator gh login (project scope); VPS runner has no ambient gh login, so failures there are journaled only" },
   "verification": { "npm_test": "365/365", "smoke": "pass (51 tools)", "build": "pass", "test_deploy": "113 OK", "live_read_only": "queries ok, mutations refused by the check, schema introspected" },
-  "ready_for_manual_acceptance": true
+  "ready_for_manual_acceptance": true,
+  "reality": { "verified_on": "2026-10-15", "merged": "#22", "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris)", "notes": ["whether MEMO_BRIDGE_PROJECT is set on lab, and any live board mutation, are not recorded"] }
 }

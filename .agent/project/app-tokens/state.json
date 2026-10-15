@@ -1,18 +1,19 @@
 {
   "phase": "READY_FOR_MANUAL_ACCEPTANCE",
   "scope": "GitHub App installation tokens for the VPS runner (memo-bridge feat/app-tokens, lab-infra feat/memo-runner-app-tokens)",
-  "updated": "2026-10-14",
-  "requirements": { "total": 14, "verified_offline": 13, "pending_runtime": ["AT-R14"] },
+  "updated": "2026-10-15",
+  "requirements": { "total": 14, "verified_offline": 13, "pending_runtime": [], "verified_live": { "AT-R14": "2026-10-15: app_token_minted for memolabs-dev/memo-bridge on host vps at 08:40:41Z, commit c034cce pushed and PR #59 opened by memo-labs-automation from the VPS runner (.agent/project/vps-runner-proof/evidence.md)" } },
   "todos": [
     { "id": "T1", "title": "credential provider module (JWT, mint, narrow, cache, PAT fallback)", "priority": "P0", "status": "DONE", "evidence": "tests/github-app.test.mjs" },
     { "id": "T2", "title": "wire ledger, git push (askpass), PR creation", "priority": "P0", "status": "DONE", "evidence": "tests/github-app.test.mjs, tests/credentials.test.mjs" },
     { "id": "T3", "title": "agent-cli startup checks", "priority": "P0", "status": "DONE", "evidence": "tests/github-app.test.mjs agent-cli" },
     { "id": "T4", "title": "docs RUNNER_VPS.md, SECURITY.md, README", "priority": "P1", "status": "DONE", "evidence": "diff" },
     { "id": "T5", "title": "lab-infra role: app-key credential, ids in group_vars, push-gh optional", "priority": "P0", "status": "DONE", "evidence": "lab-infra branch tests" },
-    { "id": "T6", "title": "owner: add memo-bridge and uni-protocol (and every pilot repo) to the installation", "priority": "P1", "status": "OWNER" },
-    { "id": "T7", "title": "live mint, push, PR and ledger claim from the VPS after deploy", "priority": "P1", "status": "PENDING_DEPLOY" }
+    { "id": "T6", "title": "owner: add memo-bridge and uni-protocol (and every pilot repo) to the installation", "priority": "P1", "status": "OWNER", "note": "2026-10-15: memo-bridge is in the installation (token minted for memolabs-dev/memo-bridge); the other pilot repositories, uni-protocol included, are not verified" },
+    { "id": "T7", "title": "live mint, push, PR and ledger claim from the VPS after deploy", "priority": "P1", "status": "VERIFYING", "evidence": "2026-10-15: live mint, push and PR from the VPS (AT-R14, .agent/project/vps-runner-proof/evidence.md). Not recorded: a ledger claim from the VPS with the App token" }
   ],
   "open_risks": ["ledger preflight read of pilot Issues with a .github-narrowed token (inference, verify live)"],
-  "pushed": false,
-  "deployed": false
+  "pushed": true,
+  "deployed": true,
+  "reality": { "verified_on": "2026-10-15", "merged": "#23", "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris)", "notes": ["fixes #24 and #26 merged", "open risk on the ledger preflight read stays open: no ledger claim from the VPS is recorded"] }
 }

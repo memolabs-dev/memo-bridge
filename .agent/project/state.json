@@ -1,1 +1,141 @@
-{"phase": "VERIFYING", "scope": "Phase 2 contract alignment + Phase 3 Mac runner (v0.4.0, branch feat/phase-3-mac-runner)", "requirements": {"total": 14, "covered": 14}, "todos": {"p0_open": 0, "p1_open": 4, "p2_open": 6}, "acceptance": {"total": 14, "verified": 12, "failed": 0, "pending": 2}, "risks": {"critical_open": 0, "high_open": 0, "medium_open": 1, "notes": "review findings 1-3 (HIGH) fixed with regression tests; open medium: owner-equivalent jobs when MEMO_BRIDGE_JOB_SANDBOX=off and process-tracking escape window (documented residual risks); low: claimless worktree_create (owner decision)"}, "review": {"commit": "933e759", "confirmed": 9, "fixed": 9, "plausible": 5, "plausible_fixed": 4, "plausible_open": ["worktree_create without claim (owner decision)"]}, "verification": {"status": "local_green_pending_ci_and_independent_reverification", "npm_test": "136/136", "smoke": "pass (48 tools, round trip, job sandboxed)", "build": "pass (index.mjs + job-runner.mjs)", "mutation_checks": "16/16 caught"}, "ready_for_manual_acceptance": false}
+{
+  "role": "index",
+  "updated": "2026-10-15",
+  "note": "Index of the per-project states under .agent/project/. Each project's own state.json is canonical. Until 2026-10-15 this file held the Phase 2 and 3 state, kept below as phase_2_3.",
+  "projects": {
+    "phase-4": {
+      "state": ".agent/project/phase-4/state.json",
+      "phase": "VERIFYING",
+      "merged": "#19"
+    },
+    "phase-5": {
+      "state": ".agent/project/phase-5/state.json",
+      "phase": "VERIFYING",
+      "merged": "#20"
+    },
+    "phase-6": {
+      "state": ".agent/project/phase-6/state.json",
+      "phase": "IMPLEMENTING",
+      "merged": "#25, #27, #31, #33"
+    },
+    "app-tokens": {
+      "state": ".agent/project/app-tokens/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#23, #24, #26"
+    },
+    "job-two-phase": {
+      "state": ".agent/project/job-two-phase/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#30, #58"
+    },
+    "permanent-grants": {
+      "state": ".agent/project/permanent-grants/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#52"
+    },
+    "repatriate": {
+      "state": ".agent/project/repatriate/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#46"
+    },
+    "repatriate-tools": {
+      "state": ".agent/project/repatriate-tools/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#45"
+    },
+    "project-sync": {
+      "state": ".agent/project/project-sync/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#22"
+    },
+    "multi-session": {
+      "state": ".agent/project/multi-session/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#32"
+    },
+    "notify-tail": {
+      "state": ".agent/project/notify-tail/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#49"
+    },
+    "handoff-learning": {
+      "state": ".agent/project/handoff-learning/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#50"
+    },
+    "delegation": {
+      "state": ".agent/project/delegation/state.json",
+      "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+      "merged": "#53"
+    },
+    "client-cert-require": {
+      "state": ".agent/project/client-cert-require/state.json",
+      "phase": "DONE",
+      "merged": "#55, #56"
+    },
+    "hub-durable-state": {
+      "state": ".agent/project/hub-durable-state/state.json",
+      "phase": "DONE",
+      "merged": "#63, #64",
+      "note": "live: /freeze survived a hub restart on lab (2026-10-15); grants, locks and inbox covered by tests only"
+    },
+    "vps-runner-proof": {
+      "evidence": ".agent/project/vps-runner-proof/evidence.md",
+      "phase": "evidence only, no state"
+    }
+  },
+  "reality": {
+    "verified_on": "2026-10-15",
+    "merged": "every PR listed under projects, into main of memolabs-dev/memo-bridge",
+    "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris); services memo-bridge-hub, memo-bridge-runner, memo-operator-agent, memo-operator-root active",
+    "notes": [
+      "pnpm test 603/603 (2026-10-15); pnpm run smoke 61 stdio tools (2026-10-15)",
+      "CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14)",
+      "Phases 4 to 6 are deployed on lab; each keeps its own phase above because runtime acceptance items remain"
+    ]
+  },
+  "phase_2_3": {
+    "phase": "VERIFYING",
+    "scope": "Phase 2 contract alignment + Phase 3 Mac runner (v0.4.0, branch feat/phase-3-mac-runner)",
+    "requirements": {
+      "total": 14,
+      "covered": 14
+    },
+    "todos": {
+      "p0_open": 0,
+      "p1_open": 4,
+      "p2_open": 6
+    },
+    "acceptance": {
+      "total": 14,
+      "verified": 12,
+      "failed": 0,
+      "pending": 2
+    },
+    "risks": {
+      "critical_open": 0,
+      "high_open": 0,
+      "medium_open": 1,
+      "notes": "review findings 1-3 (HIGH) fixed with regression tests; open medium: owner-equivalent jobs when MEMO_BRIDGE_JOB_SANDBOX=off and process-tracking escape window (documented residual risks); low: claimless worktree_create (owner decision)"
+    },
+    "review": {
+      "commit": "933e759",
+      "confirmed": 9,
+      "fixed": 9,
+      "plausible": 5,
+      "plausible_fixed": 4,
+      "plausible_open": [
+        "worktree_create without claim (owner decision)"
+      ]
+    },
+    "verification": {
+      "status": "local_green_pending_ci_and_independent_reverification",
+      "npm_test": "136/136",
+      "smoke": "pass (48 tools, round trip, job sandboxed)",
+      "build": "pass (index.mjs + job-runner.mjs)",
+      "mutation_checks": "16/16 caught"
+    },
+    "ready_for_manual_acceptance": false,
+    "note_2026_10_15": "historical record of 2026-10-14 or earlier; phase-3 is merged (phase-4/state.json U-P4-02) and later releases build on it, but its two pending acceptance items were not re-checked in this pass"
+  }
+}

@@ -1,10 +1,12 @@
 {
   "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "updated": "2026-10-15",
   "scope": "Issue #35 job notifications (notify on background operator runs and hub jobs_submit, Telegram to the owner chat, inbox tools, sessions_overview) and issue #44 operator_read tail_lines",
   "branch": "feat/notifications-and-read-tail",
   "requirements": { "total": 13, "covered": 13 },
   "acceptance": { "total": 13, "verified_automated": 13, "pending_manual": ["real Telegram message on lab after deploy", "notify from a ChatGPT conversation through the public listener"] },
-  "todos": { "p0_open": 0, "p1_open": 1, "open": ["deploy hub and operator agents (owner, lab-infra unchanged)"] },
+  "todos": { "p0_open": 0, "p1_open": 0, "open": [], "done_2026_10_15": { "deploy hub and operator agents": "merged as #49, deployed in lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris); memo-bridge-hub and memo-operator-agent active" } },
   "risks": { "critical_open": 0, "high_open": 0, "medium_open": ["inbox and watches in hub memory: a restart drops them (results stay on hosts)", "each poll of an operator job is a T0 line in both journals (backoff to 2 min)", "Telegram message carries up to 5 redacted output lines (issue text said none; brief asked for a tail)"] },
-  "verification": { "pnpm_test": "556/556", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "24/24 caught (17 notify, 7 tail)" }
+  "verification": { "pnpm_test": "556/556", "build": "pass", "smoke": "pass (56 tools)", "mutation_checks": "24/24 caught (17 notify, 7 tail)" },
+  "reality": { "verified_on": "2026-10-15", "merged": "#49", "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris)", "notes": ["Telegram approvals and /freeze work live (2026-10-15), but a job notification message on lab and a notify from a ChatGPT conversation are not recorded, so pending_manual stays"] }
 }

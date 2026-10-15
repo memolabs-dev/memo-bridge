@@ -4,6 +4,10 @@ Branch `feat/operator-repatriate-exec`, worktree `workspace/worktrees/memo-bridg
 started from `origin/main` 255b3dc, rebased on `origin/main` e57fb0a (part 2, PR #45) at
 20:30 CEST. Not pushed, not deployed.
 
+2026-10-15: merged into main as #46 and deployed on lab in `memo_bridge_version` a8f5a60
+(2026-10-15 11:10 Paris), with memo-operator-agent and memo-operator-root active. The Mac
+reinstall and the manual acceptance items below are not recorded.
+
 ## Automated
 
 - EV-0 baseline (2026-10-14 19:45 CEST, 255b3dc): `pnpm test` 484/484.

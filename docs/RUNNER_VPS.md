@@ -4,7 +4,7 @@ The VPS runner lets an owner-authorized client run a claimed task on the VPS whi
 
 Specification: `.agent/project/phase-4/spec.md` (decisions D1 to D11, requirements REQ-P4-xx, acceptance AC-P4-xx). Deployment: lab-infra role `memo-bridge` (`docs/memo-runner.md` there). Root helpers: `deploy/README.md`.
 
-**Status (v0.5.0).** The code is complete and tested offline. Nothing is deployed. The runner ships switched off in lab-infra (`memo_runner_enabled: false`). Whatever needs a real systemd, a real GitHub token or the VPS is listed under "Still to verify on the VPS" below.
+**Status (2026-10-15).** Merged (#19) and deployed on lab (`memo_bridge_version` a8f5a60): `memo-bridge-runner` is active and lab-infra sets `memo_runner_enabled: true`; the hub logs `runtime_host` "vps". First green job: `job_jzUVCUXhVg88u91H` on 2026-10-15 10:34 Paris, exit 0, install phase with the network, then `npm test` under `PrivateNetwork=yes` (595 tests, 0 failed; `.agent/project/vps-runner-proof/evidence.md`). The same day ChatGPT committed, pushed and opened PR #59 through the runner while the Mac was asleep. Until 2026-10-14 the code was tested offline only and the runner shipped switched off. Whatever needs a real systemd, a real GitHub token or the VPS is listed under "Still to verify on the VPS" below.
 
 ## What runs where
 
@@ -214,13 +214,13 @@ Inferred from the systemd 257 man pages or the code, not yet exercised (TODO-P4-
 - A fresh instance picking up its `/run` drop-in without `daemon-reload` (the dispatcher checks `DropInPaths` and reloads once otherwise).
 - `%d` expanded in `Environment=` (the runner's `MEMO_BRIDGE_AGENT_CONFIG`).
 - Git 2.47.3 (VPS) with `-c credential.helper=` and `GIT_ASKPASS` under `GIT_TERMINAL_PROMPT=0` (checked with git 2.54 locally).
-- A live App mint from the runner (only the Mac helper `with-app-token.py` has minted live, 2026-10-13), a push and a pull request with the installation token, and the ledger preflight reading a pilot repository's Issue with a token narrowed to `memolabs-dev/.github`.
+- A live App mint from the runner (only the Mac helper `with-app-token.py` has minted live, 2026-10-13), a push and a pull request with the installation token, and the ledger preflight reading a pilot repository's Issue with a token narrowed to `memolabs-dev/.github`. 2026-10-15: the mint (`app_token_minted` on host `vps`), the push and the pull request (PR #59, `memo-labs-automation`) ran live; the ledger preflight is still unverified.
 - Worktree ownership between memo-runner and memo-job (setgid group, `safe.directory`, U-P4-04), and node plus the recipes under `SystemCallFilter=@system-service`.
 - Two phases: that a unit's `IPAddressAllow=localhost` is not overridden by a slice deny once `localhost` is off `memo-dev.slice`; that the private loopback answers a test server on `127.0.0.1`; that the recipe sees only `lo` in `/proc/self/net/dev`; that a failed install (`Type=oneshot`) leaves `memo-job@<id>` with a `dependency` start failure and no `ExecStopPost`; that `systemctl stop` of both units during the install ends the job `cancelled`; corepack downloading the pinned pnpm as memo-job into `jobs/<id>/cache/corepack`, and `pnpm install` under `SystemCallFilter=@system-service`.
 
 ## Known gaps (integration, owner or lab-infra follow-ups)
 
-- **Hub unit.** The adopted `memo-bridge-hub.service` sets neither `MEMO_BRIDGE_HUB_RUNTIME_HOST=vps` nor a read-only token. Without the first, the hub lists no runtime tool and flow E cannot start (AC-P4-01). lab-infra PR-B must add it.
+- **Hub unit.** The adopted `memo-bridge-hub.service` sets neither `MEMO_BRIDGE_HUB_RUNTIME_HOST=vps` nor a read-only token. Without the first, the hub lists no runtime tool and flow E cannot start (AC-P4-01). lab-infra PR-B must add it. 2026-10-15: the deployed hub logs `runtime_host` "vps", so the first part is done; the read-only token is not checked here.
 - **Pilot repositories on the VPS.** `workspace_open` needs a registry (`<root>/repos/PROJECTS.md`) and clones of the pilot repositories under `<root>/repos`, owned by memo-runner. lab-infra does not create them yet.
 - **Project discovery through the hub.** `projects_list` and the `observe_*` tools are not forwarded, so a hub client must know the project name (the pilot list in `runner.json`).
 - **Release checksum.** lab-infra pins the sha but does not verify `sums_sha256` yet.

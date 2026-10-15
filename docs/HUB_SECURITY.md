@@ -27,7 +27,7 @@ Operator tools and their rules: `docs/OPERATOR.md`.
 
 ## Phase 5 (v0.6.0): two listeners, OAuth on the public one only
 
-Status: code on branch `feat/phase-5-chatgpt-remote` (v0.6.0), **not merged and not deployed**. End-to-end description: `docs/REMOTE_CHATGPT.md`.
+Status on 2026-10-15: merged (#20, client certificate required since #55 and #56) and **deployed on lab** (`memo_bridge_version` a8f5a60). The hub logs `client_cert` "require" and ChatGPT calls tools through the public listener. End-to-end description: `docs/REMOTE_CHATGPT.md`.
 
 ### Two listeners (decision D4)
 
@@ -69,7 +69,7 @@ Status on 2026-10-14: **closed** (`remote_writes: disabled` in lab-infra; lab-in
 
 ## Phase 4 (v0.5.0): protocol v2, principals and the write gate
 
-Status: code on branch `feat/phase-4-vps-runner` (v0.5.0), **not merged and not deployed**. The deployed hub is still the v0.2 release below.
+Status on 2026-10-15: merged (#19) and **deployed on lab** (`memo_bridge_version` a8f5a60): memo-bridge-hub and memo-bridge-runner are active, the hub logs `runtime_host` "vps" and `mutating_ops` "owner". The v0.2 release below is history.
 
 ### Protocol v2 (hub to agent)
 
@@ -107,7 +107,7 @@ The rule above still holds: **no write-capable tool on the hub until the root CI
 - no container on host networking can reach it, or each one is justified;
 - the emargo GitHub runner no longer runs as root and the dead root `drop` runner is disabled (lab-infra #161, TODO-P4-25, owner window O-5).
 
-Until then `MEMO_BRIDGE_HUB_MUTATING_OPS` stays unset on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS` stays unset on the runner: through the hub, the owner can read runner state (`jobs_list`, `job_status`, `job_results`, `host_resources`, `workspace_list`...) but cannot claim, submit, push or cancel. Opening the gate (TODO-P4-40) sets both: `MEMO_BRIDGE_HUB_MUTATING_OPS=owner` on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS={"hub:owner":"owner","hub:readonly":"read"}` on the runner. Status on 2026-10-14: **gate closed** (AC-P4-14 not verified, #161 open). The runner authorizes every op again on its side.
+Until the gate opens `MEMO_BRIDGE_HUB_MUTATING_OPS` stays unset on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS` stays unset on the runner: through the hub, the owner can read runner state (`jobs_list`, `job_status`, `job_results`, `host_resources`, `workspace_list`...) but cannot claim, submit, push or cancel. Opening the gate (TODO-P4-40) sets both: `MEMO_BRIDGE_HUB_MUTATING_OPS=owner` on the hub and `MEMO_BRIDGE_HUB_PRINCIPALS={"hub:owner":"owner","hub:readonly":"read"}` on the runner. Status on 2026-10-14: gate closed (AC-P4-14 not verified, #161 open). Status on 2026-10-15: **gate open**: the hub runs with `MEMO_BRIDGE_HUB_MUTATING_OPS=owner` (hub log, a8f5a60); lab-infra #161 closed on 2026-10-14 and no GitHub Actions runner on lab runs as root (`ps`, 2026-10-15). The other AC-P4-14 checks (loopback only, Traefik routes, host-network containers) and the runner's `MEMO_BRIDGE_HUB_PRINCIPALS` value are not re-verified in this record. The runner authorizes every op again on its side.
 
 Known pre-Phase 4 exposure: on the VPS, `/var/lib/memo-bridge/agent/agent.key` is `root:memo-bridge 0640`, so the hub's user can read the VPS agent key (the legacy `memo-bridge-vps-agent` runs as memo-bridge and needs it). Once the runner replaces that agent, the key is only needed through `LoadCredential=` (root reads it); tightening the file is a lab-infra change on a live file, left to the owner (it must be undone if the immediate rollback brings the legacy agent back).
 

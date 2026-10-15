@@ -1,19 +1,21 @@
 {
   "phase": "VERIFYING",
   "scope": "Phase 4 VPS runner (memo-bridge v0.5.0, branch feat/phase-4-vps-runner; lab-infra branch feat/memo-bridge-role)",
-  "summary": "Code complete and green locally in both repositories, verifier findings 1 to 8 fixed with regression tests (commits on both branches, not pushed). Nothing deployed. Runtime acceptance on the VPS is blocked on owner actions (O-1 to O-7) and on lab-infra follow-ups FU-1, FU-2.",
-  "updated": "2026-10-14",
+  "summary": "Merged (#19, later fixes #58 and #62) and deployed on lab (memo_bridge_version a8f5a60, 2026-10-15): memo-bridge-hub and memo-bridge-runner active, lab-infra group_vars memo_runner_enabled true, hub logs runtime_host vps and mutating_ops owner. lab-infra #161 closed 2026-10-14, no root GitHub runner on lab. First green VPS job and a full write cycle with the Mac asleep on 2026-10-15. Runtime acceptance is still partial and P0 runtime work stays open: see remaining.",
+  "summary_2026_10_14": "Code complete and green locally in both repositories, verifier findings 1 to 8 fixed with regression tests (commits on both branches, not pushed). Nothing deployed. Runtime acceptance on the VPS is blocked on owner actions (O-1 to O-7) and on lab-infra follow-ups FU-1, FU-2.",
+  "updated": "2026-10-15",
   "requirements": {
     "total": 22,
     "covered": 22
   },
   "acceptance": {
     "total": 22,
-    "verified": 3,
+    "verified": 4,
     "verified_ids": [
       "AC-P4-02",
       "AC-P4-07",
-      "AC-P4-11"
+      "AC-P4-11",
+      "AC-P4-22"
     ],
     "automated_part_verified_runtime_pending": [
       "AC-P4-04",
@@ -22,8 +24,7 @@
       "AC-P4-10",
       "AC-P4-17",
       "AC-P4-18",
-      "AC-P4-20",
-      "AC-P4-22"
+      "AC-P4-20"
     ],
     "partial": [
       "AC-P4-01",
@@ -40,7 +41,13 @@
       "AC-P4-14",
       "AC-P4-19"
     ],
-    "failed": 0
+    "failed": 0,
+    "notes": {
+      "AC-P4-22": "verified 2026-10-15: CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14). The Mac local executor path is covered by the same automated suite.",
+      "AC-P4-01": "still partial. 2026-10-15: Mac asleep (lid closed) 08:39:21Z to 08:41:10Z, hub saw agents mac and operator-mac disconnected 08:39:40Z to 08:41:35Z; in that window ChatGPT committed, pushed and opened PR #59 through the VPS runner (bot memo-labs-automation), merged by Land at 08:44Z (.agent/project/vps-runner-proof/evidence.md). The \"unknown\" seen in that window came from host_capabilities, not host_status (hub journal: the only host tool called was host_capabilities at 08:39:38Z, 2 s before the hub saw the disconnect); host_capabilities and host_resources now carry the hub's view of the Mac agent (#62, issue #61, deployed in a8f5a60). Still to do: one live host_status mac answering host_offline with the Mac asleep.",
+      "AC-P4-14": "partial: the root runner part is met (lab-infra #161 closed 2026-10-14 13:03; ps on lab 2026-10-15: GitHub Actions runners run as github-runner-* users, none as root). Not re-verified in this record: ss -ltnp loopback only, the Traefik route list, host-network containers.",
+      "AC-P4-12": "not started: the green job ran its recipe with PrivateNetwork=yes and IPAddressAllow=localhost (job_jzUVCUXhVg88u91H (unit jbe99e88194017cf2506b8ff6a082031), 2026-10-15 10:34 Paris, exit 0: install phase pnpm install --frozen-lockfile --ignore-scripts with network, recipe npm test with PrivateNetwork=yes and IPAddressAllow=localhost, 595 tests 0 failed (.agent/project/vps-runner-proof/evidence.md)), but the isolation probe recipe has not been run."
+    }
   },
   "todos": {
     "done": {
@@ -70,28 +77,31 @@
         "TODO-P4-24",
         "TODO-P4-27",
         "TODO-P4-28"
-      ]
+      ],
+      "closed_2026_10_15": {
+        "TODO-P4-25": "lab-infra #161 closed 2026-10-14 13:03; ps on lab 2026-10-15: GitHub Actions runners run as github-runner-* users, none as root",
+        "FU-1": "hub logs runtime_host vps at memo_bridge_version a8f5a60 (2026-10-15)",
+        "TODO-P4-40": "hub logs mutating_ops owner at memo_bridge_version a8f5a60 (2026-10-15). Caveat: its gate AC-P4-14 is only partly verified (root runner part); the gate is open in fact."
+      }
     },
     "open": {
       "TODO-P4-01": {
         "p": "P0",
         "blocked_on": "O-7a (spike window) or a Debian 13 VM; man pages already read and cited"
       },
-      "TODO-P4-25": {
-        "p": "P0",
-        "blocked_on": "O-5, lab-infra #161"
-      },
       "TODO-P4-30": {
         "p": "P0",
-        "blocked_on": "O-4, O-6"
+        "blocked_on": "O-4, O-6",
+        "status": "deployed in fact (lab-infra role deployed, memo-bridge-hub active at a8f5a60); the /health 200 and 401 path checks and the unchanged-unit diff are not recorded"
       },
       "TODO-P4-31": {
         "p": "P0",
-        "blocked_on": "TODO-P4-01, 30, O-1, O-2, FU-1, FU-2"
+        "status": "deployed in fact: memo-bridge-runner active, memo_runner_enabled true; first green job job_jzUVCUXhVg88u91H (unit jbe99e88194017cf2506b8ff6a082031), 2026-10-15 10:34 Paris, exit 0: install phase pnpm install --frozen-lockfile --ignore-scripts with network, recipe npm test with PrivateNetwork=yes and IPAddressAllow=localhost, 595 tests 0 failed (.agent/project/vps-runner-proof/evidence.md). Not recorded: probe smoke, systemd-analyze security on the runner and job units.",
+        "blocked_on_2026_10_14": "TODO-P4-01, 30, O-1, O-2, FU-1, FU-2"
       },
       "TODO-P4-32": {
         "p": "P0",
-        "blocked_on": "31, 25"
+        "blocked_on": "31 (TODO-P4-25 closed 2026-10-15)"
       },
       "TODO-P4-33": {
         "p": "P0",
@@ -99,15 +109,12 @@
       },
       "TODO-P4-34": {
         "p": "P0",
-        "blocked_on": "31, O-7d"
+        "blocked_on": "31, O-7d",
+        "status": "partial: 2026-10-15: Mac asleep (lid closed) 08:39:21Z to 08:41:10Z, hub saw agents mac and operator-mac disconnected 08:39:40Z to 08:41:35Z; in that window ChatGPT committed, pushed and opened PR #59 through the VPS runner (bot memo-labs-automation), merged by Land at 08:44Z (.agent/project/vps-runner-proof/evidence.md). Not recorded: pilot Issue claim, job longer than the TTL, checkpoint (worktree_push checkpoint failed with session_required, fixed in #62, issue #60, deployed in a8f5a60; not re-run live), release."
       },
       "TODO-P4-35": {
         "p": "P1",
         "blocked_on": "31"
-      },
-      "TODO-P4-40": {
-        "p": "P1",
-        "blocked_on": "25, 32 (write gate AC-P4-14)"
       },
       "TODO-P4-41": {
         "p": "P1",
@@ -121,15 +128,11 @@
         "p": "P2",
         "blocked_on": "24 (infrastructure-guardian upstream)"
       },
-      "FU-1": {
-        "p": "P0",
-        "repo": "lab-infra",
-        "task": "memo-bridge-hub.service: MEMO_BRIDGE_HUB_RUNTIME_HOST=vps (and readonly.token once O-9 approves it); without it the hub lists no runtime tool and flow E cannot start (AC-P4-01)"
-      },
       "FU-2": {
         "p": "P0",
         "repo": "lab-infra",
-        "task": "clone the pilot repositories into /var/lib/memo-runner/repos (memo-runner) and write repos/PROJECTS.md, which workspace_open needs"
+        "task": "clone the pilot repositories into /var/lib/memo-runner/repos (memo-runner) and write repos/PROJECTS.md, which workspace_open needs",
+        "status": "probably done, not verified: workspace_open on host vps needs repos/PROJECTS.md and the clone, and the 2026-10-15 write cycle (PR #59) ran on the VPS runner; this is an inference, the clone and registry were not inspected"
       },
       "FU-3": {
         "p": "P2",
@@ -147,15 +150,13 @@
         "task": "client_request_id on the other mutating ops (task_claim, worktree_push...)"
       }
     },
-    "p0_open": 9,
-    "p1_open": 4,
+    "p0_open": 7,
+    "p1_open": 3,
     "p2_open": 4
   },
   "risks": {
-    "critical_open": 1,
-    "critical_ids": [
-      "R-P4-01"
-    ],
+    "critical_open": 0,
+    "critical_ids": [],
     "high_open": 4,
     "high_ids": [
       "R-P4-02 (needs AC-P4-19)",
@@ -166,6 +167,9 @@
     "reduced": [
       "R-P4-05 to medium: GIT_SAFETY on every runner Git call, GIT_DIR/GIT_WORK_TREE pinned after one validated read of the .git link, commit/push refused while a VPS job is active (worktrees and credentials tests)",
       "R-P4-16 closed: 16 KiB frames with parts (agent-protocol tests)"
+    ],
+    "closed_2026_10_15": [
+      "R-P4-01 closed: lab-infra #161 closed 2026-10-14 13:03; ps on lab 2026-10-15: GitHub Actions runners run as github-runner-* users, none as root"
     ]
   },
   "unknowns": {
@@ -189,7 +193,7 @@
     ]
   },
   "verification": {
-    "status": "local_green_runtime_pending",
+    "status": "ci_green_runtime_partial",
     "npm_test": "233/233 (Node 24.21.0, macOS)",
     "test_runner": "122/122 node + 113 python",
     "test_hub": "23/23",
@@ -198,7 +202,10 @@
     "build": "pass (index.mjs + job-runner.mjs)",
     "lab_infra": "test_memo_runner.py 49 OK; scripts/tests.sh 111 green, 0 red",
     "mutations_for_verifier_fixes": "7/7 caught (finding 1 x2, 2, 3, 5, 6; finding 5 job_active check has two layers)",
-    "ci": "not run (branch not pushed); Node 22 and the Python helpers on Linux unverified"
+    "ci": "CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14)",
+    "pnpm_test_2026_10_15": "603/603 (pnpm test)",
+    "vps_job": "job_jzUVCUXhVg88u91H (unit jbe99e88194017cf2506b8ff6a082031), 2026-10-15 10:34 Paris, exit 0: install phase pnpm install --frozen-lockfile --ignore-scripts with network, recipe npm test with PrivateNetwork=yes and IPAddressAllow=localhost, 595 tests 0 failed (.agent/project/vps-runner-proof/evidence.md)",
+    "earlier_vps_job": "j338067f failed with 226/NAMESPACE (jobs/<id>/cache missing), fixed by #58"
   },
   "ready_for_manual_acceptance": false,
   "verifier_findings": {
@@ -210,5 +217,33 @@
     "F7_runtime_write_gate": "fixed: runtime default hub grants read-only for every hub principal (RUNTIME_DEFAULT_HUB_GRANTS); enabling writes needs MEMO_BRIDGE_HUB_PRINCIPALS on the runner too; test runtime-principal 'verifier finding 7'. Open: agent.key root:memo-bridge 0640 (pre-Phase 4, owner decision)",
     "F8_job_network_edges": "partly fixed: host public addresses denied (lab-infra memo_runner_job_deny_host_addresses); AF_UNIX kept, abstract listeners checked by the AC-P4-12 probe (0 on lab 2026-10-14); tests lab-infra test_network_and_privileges, test_dispatch probe tests",
     "F4_PR_A": "no change needed"
+  },
+  "remaining": [
+    "TODO-P4-01 systemd spike (P0)",
+    "TODO-P4-30 /health and 401 checks after deploy (P0)",
+    "TODO-P4-31 probe smoke and systemd-analyze security (P0)",
+    "TODO-P4-32 G probes and product reachability checks, completing AC-P4-14 (P0)",
+    "TODO-P4-33 H tests in an approved window (P0)",
+    "TODO-P4-34 E end to end: claim, job past the TTL, checkpoint, release (P0)",
+    "FU-2 confirm the pilot clones and repos/PROJECTS.md on lab (P0, inferred done)",
+    "TODO-P4-35 resilience (P1)",
+    "TODO-P4-41 threshold calibration (P1)",
+    "TODO-P4-42 evidence, Vault update, manual checklist (P1)",
+    "AC-P4-01 one live host_status mac answering host_offline with the Mac asleep (host tools fixed in #62)",
+    "risks R-P4-02, R-P4-03, R-P4-04, R-P4-06 still high"
+  ],
+  "reality": {
+    "verified_on": "2026-10-15",
+    "merged": "#19",
+    "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris); services memo-bridge-hub, memo-bridge-runner, memo-operator-agent, memo-operator-root active",
+    "notes": [
+      "lab-infra group_vars: memo_runner_enabled true",
+      "hub logs runtime_host vps, mutating_ops owner, durable_state true, client_cert require",
+      "lab-infra #161 closed 2026-10-14 13:03; ps on lab 2026-10-15: GitHub Actions runners run as github-runner-* users, none as root",
+      "job_jzUVCUXhVg88u91H (unit jbe99e88194017cf2506b8ff6a082031), 2026-10-15 10:34 Paris, exit 0: install phase pnpm install --frozen-lockfile --ignore-scripts with network, recipe npm test with PrivateNetwork=yes and IPAddressAllow=localhost, 595 tests 0 failed (.agent/project/vps-runner-proof/evidence.md)",
+      "2026-10-15: Mac asleep (lid closed) 08:39:21Z to 08:41:10Z, hub saw agents mac and operator-mac disconnected 08:39:40Z to 08:41:35Z; in that window ChatGPT committed, pushed and opened PR #59 through the VPS runner (bot memo-labs-automation), merged by Land at 08:44Z (.agent/project/vps-runner-proof/evidence.md)",
+      "CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14)",
+      "pnpm test 603/603 on 2026-10-15"
+    ]
   }
 }

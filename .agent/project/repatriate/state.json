@@ -1,12 +1,14 @@
 {
   "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "updated": "2026-10-15",
   "scope": "Repatriation of SentinelX usage, part 1 (execution and safety): gh/git/ssh/rsync classification, standing approvals, user scripts on both hosts, process groups, Mac write roots, operator_docker, read-only fast path, implicit workspace and per-call locks",
   "branch": "feat/operator-repatriate-exec",
   "base": "origin/main e57fb0a (rebased after part 2, PR #45)",
   "started": "2026-10-14T19:39:45+02:00",
   "requirements": { "total": 17, "covered": 17 },
   "acceptance": { "total": 17, "verified_automated": 17, "pending_manual": ["real Telegram grant round trip", "operator_docker on the real lab socket", "implicit workspace on the real runtime (project ops)", "ChatGPT tool list refresh"] },
-  "todos": { "p0_open": 0, "p1_open": 0, "open_owner": ["lab-infra deploy (+ check docker.sock from the root helper sandbox)", "Mac reinstall: agent and root helper", "manual acceptance", "push and PR (not authorized here)"] },
+  "todos": { "p0_open": 0, "p1_open": 0, "open_owner": ["check docker.sock from the root helper sandbox on lab", "Mac reinstall: agent and root helper (not in the 2026-10-15 fact sheet)", "manual acceptance"], "done_2026_10_15": { "push and PR": "merged as #46", "lab-infra deploy": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris); memo-operator-root active" } },
   "risks": { "critical_open": 0, "high_open_accepted": ["R-R1 standing approval on a wrapper is any command as the user, root on lab for ssh", "R-R2 argv classifier gaps"], "medium_open": ["R-R3 whole home writable on the Mac", "R-R9 read-only fast path", "R-R10 implicit locks last one call"] },
-  "verification": { "baseline": "484/484", "pnpm_test": "542/542", "build": "pass", "smoke": "pass (56 tools)", "test_deploy": "124 OK", "mutation_checks": "41/43 caught, 2 equivalent mutants" }
+  "verification": { "baseline": "484/484", "pnpm_test": "542/542", "build": "pass", "smoke": "pass (56 tools)", "test_deploy": "124 OK", "mutation_checks": "41/43 caught, 2 equivalent mutants" },
+  "reality": { "verified_on": "2026-10-15", "merged": "#46", "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris)", "notes": ["Telegram approvals work live (2026-10-15); the grant round trip, operator_docker on the real socket and the implicit workspace are not recorded"] }
 }

@@ -1,7 +1,7 @@
 {
   "phase": "IMPLEMENTING",
   "scope": "Phase 6 operator access on the Mac (user memo) and the VPS lab (root through a helper), branch feat/phase-6-operator",
-  "updated": "2026-10-14",
+  "updated": "2026-10-15",
   "estimate_hours": 56,
   "lots": {
     "1": "VPS read, signing, audit, kill switch",
@@ -22,10 +22,10 @@
       "AC-P6-06",
       "AC-P6-11",
       "AC-P6-13",
-      "AC-P6-12"
+      "AC-P6-12",
+      "AC-P6-04"
     ],
     "automated_part_verified_runtime_pending": {
-      "AC-P6-04": "Telegram through a fake client; real bot pending O-P6-2",
       "AC-P6-07": "chain, helper-owned journal, anchoring; root ownership on lab pending",
       "AC-P6-09": "systemd-run argv asserted; real systemd on lab pending"
     },
@@ -33,21 +33,21 @@
       "AC-P6-08 (owner, ChatGPT)",
       "AC-P6-10 (owner, ChatGPT)"
     ],
-    "failed": 0
+    "failed": 0,
+    "evidence_2026_10_15": {
+      "AC-P6-04": "Telegram approvals, /freeze, /unfreeze and /status work live with the real bot; /freeze survived a hub restart (2026-10-15, .agent/project/hub-durable-state/evidence.md)"
+    }
   },
   "todos": {
-    "p0_open": 3,
+    "p0_open": 1,
     "p1_open": 1,
     "p2_open": 0,
     "open_ids": [
-      "TODO-P6-12",
-      "TODO-P6-13 (runtime)",
-      "TODO-P6-14 (lab-infra part)",
-      "TODO-P6-15"
+      "TODO-P6-14 (lab-infra runbook part)",
+      "TODO-P6-15 (runtime and owner ACs)"
     ]
   },
   "owner_decisions_open": [
-    "O-P6-2 Telegram bot",
     "O-P6-3 Pocket ID scopes"
   ],
   "risks": {
@@ -65,7 +65,8 @@
   "owner_decisions_closed": {
     "O-P6-1": "approval_mode dangerous on lab (2026-10-14)",
     "dev_flow_writes": "open now on memo-bridge (2026-10-14)",
-    "O-P6-5": "Mac rw roots as briefed for Lot 3: ~/memolabs, ~/Desktop, ~/Downloads, ~/Documents, /tmp (DEV-P6-29); owner to confirm at manual acceptance"
+    "O-P6-5": "Mac rw roots as briefed for Lot 3: ~/memolabs, ~/Desktop, ~/Downloads, ~/Documents, /tmp (DEV-P6-29); owner to confirm at manual acceptance",
+    "O-P6-2": "Telegram bot live (approvals and /freeze work, 2026-10-15)"
   },
   "lot_1": {
     "status": "automated verification passed; one bounded self-review done",
@@ -190,10 +191,13 @@
       ]
     },
     "TODO-P6-12": {
-      "status": "TODO"
+      "status": "DONE",
+      "evidence": [
+        "lab-infra #219 (role memo-operator) deployed; memo-operator-agent and memo-operator-root active on lab (2026-10-15); agent operator-vps connects to the hub"
+      ]
     },
     "TODO-P6-13": {
-      "status": "IMPLEMENTED_RUNTIME_PENDING",
+      "status": "DONE",
       "note": "script, bundle, plist, policy, tests done; install on the real Mac by the main session (docs/OPERATOR.md), lab-infra must copy operator-mac.pub",
       "evidence": [
         "EV-P6-45",
@@ -203,7 +207,8 @@
         "EV-P6-50",
         "EV-P6-51",
         "EV-P6-52",
-        "EV-P6-53"
+        "EV-P6-53",
+        "2026-10-15: the Mac operator is installed and agent operator-mac connects to the hub (hub journal agent_connected operator-mac 08:41:35Z, .agent/project/vps-runner-proof/evidence.md)"
       ]
     },
     "TODO-P6-14": {
@@ -215,7 +220,8 @@
       ]
     },
     "TODO-P6-15": {
-      "status": "TODO"
+      "status": "IN_PROGRESS",
+      "note": "done: CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14); deploy (lab, a8f5a60); Telegram runtime (AC-P6-04). Open: runtime AC-P6-07 (root ownership of the log on lab), AC-P6-09 (transient unit on lab), owner ACs AC-P6-08 and AC-P6-10"
     }
   },
   "unknowns_resolved": {
@@ -320,6 +326,25 @@
       "mutations_killed": "27/27"
     },
     "deviations": "spec.md section 13, Mac root follow-up (DEV-P6-32 to 39, R-MR-11, R-MR-12)",
-    "evidence": "evidence.md EV-P6-54 to EV-P6-61"
+    "evidence": "evidence.md EV-P6-54 to EV-P6-61",
+    "merged": "#33",
+    "runtime_note_2026_10_15": "operator-mac connects to the hub; the Mac root helper install with sudo and the root runtime checks are not in the 2026-10-15 fact sheet"
+  },
+  "remaining": [
+    "TODO-P6-15: runtime AC-P6-07 and AC-P6-09 on lab, owner AC-P6-08 and AC-P6-10 from ChatGPT (P0)",
+    "TODO-P6-14: lab-infra runbook docs/memo-operator.md (P1), not in the 2026-10-15 fact sheet",
+    "O-P6-3 Pocket ID operator scopes: not in the 2026-10-15 fact sheet",
+    "mac_root runtime checks (owner)",
+    "critical risks R-P6-01, R-P6-03 open"
+  ],
+  "reality": {
+    "verified_on": "2026-10-15",
+    "merged": "#25, #27, #31 (Lots 1 to 3), #33 (Mac root)",
+    "deployed": "lab, memo_bridge_version a8f5a60 (2026-10-15 11:10 Paris); services memo-bridge-hub, memo-bridge-runner, memo-operator-agent, memo-operator-root active; lab-infra #219 (role memo-operator)",
+    "notes": [
+      "agents operator-mac and operator-vps connect to the hub",
+      "hub durable state (#63) is deployed: the later items about the in-memory freeze flag and pending approvals being lost on a hub restart are addressed there (/freeze survived a hub restart, 2026-10-15)",
+      "CI green on Node 22 and 24 (jobs test (22) and test (24), which run pnpm test, test:deploy, build and smoke per .github/workflows/ci.yml) on every PR since #29 (2026-10-14)"
+    ]
   }
 }
