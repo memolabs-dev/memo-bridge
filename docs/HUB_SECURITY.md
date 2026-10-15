@@ -34,7 +34,7 @@ Status: code on branch `feat/phase-5-chatgpt-remote` (v0.6.0), **not merged and 
 | | 9443 (Phase 4, unchanged) | 9445 (Phase 5, public listener) |
 |---|---|---|
 | Bind | 127.0.0.1 | 127.0.0.1 or ::1 only; 9443 refused |
-| Reached by | loopback clients, the Mac tunnel, agents | Traefik only (`bridge.memolabs.dev`, mTLS to the OpenAI Connectors CA) |
+| Reached by | loopback clients, the Mac tunnel, agents | Traefik only (`bridge.memolabs.dev`, OpenAI Connectors CA client certificate, required by the hub for any credentialed call) |
 | Credentials | owner bearer, read-only bearer | OAuth access tokens only (`bridge/oidc.mjs`) |
 | Paths | `/mcp`, `/agent` (WebSocket), `/health` | `POST /mcp`, the two protected resource metadata paths; everything else 404, every upgrade 404 |
 | Off switch | none | not configured unless `MEMO_BRIDGE_REMOTE_CONFIG` is set; `remote_enabled: false` answers 503 |

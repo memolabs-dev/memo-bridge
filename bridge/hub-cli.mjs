@@ -102,6 +102,7 @@ audit({ event: 'hub_started', bind: '127.0.0.1:9443', runtime_host: runtimeHost,
 if (publicListener) {
   const address = await publicListener.start();
   audit({ event: 'public_listener_started', bind: address.address + ':' + address.port, resource: publicListener.verifier.resource,
-    remote_enabled: publicListener.remoteEnabled, remote_writes: publicListener.remoteWrites });
+    remote_enabled: publicListener.remoteEnabled, remote_writes: publicListener.remoteWrites,
+    client_cert: publicListener.clientCertMode });
 }
 process.on('SIGTERM', async () => { await publicListener?.stop(); await hub.stop(); process.exit(0); });

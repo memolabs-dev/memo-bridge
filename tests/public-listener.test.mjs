@@ -11,7 +11,7 @@ import WebSocket from 'ws';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
-import { createPublicListener, parsePublicListenerSettings, PRM_PATHS, MAX_PUBLIC_BODY_BYTES } from '../bridge/public-listener.mjs';
+import { certificateNames, createPublicListener, parsePublicListenerSettings, PRM_PATHS, MAX_PUBLIC_BODY_BYTES } from '../bridge/public-listener.mjs';
 import { createOidcVerifier, BASELINE_SCOPE, CANONICAL_RESOURCE, WRITE_CAPABILITIES } from '../bridge/oidc.mjs';
 import { REMOTE_DEFAULT_CEILING } from '../server/coordinator/policy.mjs';
 
@@ -233,6 +233,12 @@ test('structural separation: no bearer digest, agent keys, public bind or missin
   assert.throws(() => createPublicListener({ tlsKey, tlsCert, oidc, maxBodyBytes: 1024 * 1024 }), /maxBodyBytes/);
   const verifier = createOidcVerifier({ ...oidc, remoteWrites: 'disabled' });
   assert.throws(() => createPublicListener({ tlsKey, tlsCert, verifier, remoteWrites: 'enabled', writeGateCheck: () => ({ ok: true }) }), /disagree/);
+  // The client certificate gate is configured or refused, never half set.
+  assert.throws(() => createPublicListener({ tlsKey, tlsCert, oidc, clientCert: { mode: 'strict', infoHeader: 'x-cert' } }), /clientCert.mode/);
+  assert.throws(() => createPublicListener({ tlsKey, tlsCert, oidc, clientCert: { mode: 'require' } }), /infoHeader/);
+  assert.throws(() => createPublicListener({ tlsKey, tlsCert, oidc, clientCert: { mode: 'require', infoHeader: 'X-Cert' } }), /infoHeader/);
+  assert.equal(createPublicListener({ tlsKey, tlsCert, oidc, clientCert: { mode: 'require', infoHeader: 'x-cert' } }).clientCertMode, 'require');
+  assert.equal(createPublicListener({ tlsKey, tlsCert, oidc }).clientCertMode, 'off');
   // The module does not import the bearer check, the agent WebSocket server or the hub.
   const source = readFileSync(new URL('../bridge/public-listener.mjs', import.meta.url), 'utf8');
   for (const forbidden of ['./crypto.mjs', "from 'ws'", './hub.mjs', 'bearerValid', 'WebSocketServer']) assert.ok(!source.includes(forbidden), forbidden);
@@ -246,7 +252,7 @@ export const LAB_REMOTE_JSON = Object.freeze({
   oidc: { issuer, jwks_uri: 'http://127.0.0.1:1411/.well-known/jwks.json', audience: CANONICAL_RESOURCE, owner_sub: ownerSub,
     allowed_client_ids: [chatgpt], required_scope: 'coordinator:read', max_token_age_sec: 3600 },
   projects: ['memolabs-dev/memo-bridge'], remote_writes: 'disabled', session_binding: 'warn',
-  client_cert: { mode: 'log', info_header: 'x-forwarded-tls-client-cert-info', expected_san: 'mtls.prod.connectors.openai.com' },
+  client_cert: { mode: 'require', info_header: 'x-forwarded-tls-client-cert-info', expected_san: 'mtls.prod.connectors.openai.com' },
   budgets: { body_max_bytes: 131072, result_max_bytes: 24576, page_max_bytes: 16384, write_file_max_bytes: 98304, list_max_items: 50,
     soft_deadline_sec: 40 },
   rate_limits: { read_per_min: 60, write_per_min: 20, execute_per_min: 6, in_flight: 8, unauthorized_per_min_per_ip: 30 }
@@ -268,7 +274,12 @@ test('remote.json parsing: the lab-infra file maps onto every Phase 5 piece; bad
   assert.equal(c.softDeadlineMs, 40_000);
   assert.deepEqual(c.rateLimits, { perMinute: { read: 60, write: 20, execute: 6 }, inFlight: 8 });
   assert.deepEqual(c.authFailures, { perMinute: 30, trustedProxies: ['127.0.0.1'] });
-  assert.deepEqual(c.clientCert, { mode: 'log', infoHeader: 'x-forwarded-tls-client-cert-info', expectedSan: 'mtls.prod.connectors.openai.com' });
+  assert.deepEqual(c.clientCert, { mode: 'require', infoHeader: 'x-forwarded-tls-client-cert-info', expectedSan: 'mtls.prod.connectors.openai.com' });
+  for (const mode of ['off', 'log', 'require']) {
+    const out = parsePublicListenerSettings({ ...LAB_REMOTE_JSON, client_cert: { ...LAB_REMOTE_JSON.client_cert, mode } });
+    assert.equal(out.config?.clientCert.mode, mode, JSON.stringify(out));
+  }
+  assert.equal(parsePublicListenerSettings({ ...LAB_REMOTE_JSON, client_cert: undefined }).config.clientCert.mode, 'off', 'absent: off');
   const minimal = parsePublicListenerSettings({ version: 1, public_host: HOST, projects: ['drop'],
     oidc: { issuer, audience: CANONICAL_RESOURCE, owner_sub: ownerSub, allowed_client_ids: { [chatgpt]: 'chatgpt' } } });
   assert.equal(minimal.ok, true, JSON.stringify(minimal));
@@ -284,7 +295,8 @@ test('remote.json parsing: the lab-infra file maps onto every Phase 5 piece; bad
     [with_(r => { r.oidc.required_scope = 'hosts:read'; }), 'oidc.required_scope'],
     [with_(r => { r.oidc.ceiling = ['root']; }), 'oidc.ceiling'], [with_(r => { r.oidc.typo = 1; }), 'oidc.typo'],
     [with_(r => { r.remote_writes = 'on'; }), 'remote_writes'], [with_(r => { r.allowed_origins = ['http://chatgpt.com']; }), 'allowed_origins'],
-    [with_(r => { r.trusted_proxies = ['proxy.example']; }), 'trusted_proxies'], [with_(r => { r.client_cert.mode = 'require'; }), 'client_cert.mode'],
+    [with_(r => { r.trusted_proxies = ['proxy.example']; }), 'trusted_proxies'], [with_(r => { r.client_cert.mode = 'strict'; }), 'client_cert.mode'],
+    [with_(r => { r.client_cert.mode = 'Require'; }), 'client_cert.mode'], [with_(r => { r.client_cert.info_header = 'X-Cert'; }), 'client_cert.info_header'],
     [with_(r => { r.budgets.body_max_bytes = 1024 * 1024; }), 'budgets.body_max_bytes'],
     [with_(r => { r.budgets.write_file_max_bytes = 200_000; }), 'budgets.write_file_max_bytes'],
     [with_(r => { r.budgets.soft_deadline_sec = 500; }), 'budgets.soft_deadline_sec'],
@@ -347,4 +359,21 @@ test('hub-cli refuses to start on a bad remote.json, the old OIDC mode, or remot
     encoding: 'utf8', timeout: 20000, env: { PATH: process.env.PATH, MEMO_BRIDGE_SECRETS: secrets, MEMO_BRIDGE_REMOTE_CONFIG: 'remote.json' } });
   assert.notEqual(relative.status, 0);
   assert.match(relative.stderr, /absolute path/);
+});
+
+test('certificate names: Traefik info entries are parsed exactly, never by substring', () => {
+  const esc = text => encodeURIComponent(text).replace(/%20/g, '+');
+  const leaf = esc('Subject="CN=mtls.prod.connectors.openai.com,O=OpenAI";Issuer="CN=OpenAI-Connectors-mTLS-CA,O=OpenAI";NA="1798761600";SAN="mtls.prod.connectors.openai.com,other.example"');
+  const ca = esc('Subject="CN=OpenAI Connectors CA,O=OpenAI";Issuer="CN=OpenAI-Root-CA"');
+  assert.deepEqual(certificateNames(`${leaf},${ca}`), {
+    sans: ['mtls.prod.connectors.openai.com', 'other.example'], commonNames: ['mtls.prod.connectors.openai.com', 'OpenAI Connectors CA'] });
+  // A look-alike name is not the expected one: exact values only.
+  const lookalike = certificateNames(esc('Subject="CN=x";SAN="evil-mtls.prod.connectors.openai.com.example"'));
+  assert.ok(!lookalike.sans.includes('mtls.prod.connectors.openai.com'));
+  assert.deepEqual(lookalike.commonNames, ['x']);
+  // The issuer's CN is not the subject's.
+  assert.deepEqual(certificateNames(esc('Issuer="CN=mtls.prod.connectors.openai.com"')).commonNames, []);
+  // Malformed escapes and empty values yield nothing.
+  assert.deepEqual(certificateNames('%E0%A4%A'), { sans: [], commonNames: [] });
+  assert.deepEqual(certificateNames(''), { sans: [], commonNames: [] });
 });
