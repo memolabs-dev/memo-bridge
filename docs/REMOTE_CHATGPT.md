@@ -20,9 +20,11 @@ and whatever a tool description or annotation says.
 
 ```
 ChatGPT (OpenAI connector, client certificate)
-  -> Traefik, bridge.memolabs.dev: exact paths, mTLS to the OpenAI Connectors CA, rate limit
+  -> Traefik, bridge.memolabs.dev: exact paths, client certificate verified against the OpenAI
+     Connectors CA when given (VerifyClientCertIfGiven), its info forwarded, rate limit
   -> hub public listener 127.0.0.1:9445 (bridge/public-listener.mjs), OIDC only
-       Host, kill switch, path, method, Origin, 401 flood bucket, token, content type, 128 KiB
+       Host, kill switch, path, method, Origin, 401 flood bucket, bare 401 challenge,
+       client certificate required (403), token, content type, 128 KiB
   -> remote surface (bridge/remote-surface.mjs): the remote tool set, gate layer 1, bounds
   -> forwarder (bridge/forward.mjs): request id, session hash, rate limits, soft deadline, journal
   -> hub v2 envelope {op, args, principal:{id, client_type}, meta:{request_id, client_session}}
@@ -263,6 +265,40 @@ outcome shows in `workspace_status` (`requests`) and `task_status`. The hub give
 call a `client_request_id` when the model did not; `task_claim`, `worktree_push`, `jobs_submit`
 and `github_create_pr` accept one, and a retry with the same id returns the first result.
 
+## Client certificate: only ChatGPT calls tools
+
+Owner decision of 2026-10-15 (option A): only ChatGPT, through OpenAI's connector client
+certificate, calls tools on the public endpoint. The check is split between Traefik and the hub,
+because TLS client authentication applies per SNI host, not per path, and ChatGPT's discovery
+requests carry no certificate: with `RequireAndVerifyClientCert` on the route (2026-10-14) the
+discovery never completed.
+
+- Traefik (`clientAuthType: VerifyClientCertIfGiven`, the OpenAI Connectors CA as the only trust
+  anchor) refuses the handshake for a certificate from anywhere else, strips client-sent
+  `X-Forwarded-Tls-Client-Cert*` headers at the entrypoint and, through `passTLSClientCert`,
+  forwards the info of a verified certificate only.
+- The hub, with `client_cert.mode: "require"`, answers `403 {"error":"client_cert_required"}` to
+  every `POST /mcp` that carries an `Authorization` header without that info, or whose
+  certificate does not name `client_cert.expected_san` (an exact SAN value, else the exact subject
+  CN). This covers `initialize`, `tools/list` and every `tools/call`. The check runs before the
+  token is verified: a token replayed from outside OpenAI learns nothing about its validity and
+  does not charge the 401 flood bucket. Journal: `public_refused`, reason `client_cert_required`,
+  with the `client_cert` and `client_cert_san` booleans.
+- Left open without a certificate: the two protected-resource metadata paths and the bare 401
+  challenge (`POST /mcp` with no `Authorization`). They are ChatGPT's discovery: in the Traefik
+  access log of 2026-10-14 each connection starts with an unauthenticated `POST /mcp` (401) and
+  the metadata fetch, from OpenAI addresses, next to the authenticated calls. Neither runs a tool
+  or says more than the public metadata document. The 401 line now records `client_cert` too, so
+  the journal shows whether those requests ever carry the certificate.
+
+Evidence before the switch (hub journal, 2026-10-13 to 2026-10-15): 222 authenticated requests,
+all with `client_cert: true` and `client_cert_san: true`; 24 refusals at 401 (22 bare
+challenges, 2 expired tokens), whose lines did not record the certificate then.
+
+`client_cert.mode: "log"` keeps the booleans without refusing anything; `"off"` (the default when
+`client_cert` is absent) does neither. lab-infra renders `"require"` and refuses an optional TLS
+client certificate on a public route unless the hub's mode is `"require"`.
+
 ## Rate limits and journal
 
 Per principal and class: read 60, write 20, execute 6 per minute, 8 calls in flight; a refusal is
@@ -274,8 +310,9 @@ not counted.
 One journald line per call: `{at, request_id, principal, client_ref, op, outcome, code, ms,
 bytes}`. The runtime event carries the same `request_id`, with `via: hub` and
 `client_type: chatgpt`. Never arguments, tokens, session values or file contents. With
-`client_cert.mode: "log"` the request line adds `client_cert` and `client_cert_san` (booleans)
-from Traefik's certificate info header (U-P5-08).
+`client_cert.mode` `"log"` or `"require"`, the request line, the 401 lines and the
+`client_cert_required` refusal add `client_cert` and `client_cert_san` (booleans) from Traefik's
+certificate info header (U-P5-08), never the certificate itself.
 
 ## Configuration: remote.json
 
@@ -304,7 +341,7 @@ elided):
   "projects": ["memolabs-dev/memo-bridge"],
   "remote_writes": "disabled",
   "session_binding": "warn",
-  "client_cert": {"mode": "log", "info_header": "x-forwarded-tls-client-cert-info", "expected_san": "mtls.prod.connectors.openai.com"},
+  "client_cert": {"mode": "require", "info_header": "x-forwarded-tls-client-cert-info", "expected_san": "mtls.prod.connectors.openai.com"},
   "budgets": {"body_max_bytes": 131072, "result_max_bytes": 24576, "page_max_bytes": 16384,
               "write_file_max_bytes": 98304, "list_max_items": 50, "soft_deadline_sec": 40},
   "rate_limits": {"read_per_min": 60, "write_per_min": 20, "execute_per_min": 6, "in_flight": 8,
@@ -357,8 +394,9 @@ measured in AC-P5-19); 3600 is a placeholder until then.
 ## Not verified yet (live window)
 
 Whether Pocket ID issues `typ: at+jwt` with a `client_id` claim and the expected scopes
-(U-P5-02), whether ChatGPT sends an `Origin` header and its client certificate on every call
-(U-P5-08), the token lifetime (R-P5-11), the ChatGPT timeout (U-P5-03) and the stability of
+(U-P5-02), whether ChatGPT sends an `Origin` header, whether its discovery requests (the bare
+401 and the metadata fetch) ever carry its client certificate (U-P5-08; every authenticated call
+did), the token lifetime (R-P5-11), the ChatGPT timeout (U-P5-03) and the stability of
 `openai/session` (U-P5-05). Until then these are documented or inferred, not observed.
 
 ## Premier cycle réel

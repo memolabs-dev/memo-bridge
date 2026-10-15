@@ -28,9 +28,18 @@ export const SUB = '7f0c2a51-3b8e-4d7a-9c11-2f4e5a6b7c8d';
 export const CHATGPT = 'https://chatgpt.com/oauth/client.json';
 export const ISSUE = 'memolabs-dev/demo#7';
 export const ALL_SCOPES = Object.values(CAPABILITIES).join(' ');
+export const CERT_INFO_HEADER = 'x-forwarded-tls-client-cert-info';
+export const OPENAI_SAN = 'mtls.prod.connectors.openai.com';
+// Go's url.QueryEscape, which Traefik's passTLSClientCert applies to each certificate entry.
+export const queryEscape = text => encodeURIComponent(text).replace(/%20/g, '+');
+// The info header as Traefik forwards it for a client certificate verified against the OpenAI
+// Connectors CA (route memo-bridge.yml.j2: notAfter, sans, subject and issuer CN and O).
+export const OPENAI_CERT_INFO = queryEscape(`Subject="CN=${OPENAI_SAN},O=OpenAI";Issuer="CN=OpenAI-Connectors-mTLS-CA,O=OpenAI";`
+  + `NA="1798761600";SAN="${OPENAI_SAN}"`);
 
 // remote.json exactly as ansible/roles/memo-bridge/templates/remote.json.j2 renders it from
-// ansible/group_vars/lab.yml (lab-infra), with a test owner sub and the test project.
+// ansible/group_vars/lab.yml (lab-infra), with a test owner sub and the test project. Since the
+// owner decision of 2026-10-15 (option A) lab renders client_cert.mode "require".
 export function labRemoteJson(overrides = {}) {
   return {
     version: 1, managed_by: 'lab-infra role memo-bridge', remote_enabled: true,
@@ -38,7 +47,7 @@ export function labRemoteJson(overrides = {}) {
     oidc: { issuer: ISSUER, jwks_uri: 'http://127.0.0.1:1411/.well-known/jwks.json', audience: RESOURCE, owner_sub: SUB,
       allowed_client_ids: [CHATGPT], required_scope: 'coordinator:read', max_token_age_sec: 3600 },
     projects: ['memolabs-dev/demo'], remote_writes: 'disabled', session_binding: 'warn',
-    client_cert: { mode: 'log', info_header: 'x-forwarded-tls-client-cert-info', expected_san: 'mtls.prod.connectors.openai.com' },
+    client_cert: { mode: 'require', info_header: CERT_INFO_HEADER, expected_san: OPENAI_SAN },
     budgets: { body_max_bytes: 131072, result_max_bytes: 24576, page_max_bytes: 16384, write_file_max_bytes: 98304, list_max_items: 50,
       soft_deadline_sec: 40 },
     rate_limits: { read_per_min: 60, write_per_min: 20, execute_per_min: 6, in_flight: 8, unauthorized_per_min_per_ip: 30 },
@@ -66,13 +75,17 @@ export function tlsPair(t) {
 }
 
 // fetch over node:https to the loopback listener, presenting Host: bridge.memolabs.dev and
-// trusting only the test certificate (what Traefik's serversTransport does on the VPS).
+// trusting only the test certificate (what Traefik's serversTransport does on the VPS), and,
+// like Traefik for ChatGPT, forwarding OpenAI's verified client certificate info. A null value
+// in extraHeaders removes a header (null for CERT_INFO_HEADER: a caller without a certificate).
 export function loopbackFetch(port, ca, extraHeaders = {}) {
   return async (url, init = {}) => {
     const target = new URL(url);
     const headers = Object.fromEntries(new Headers(init.headers ?? {}).entries());
     headers.host = HOST;
+    headers[CERT_INFO_HEADER] = OPENAI_CERT_INFO;
     Object.assign(headers, extraHeaders);
+    for (const [key, value] of Object.entries(headers)) if (value === null) delete headers[key];
     const body = init.body == null ? undefined : typeof init.body === 'string' ? init.body : Buffer.from(await new Response(init.body).arrayBuffer());
     return new Promise((resolve, reject) => {
       const req = httpsRequest({ hostname: '127.0.0.1', port, path: target.pathname + target.search, method: init.method ?? 'GET', ca,

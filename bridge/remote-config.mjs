@@ -23,7 +23,9 @@
 //   projects           remote project allowlist (names or owner/repo), REQ-P5-09
 //   remote_writes      "disabled" | "enabled" (D7)
 //   session_binding    "warn" | "block" | "enforce" (D8; enforce: multi-session D-MS3)
-//   client_cert        {mode: "log" | "off", info_header, expected_san} (U-P5-08)
+//   client_cert        {mode: "require" | "log" | "off", info_header, expected_san} (U-P5-08):
+//                       require refuses any request carrying credentials without Traefik's
+//                       verified client certificate info (owner decision 2026-10-15, option A)
 //   budgets            {body_max_bytes, result_max_bytes, page_max_bytes, write_file_max_bytes,
 //                       list_max_items, soft_deadline_sec, job_tail_lines?}
 //   rate_limits        {read_per_min, write_per_min, execute_per_min, in_flight,
@@ -44,6 +46,9 @@ export const MAX_PUBLIC_BODY_BYTES = 128 * 1024;
 const HOSTNAME_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const ADDRESS_RE = /^[0-9a-f:.]{2,45}$/;
 const HEADER_RE = /^[a-z0-9-]{1,64}$/;
+// client_cert.mode. lab-infra checks the pinned release for 'client_cert_required' before it
+// renders "require" (role memo-bridge, tasks/remote.yml).
+export const CLIENT_CERT_MODES = Object.freeze(['off', 'log', 'require']);
 
 const KEYS = Object.freeze({
   top: ['version', 'managed_by', 'remote_enabled', 'listen', 'public_host', 'allowed_origins', 'trusted_proxies', 'oidc', 'projects',
@@ -146,7 +151,7 @@ function parse(raw) {
 
   const cert = section(raw, 'client_cert', false);
   const certMode = cert.mode ?? 'off';
-  if (!['log', 'off'].includes(certMode)) bad('client_cert.mode');
+  if (!CLIENT_CERT_MODES.includes(certMode)) bad('client_cert.mode');
   const infoHeader = (cert.info_header ?? 'x-forwarded-tls-client-cert-info');
   if (typeof infoHeader !== 'string' || !HEADER_RE.test(infoHeader)) bad('client_cert.info_header');
   if (cert.expected_san !== undefined && (typeof cert.expected_san !== 'string' || !HOSTNAME_RE.test(cert.expected_san))) bad('client_cert.expected_san');

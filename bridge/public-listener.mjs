@@ -7,6 +7,14 @@
 //   GET  /.well-known/oauth-protected-resource/mcp   the same document (path-aware form)
 // Everything else is 404, WebSocket upgrades included.
 //
+// Client certificate (owner decision 2026-10-15, option A): Traefik verifies OpenAI's connector
+// certificate when one is given (VerifyClientCertIfGiven, since ChatGPT's discovery requests
+// carry none and TLS client auth cannot be scoped to a path). With client_cert.mode 'require',
+// this listener refuses every /mcp request that carries credentials without the verified
+// certificate info Traefik forwards: 403 client_cert_required, before the token is verified.
+// The metadata paths and the bare 401 challenge (no Authorization header) stay open, so the
+// OAuth discovery still works; neither runs a tool nor reveals anything beyond the metadata.
+//
 // Structural separation from the 9443 listener: this module never imports the bearer digest
 // check (bridge/crypto.mjs), the agent WebSocket server or the hub's /health route, and
 // createPublicListener refuses the options that would carry them. A caller holding the static
@@ -24,7 +32,7 @@ import {
 import { CANONICAL_RESOURCE, REMOTE_WRITES, createOidcVerifier } from './oidc.mjs';
 import { CAPABILITIES } from '../server/coordinator/policy.mjs';
 import { PACKAGE_VERSION } from './protocol.mjs';
-import { HUB_PORT, LOOPBACK_BINDS, MAX_PUBLIC_BODY_BYTES, PUBLIC_BIND, PUBLIC_PORT, parseRemoteJson } from './remote-config.mjs';
+import { CLIENT_CERT_MODES, HUB_PORT, LOOPBACK_BINDS, MAX_PUBLIC_BODY_BYTES, PUBLIC_BIND, PUBLIC_PORT, parseRemoteJson } from './remote-config.mjs';
 
 export { HUB_PORT, LOOPBACK_BINDS, MAX_PUBLIC_BODY_BYTES, PUBLIC_BIND, PUBLIC_PORT };
 export const MCP_PATH = '/mcp';
@@ -33,6 +41,25 @@ export const DEFAULT_ALLOWED_ORIGINS = Object.freeze(['chatgpt.com']);
 const FORBIDDEN_OPTIONS = ['tokenSha256', 'readOnlyTokenSha256', 'allowedAgentKeys', 'oidcPrincipal', 'mutatingOps'];
 const HOSTNAME_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$|^\[[0-9a-f:.]+\]$/;
 const NO_STORE = { 'cache-control': 'no-store' };
+const CERT_HEADER_RE = /^[a-z0-9-]{1,64}$/;
+const CLIENT_CERT_REFUSAL = JSON.stringify({ error: 'client_cert_required',
+  error_description: 'this endpoint serves only the OpenAI connector client certificate' });
+
+// Traefik passTLSClientCert info: one URL-escaped entry per certificate, joined by ','; inside an
+// entry, Subject="...";Issuer="...";NA="...";SAN="a,b". Returns the SAN values and subject CNs
+// of every entry. A malformed entry yields nothing (never a match).
+export function certificateNames(value) {
+  const sans = [], commonNames = [];
+  for (const entry of String(value).split(',')) {
+    let text;
+    try { text = decodeURIComponent(entry.replace(/\+/g, ' ')); } catch { continue; }
+    for (const m of text.matchAll(/(?:^|;)SAN="([^"]*)"/g)) sans.push(...m[1].split(',').map(v => v.trim()).filter(Boolean));
+    for (const m of text.matchAll(/(?:^|;)Subject="([^"]*)"/g)) {
+      for (const part of m[1].split(',')) { const cn = /^\s*CN=(.+)$/.exec(part); if (cn) commonNames.push(cn[1].trim()); }
+    }
+  }
+  return { sans, commonNames };
+}
 
 // Until the remote surface lands (TODO-P5-04), the listener serves an MCP server with the tools
 // capability and no tools: authentication, metadata and transport can be exercised end to end
@@ -68,9 +95,12 @@ export function parsePublicListenerSettings(raw) {
 //                          401 budget gets 429 before its token is even verified (REQ-P5-16)
 //   unlistedCalls          (authInfo, body) => [{op, reason}]: tools/call names this principal is
 //                          not served, journaled before the SDK answers "unknown tool" (AC-P5-07)
-//   clientCert             {mode:'log'|'off', infoHeader, expectedSan}: with 'log', the journal
-//                          line records whether Traefik passed client certificate info and
-//                          whether it names expectedSan (U-P5-08); never the certificate itself
+//   clientCert             {mode:'require'|'log'|'off', infoHeader, expectedSan}: with 'log' or
+//                          'require', the journal lines record whether Traefik passed client
+//                          certificate info and whether it names expectedSan (U-P5-08), never
+//                          the certificate itself; with 'require', a /mcp request carrying
+//                          credentials without that info (or without expectedSan, when set)
+//                          answers 403 client_cert_required before any token verification
 export function createPublicListener(options = {}) {
   for (const key of FORBIDDEN_OPTIONS) if (Object.hasOwn(options, key)) throw new Error(`public listener does not take ${key}`);
   const { tlsKey, tlsCert, oidc, remoteEnabled = false, remoteWrites = 'disabled', writeGateCheck = null,
@@ -82,6 +112,11 @@ export function createPublicListener(options = {}) {
   if (typeof factory !== 'function') throw new Error('factory must be a function');
   if (!Number.isInteger(maxBodyBytes) || maxBodyBytes < 1024 || maxBodyBytes > MAX_PUBLIC_BODY_BYTES) throw new Error('invalid maxBodyBytes');
   if (!REMOTE_WRITES.includes(remoteWrites)) throw new Error('remoteWrites must be "disabled" or "enabled"');
+  const certMode = clientCert?.mode ?? 'off';
+  if (!CLIENT_CERT_MODES.includes(certMode)) throw new Error('clientCert.mode must be "off", "log" or "require"');
+  if (certMode !== 'off' && (typeof clientCert.infoHeader !== 'string' || !CERT_HEADER_RE.test(clientCert.infoHeader))) {
+    throw new Error('clientCert.infoHeader must be a lowercase header name');
+  }
   // Write gate layer 2 (spec D7): with writes enabled the self-check must pass before listening.
   if (remoteWrites === 'enabled') {
     const check = typeof writeGateCheck === 'function' ? writeGateCheck() : { ok: false, error: 'write_gate_self_check_missing' };
@@ -106,16 +141,22 @@ export function createPublicListener(options = {}) {
   const bareChallenge = `Bearer resource_metadata="${verifier.resourceMetadataUrl}", scope="${requiredScopes.join(' ')}"`;
 
   // U-P5-08: does ChatGPT present the OpenAI connector certificate? Traefik's passTLSClientCert
-  // puts the certificate info in a header it strips from client requests at the entrypoint;
-  // only two booleans reach the journal.
-  function certFacts(req) {
-    if (clientCert?.mode !== 'log') return {};
+  // puts the certificate info in a header it strips from client requests at the entrypoint and
+  // sets only for a certificate verified against the OpenAI Connectors CA; only two booleans
+  // reach the journal. expectedSan matches a SAN value (OpenAI documents
+  // mtls.prod.connectors.openai.com) or, failing that, the subject CN, exactly.
+  function clientCertificate(req) {
+    if (certMode === 'off') return null;
     const raw = req.headers[clientCert.infoHeader];
     const value = Array.isArray(raw) ? raw.join(',') : raw;
-    if (typeof value !== 'string' || !value) return { client_cert: false };
-    let text = value;
-    try { text = decodeURIComponent(value); } catch { /* keep the raw value */ }
-    return { client_cert: true, ...(clientCert.expectedSan ? { client_cert_san: text.includes(clientCert.expectedSan) } : {}) };
+    if (typeof value !== 'string' || !value) return { present: false, san: false };
+    if (!clientCert.expectedSan) return { present: true, san: null };
+    const { sans, commonNames } = certificateNames(value);
+    return { present: true, san: sans.includes(clientCert.expectedSan) || commonNames.includes(clientCert.expectedSan) };
+  }
+  function certFacts(cert) {
+    if (!cert) return {};
+    return { client_cert: cert.present, ...(cert.present && cert.san !== null ? { client_cert_san: cert.san } : {}) };
   }
   // Calls the SDK would answer "unknown tool" for: journaled here, by name and reason only.
   function inspect(authInfo, body, requestId) {
@@ -201,9 +242,24 @@ export function createPublicListener(options = {}) {
       plain(res, 429, { 'retry-after': String(retryAfter) });
       return;
     }
+    const cert = clientCertificate(req);
+    // The bare challenge stays reachable without a certificate: it is the start of ChatGPT's
+    // OAuth discovery (journal and Traefik access log of 2026-10-14: an unauthenticated POST /mcp
+    // then the metadata fetch, beside the authenticated calls), it runs nothing and says no more
+    // than the public metadata document. The journal line records the certificate facts.
     if (!header) {
-      record('public_auth_denied', { request_id: requestId, status: 401, reason: 'no_credentials' });
+      record('public_auth_denied', { request_id: requestId, status: 401, reason: 'no_credentials', ...certFacts(cert) });
       plain(res, 401, { 'www-authenticate': bareChallenge });
+      return;
+    }
+    // Option A: credentials count only from OpenAI's infrastructure. Checked before the token is
+    // verified, as a required TLS client certificate would have: a token replayed from elsewhere
+    // learns nothing about its validity and costs no verification. Not an OAuth failure, so the
+    // 401 flood bucket is not charged and no WWW-Authenticate is sent.
+    if (certMode === 'require' && (!cert.present || (clientCert.expectedSan && !cert.san))) {
+      record('public_refused', { request_id: requestId, status: 403, reason: 'client_cert_required', ...certFacts(cert) });
+      plain(res, 403, { 'content-type': 'application/json' }, CLIENT_CERT_REFUSAL);
+      req.resume();
       return;
     }
     let authInfo;
@@ -211,7 +267,8 @@ export function createPublicListener(options = {}) {
     catch (error) {
       const response = bearerAuthChallengeResponse(error, authOptions);
       if (authLimiter && response.status === 401) authLimiter.failure({ remoteAddress: req.socket.remoteAddress, headers: req.headers });
-      record('public_auth_denied', { request_id: requestId, status: response.status, reason: typeof error?.reason === 'string' ? error.reason : String(error?.code || 'invalid') });
+      record('public_auth_denied', { request_id: requestId, status: response.status, reason: typeof error?.reason === 'string' ? error.reason : String(error?.code || 'invalid'),
+        ...certFacts(cert) });
       await sendWeb(res, response);
       return;
     }
@@ -224,7 +281,7 @@ export function createPublicListener(options = {}) {
     inspect(authInfo, body, requestId);
     const response = await handler.fetch(mcpRequest(req, body), { authInfo });
     record('public_request', { request_id: requestId, principal, client_ref: clientRef, status: response.status, ms: Date.now() - started,
-      ...certFacts(req) });
+      ...certFacts(cert) });
     await sendWeb(res, response);
   }
 
@@ -244,7 +301,7 @@ export function createPublicListener(options = {}) {
 
   return {
     verifier, resourceMetadata: verifier.resourceMetadata, allowedHosts: [...allowedHosts], allowedOrigins: [...allowedOrigins],
-    remoteEnabled, remoteWrites,
+    remoteEnabled, remoteWrites, clientCertMode: certMode,
     async start() {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, bind, resolve); });
       return server.address();
