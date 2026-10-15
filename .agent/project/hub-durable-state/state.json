@@ -1,0 +1,18 @@
+{
+  "phase": "VERIFYING",
+  "scope": "hub durable state: /freeze, grants, locks, inbox and watches (inventory P0 §4.9)",
+  "updated": "2026-10-15",
+  "requirements": { "total": 8, "verified_offline": 7, "pending_runtime": ["HS-R8 after lab-infra StateDirectory and deploy"] },
+  "todos": [
+    { "id": "T1", "title": "bridge/hub-state.mjs atomic 0600 store", "priority": "P0", "status": "DONE", "evidence": "HS-R5" },
+    { "id": "T2", "title": "freeze flag saved and restored", "priority": "P0", "status": "DONE", "evidence": "HS-R1" },
+    { "id": "T3", "title": "grants restorable", "priority": "P1", "status": "DONE", "evidence": "HS-R2" },
+    { "id": "T4", "title": "locks restorable, implicit excluded", "priority": "P1", "status": "DONE", "evidence": "HS-R3" },
+    { "id": "T5", "title": "inbox and watches restorable", "priority": "P1", "status": "DONE", "evidence": "HS-R4" },
+    { "id": "T6", "title": "docs OPERATOR.md, REMOTE_CHATGPT.md", "priority": "P1", "status": "DONE", "evidence": "diff" },
+    { "id": "T7", "title": "lab-infra: StateDirectory=memo-bridge-hub 0700, pin bump, deploy, live freeze across restart", "priority": "P0", "status": "TODO", "evidence": null }
+  ],
+  "open_risks": [],
+  "pushed": false,
+  "deployed": false
+}

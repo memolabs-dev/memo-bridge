@@ -44,6 +44,7 @@ import { operatorHelp } from './operator-help.mjs';
 import { createTransfers } from './operator-transfer.mjs';
 import { operatorContent } from './operator-content.mjs';
 import { NOTIFY_LIMITS, createNotifier } from './operator-notifications.mjs';
+import { createHubState } from './hub-state.mjs';
 import { NOTIFICATION_TOOLS } from '../server/tools/operator-notifications.mjs';
 import { untrusted } from './operator-output.mjs';
 
@@ -62,7 +63,7 @@ export function createHub(options) {
   for (const key of ['oidc', 'oidcPrincipal']) if (Object.hasOwn(options ?? {}, key)) throw new Error(`hub does not take ${key}: OAuth is served by the public listener only`);
   const { tlsKey, tlsCert, allowedAgentKeys, tokenSha256, readOnlyTokenSha256 = null, runtimeHost = null, mutatingOps = false,
     toolDefinitions = null, port = 9443, bind = '127.0.0.1', audit = () => {}, pingIntervalMs = PING_INTERVAL_MS, timeouts = {},
-    operator = null } = options;
+    operator = null, stateDir = null } = options;
   if (!tlsKey || !tlsCert) throw new Error('TLS is mandatory');
   if (!/^[0-9a-f]{64}$/.test(tokenSha256)) throw new Error('Invalid bearer token digest');
   if (readOnlyTokenSha256 !== null && (!/^[0-9a-f]{64}$/.test(readOnlyTokenSha256) || readOnlyTokenSha256 === tokenSha256)) {
@@ -76,7 +77,12 @@ export function createHub(options) {
   // Phase 6. operator: {signingKeyPem, freezeFile?, now?}. Without it no operator op leaves the hub.
   const signer = operator ? createOperatorSigner({ privateKeyPem: operator.signingKeyPem, ...(operator.now ? { now: operator.now } : {}) }) : null;
   const freezeFile = operator?.freezeFile ?? null;
-  let operatorFrozen = false;
+  // Durable state (bridge/hub-state.mjs): the /freeze flag, grants, locks and the notification
+  // inbox survive a restart or a deploy when the hub has a state directory.
+  const hubState = createHubState({ dir: stateDir, record: (event, details) => record(event, null, details) });
+  const savedFreeze = hubState.load('freeze', null);
+  let operatorFrozen = savedFreeze?.frozen === true;
+  if (operatorFrozen) record('operator_frozen', null, { by: 'restored', since: typeof savedFreeze.at === 'string' ? savedFreeze.at.slice(0, 40) : null });
   const fileFrozen = () => {
     if (!freezeFile) return false;
     try { lstatSync(freezeFile); return true; } catch (error) { return error?.code !== 'ENOENT'; }
@@ -96,6 +102,7 @@ export function createHub(options) {
       : pollOperatorJob(w)),
     send: n => (bot?.notifyJob ? bot.notifyJob(n) : null),
     record: (event, details) => record(event, null, details),
+    initial: hubState.load('notifications', null), onChange: data => hubState.save('notifications', data),
     ...(operator?.now ? { now: operator.now } : {}), ...(operator?.notifyLimits ? { limits: operator.notifyLimits } : {}) });
   const anchors = new Map();
   const anchorIntervalMs = operator?.anchorIntervalMs ?? 15 * 60_000;
@@ -111,7 +118,7 @@ export function createHub(options) {
       : { ok: false, error: out?.error ?? 'workspace_unverified' };
   });
   const locks = createOperatorLocks({ ...(operator?.now ? { now: operator.now } : {}), verifyWorkspace,
-    homes: operator?.homes ?? DEFAULT_HOMES });
+    homes: operator?.homes ?? DEFAULT_HOMES, initial: hubState.load('locks', null), onChange: data => hubState.save('locks', data) });
   // Repatriated tools (part 2): operator_transfer relayed here, source reads signed for the caller.
   const transfers = createTransfers({ readSource: (host, op, args, principal) => sendInternal(host, op, args, principal),
     writeDest: (host, op, args, ctx) => operatorCall(host, op, { args, principal: ctx.principal, clientSession: ctx.clientSession,
@@ -134,8 +141,9 @@ export function createHub(options) {
       ? { ok: true, workspace_id: opened.workspace.workspace_id, opened: true, project: opened.workspace.project }
       : { ok: false, error: opened?.error ?? seen?.error ?? 'workspace_unavailable' };
   });
-  // Repatriation D-R4: standing approvals, in memory like approvals and locks.
-  const grants = createGrantStore({ ...(operator?.now ? { now: operator.now } : {}), homes: operator?.homes ?? DEFAULT_HOMES });
+  // Repatriation D-R4: standing approvals. Durable with a state directory (pending approvals are not).
+  const grants = createGrantStore({ ...(operator?.now ? { now: operator.now } : {}), homes: operator?.homes ?? DEFAULT_HOMES,
+    initial: hubState.load('grants', []), onChange: rows => hubState.save('grants', rows) });
   // Issue #48: permanent grants, owner-set in each host's policy file. The hub keeps the copy its
   // operator agent reports in operator_policy (fetched on need, at most every 5 minutes and again
   // after a reconnect), only to know when it need not ask Telegram: the agent checks each ap_pm_
@@ -615,6 +623,8 @@ export function createHub(options) {
 
   function setOperatorFrozen(value, by) {
     operatorFrozen = value === true;
+    // Saved before it is journaled: an emergency stop must not be lifted by the next deploy.
+    hubState.save('freeze', { frozen: operatorFrozen, by: typeof by === 'string' ? by.slice(0, 64) : 'owner', at: new Date().toISOString() });
     record(operatorFrozen ? 'operator_frozen' : 'operator_unfrozen', null, {by: typeof by === 'string' ? by.slice(0, 64) : 'owner'});
   }
 

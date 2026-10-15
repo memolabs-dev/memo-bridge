@@ -170,8 +170,11 @@ export function delegationTargetRefusal(delegation, host, targets, homes = DEFAU
 // workspaceId, clientSession) resolves with {ok:true, workspace:{workspace_id, status,
 // session_tag, project}} as the runtime's workspace_status answers it for that conversation, or
 // {ok:false, error}.
+// initial: {locks, families} saved by onChange before a restart (hub durable state). Implicit
+// per-call locks, uploads and the last-call table are never saved: they belong to calls the
+// restart ended.
 export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = DEFAULT_HOMES,
-  newId = () => `lk_${randomBytes(12).toString('base64url')}` } = {}) {
+  newId = () => `lk_${randomBytes(12).toString('base64url')}`, initial = null, onChange = () => {} } = {}) {
   if (typeof verifyWorkspace !== 'function') throw new Error('verifyWorkspace required');
   const locks = new Map();    // id -> lock
   const uploads = new Map();  // upload_id -> {host, path, workspaceId, at}
@@ -185,8 +188,23 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     families.delete(workspaceId);
     families.set(workspaceId, parentId);
     while (families.size > 1024) families.delete(families.keys().next().value);
+    changed();
   };
   const startedAt = now();
+  const str = (v, max) => typeof v === 'string' && v.length <= max;
+  for (const l of Array.isArray(initial?.locks) ? initial.locks.slice(0, LOCK_LIMITS.total) : []) {
+    if (!l || !LOCK_ID_RE.test(l.id ?? '') || !['mac', 'vps'].includes(l.host) || !LOCK_KINDS.includes(l.kind) || !str(l.key, 4096) || !str(l.shown, 4096)) continue;
+    if (!WS_RE.test(l.workspaceId ?? '') || !str(l.principal, 130) || !Number.isFinite(l.taken) || !Number.isFinite(l.expires) || l.expires <= now()) continue;
+    locks.set(l.id, { id: l.id, host: l.host, kind: l.kind, key: l.key, shown: l.shown, workspaceId: l.workspaceId, principal: l.principal,
+      session: CLIENT_SESSION_RE.test(l.session ?? '') ? l.session : null, project: str(l.project, 80) ? l.project : null,
+      reason: str(l.reason, LOCK_LIMITS.reason) ? l.reason : null, taken: l.taken, expires: l.expires });
+  }
+  for (const pair of Array.isArray(initial?.families) ? initial.families.slice(-1024) : []) {
+    if (Array.isArray(pair) && WS_RE.test(pair[0] ?? '') && WS_RE.test(pair[1] ?? '')) families.set(pair[0], pair[1]);
+  }
+  const changed = () => {
+    try { onChange({ locks: [...locks.values()].filter(l => !l.implicit), families: [...families.entries()] }); } catch { /* journaled by the state module */ }
+  };
 
   const sweep = () => {
     const t = now();
@@ -238,6 +256,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
       }
       if (chosen.some(l => otherSession(l, caller))) return fail('workspace_other_session');
       for (const l of chosen) locks.delete(l.id);
+      if (chosen.length) changed();
       return { ok: true, host: args.host, released: chosen.map(l => ({ lock_id: l.id, kind: l.kind, target: l.shown })) };
     }
     // operator_lock
@@ -271,6 +290,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     const same = [...locks.values()].find(l => l.workspaceId === args.workspace_id && l.host === args.host && l.kind === target.kind && l.key === target.key);
     if (same) {
       Object.assign(same, { expires: t + ttl * 1000, reason: reason ?? same.reason, session: caller });
+      changed();
       return { ok: true, renewed: true, lock: describe(same) };
     }
     if ([...locks.values()].filter(l => l.workspaceId === args.workspace_id).length >= LOCK_LIMITS.perWorkspace || locks.size >= LOCK_LIMITS.total) {
@@ -279,6 +299,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     const lock = { id: newId(), host: args.host, kind: target.kind, key: target.key, shown: target.shown, workspaceId: args.workspace_id,
       principal: principal.id, session: caller, project: typeof ws.project === 'string' ? ws.project : null, reason, taken: t, expires: t + ttl * 1000 };
     locks.set(lock.id, lock);
+    changed();
     return { ok: true, renewed: false, lock: describe(lock) };
   }
 

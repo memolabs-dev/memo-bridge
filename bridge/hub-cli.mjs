@@ -29,6 +29,10 @@
 //                                  LoadCredential=) it starts the operator bot: approvals,
 //                                  /freeze, /unfreeze, /status. Without them, dangerous calls answer
 //                                  approval_unavailable (fail closed).
+//   MEMO_BRIDGE_HUB_STATE_DIR      absolute path of the hub's durable state (bridge/hub-state.mjs):
+//                                  the /freeze flag, /grant standing approvals, operator locks and the
+//                                  notification inbox survive a restart. Default: $STATE_DIRECTORY
+//                                  (systemd StateDirectory=, lab-infra). Unset: all in memory, as before.
 // A bad remote.json, or remote_writes "enabled" while a GitHub Actions runner runs as root
 // (write gate layer 2, lab-infra #161), stops the unit before anything listens.
 import { existsSync, readFileSync } from 'node:fs';
@@ -65,7 +69,9 @@ const approvalModes = env.MEMO_BRIDGE_OPERATOR_APPROVAL ? JSON.parse(env.MEMO_BR
 // arrives without one (default "ops").
 const autoWorkspaceProject = env.MEMO_BRIDGE_OPERATOR_AUTO_PROJECT || 'ops';
 const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile, approvalModes, autoWorkspaceProject } : null;
-const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit, operator });
+const stateDir = env.MEMO_BRIDGE_HUB_STATE_DIR || (env.STATE_DIRECTORY ? env.STATE_DIRECTORY.split(':')[0] : '') || null;
+if (stateDir && !isAbsolute(stateDir)) throw new Error('MEMO_BRIDGE_HUB_STATE_DIR must be an absolute path');
+const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit, operator, stateDir });
 
 // Built before the hub starts: the public listener gets the TLS pair, remote.json and the hub's
 // requestAgent only, never the bearer digests or the agent keys.
@@ -97,7 +103,7 @@ if (operator && env.MEMO_BRIDGE_TELEGRAM_CHAT_ID) {
 await hub.start();
 bot?.run();
 audit({ event: 'hub_started', bind: '127.0.0.1:9443', runtime_host: runtimeHost, mutating_ops: mutatingOps || 'disabled',
-  readonly_principal: Boolean(readOnlyTokenSha256), operator_key: hub.operatorKeyId, operator_bot: Boolean(bot),
+  readonly_principal: Boolean(readOnlyTokenSha256), operator_key: hub.operatorKeyId, operator_bot: Boolean(bot), durable_state: Boolean(stateDir),
   operator_agents: ['operator-mac', 'operator-vps'].filter(id => Object.hasOwn(allowedAgentKeys, id)) });
 if (publicListener) {
   const address = await publicListener.start();
