@@ -261,6 +261,11 @@ class StartTests(DispatchTestCase):
         job_dir = os.path.join(self.box.jobs, DID)
         self.assertEqual(stat.S_IMODE(os.lstat(job_dir).st_mode), 0o751)
         self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(job_dir, 'out')).st_mode), 0o750)
+        # The install unit names jobs/<id>/cache in ReadWritePaths=: systemd 257 sets up the mount
+        # namespace before any ExecStartPre=, "+" ones included, and fails with 226/NAMESPACE when
+        # the path is missing (job j338067f, 2026-10-15). The dispatcher creates it first.
+        self.assertTrue(stat.S_ISDIR(os.lstat(os.path.join(job_dir, 'cache')).st_mode))
+        self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(job_dir, 'cache')).st_mode), 0o750)
         self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(job_dir, 'dispatch.json')).st_mode), 0o640)
         self.assertEqual([name for name in os.listdir(job_dir) if name.startswith('.')], [])
 
