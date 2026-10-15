@@ -101,6 +101,34 @@ test('registry: an op outside the registry is denied even if advertised; unknown
   assert.deepEqual(seen, []);
 });
 
+test('#61 host tools for the Mac answered by a VPS runtime: the hub fills in the Mac agent connection', async t => {
+  const { hub, agent } = await startHub(t);
+  const noRoute = { source: 'unknown', online: null, detail: 'no route from this host; the Mac accepts no incoming connection' };
+  agent('vps', {
+    host_status: hostStatus('vps'),
+    host_capabilities: async ({ host }) => ({ ok: true, host, local: false, roles: { source: 'declared', roles: [], limitations: [] },
+      reachability: { ...noRoute }, tools: null, recipes: null, note: 'remote' }),
+    host_resources: async ({ host }) => ({ ok: true, host, local: false, ...noRoute, job_concurrency_limit: null, notes: [] })
+  });
+  await until(() => hub.agentInfo('vps')?.version === 2);
+  const offline = await hub.requestAgent('vps', 'host_capabilities', { args: { host: 'mac' }, principal: OWNER });
+  assert.equal(offline.reachability.source, 'hub');
+  assert.equal(offline.reachability.online, false, JSON.stringify(offline));
+  const resources = await hub.requestAgent('vps', 'host_resources', { args: { host: 'mac' }, principal: OWNER });
+  assert.equal(resources.online, false, JSON.stringify(resources));
+  assert.equal(resources.source, 'hub');
+
+  agent('mac', { host_status: hostStatus('mac') });
+  await until(() => hub.agentInfo('mac'));
+  const online = await hub.requestAgent('vps', 'host_capabilities', { args: { host: 'mac' }, principal: OWNER });
+  assert.equal(online.reachability.online, true, JSON.stringify(online));
+  assert.match(online.reachability.since, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal((await hub.requestAgent('vps', 'host_resources', { args: { host: 'mac' }, principal: OWNER })).online, true);
+  // The VPS itself, or a runtime that observed the host: unchanged.
+  const vps = await hub.requestAgent('vps', 'host_capabilities', { args: { host: 'vps' }, principal: OWNER });
+  assert.deepEqual(vps.reachability, noRoute);
+});
+
 test('a disconnect flushes pending requests with agent_disconnected in under 100 ms', async t => {
   const { hub, agent } = await startHub(t);
   let started = 0;

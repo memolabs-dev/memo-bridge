@@ -283,6 +283,27 @@ function fakeGh(prNumber = 42) {
   return { gh, calls };
 }
 
+test('#60 worktree_push under enforce records its checkpoint with the caller\'s session', async t => {
+  // Seen live on 2026-10-15 (PR #59): the push went through, its checkpoint failed with
+  // session_required because the runner called the Coordinator without the request metadata.
+  const policy = { projects: ['demo'], session_binding: 'enforce' };
+  const f = await fixture(t, { principal: CHAT, policy });
+  const runner = createWorktreeRunner(f.rt, { remotePolicy: parseRemotePolicy(policy) });
+  const ctx = { ids: {}, meta: { client_session: S1 } };
+  const ws = await f.addWorkspace({ client_session: S1 });
+  const created = await runner.create({ workspace_id: ws, issue: ISSUE }, ctx);
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const id = created.worktree.worktree_id;
+  const written = await runner.writeFile({ worktree_id: id, path: 'a.txt', content: 'a\n' }, ctx);
+  assert.equal(written.ok, true, JSON.stringify(written));
+  const committed = await runner.commit({ worktree_id: id, message: 'feat: a' }, ctx);
+  assert.equal(committed.ok, true, JSON.stringify(committed));
+  const pushed = await runner.push({ worktree_id: id }, ctx);
+  assert.equal(pushed.ok, true, JSON.stringify(pushed));
+  assert.deepEqual(pushed.checkpoint, { ok: true, durability: 'remote' }, JSON.stringify(pushed));
+  assert.equal(pushed.warning, undefined);
+});
+
 function githubServer(f, gh, policy) {
   const tools = {};
   registerGithubTools({ registerTool(name, def, handler) { tools[name] = { def, handler }; } }, () => f.rt,

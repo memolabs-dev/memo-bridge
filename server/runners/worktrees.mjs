@@ -1152,7 +1152,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       // Idempotency (Phase 4 FU-5, REQ-P5-15): a retry with the same client_request_id returns
       // the first successful push instead of pushing again.
       const result = await runOnce(rt.store(), { principal: rt.principal.id, op: 'worktree_push',
-        clientRequestId: args.client_request_id, now: now() }, () => pushOnce(row, workspace));
+        clientRequestId: args.client_request_id, now: now() }, () => pushOnce(row, workspace, ctx?.meta));
       return warned(ctx, result);
     },
 
@@ -1163,16 +1163,16 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
 
   // The credential of a push lives from its first network call to its last; released here
   // whatever the outcome.
-  async function pushOnce(row, workspace) {
+  async function pushOnce(row, workspace, meta) {
     const nets = [];
     try {
-      return await pushSteps(row, workspace, nets);
+      return await pushSteps(row, workspace, nets, meta);
     } finally {
       for (const net of nets) await net.release?.();
     }
   }
 
-  async function pushSteps(row, workspace, nets) {
+  async function pushSteps(row, workspace, nets, meta) {
     const busy = await unitJobActive(row);
     if (busy) return busy.error;
     const located = await locate(row);
@@ -1232,14 +1232,16 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
     await withTrack(rt, row.id, track => ({ ...track, head, pushed: [...(track.pushed ?? []).filter(c => c !== head), head].slice(-PUSHED_KEEP) }))
       .catch(() => {});
 
-    // Durability is tracked by the Coordinator: a checkpoint under the workspace's claim.
+    // Durability is tracked by the Coordinator: a checkpoint under the workspace's claim. The
+    // request metadata goes along: under session_binding enforce the Coordinator refuses a
+    // remote call without the conversation's session (#60, PR #59 on 2026-10-15).
     let checkpoint;
     try {
       const coordinator = rt.coordinator();
       const record = coordinator.taskCheckpoint ?? coordinator.issueCheckpoint;
       const result = await record({ workspace_id: workspace.id, issue: row.issue_ref, task: row.issue_ref,
         claim_id: held.claim.claim_id, fence: held.claim.fence_sha, branch: row.branch, commit: head,
-        note: `pushed from worktree ${row.id}` });
+        note: `pushed from worktree ${row.id}` }, meta ?? null);
       checkpoint = result?.ok ? { ok: true, durability: result.durability } : fail(result?.error ?? 'checkpoint_failed', result?.detail);
     } catch {
       checkpoint = fail('store_unavailable');
