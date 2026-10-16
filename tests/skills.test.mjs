@@ -137,3 +137,16 @@ test('create-only is sent to the runner for new skills, but not for edits',async
  assert.equal((await invoke('skill_propose',{...a,content:valid()})).ok,true);
  assert.equal(writes[1].create_only,false);
 });
+
+test('a skill view cannot authorize a proposal from a different remote chat session',async()=>{
+ const handlers=new Map();let writes=0;const body=valid();
+ const fake={readFile:async()=>({ok:true,content:body,size:body.length,truncated:false}),writeFile:async()=>{writes++;return {ok:true};}};
+ registerSkillTools({registerTool(n,_c,h){handlers.set(n,h);}},()=>({authorize:()=>true,principal:{id:'oidc:owner'},audit:async()=>{}}),{createRunner:()=>fake});
+ const a={workspace_id:'ws_1234567890123456',worktree_id:'wt_1234567890123456',name:'example'};
+ const call=async(n,args,session)=>JSON.parse((await handlers.get(n)(args,{meta:{client_session:session}})).content[0].text);
+ assert.equal((await call('skill_view',a,'session-one')).ok,true);
+ assert.equal((await call('skill_propose',{...a,content:body},'session-two')).error,'skill_view_required');
+ assert.equal(writes,0);
+ assert.equal((await call('skill_propose',{...a,content:body},'session-one')).ok,true);
+ assert.equal(writes,1);
+});
