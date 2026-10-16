@@ -30,7 +30,7 @@ if (args.includes('--help')) {
     if (!result.all_coordinator_ready || !ledger.ok) process.exitCode = 1;
   } catch (error) {
     // No raw exception paths or environment values leak to logs.
-    process.stderr.write(JSON.stringify({ ok: false,
+    process.stdout.write(JSON.stringify({ ok: false,
       error: error?.message === 'invalid_names' ? 'invalid_names' : 'preflight_unavailable' }) + '\n');
     process.exitCode = 2;
   }

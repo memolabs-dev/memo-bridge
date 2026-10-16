@@ -46,6 +46,6 @@ test('onboarding CLI emits parseable JSON for unavailable registry errors', () =
     env: { ...process.env, MEMO_BRIDGE_PROJECTS_ROOT: root, MEMOLABS_ROOT: root }
   });
   assert.equal(run.status, 2);
-  assert.ok(run.stderr.endsWith('\n'));
-  assert.equal(JSON.parse(run.stderr).error, 'preflight_unavailable');
+  assert.ok(run.stdout.endsWith('\n'));
+  assert.equal(JSON.parse(run.stdout).error, 'preflight_unavailable');
 });
