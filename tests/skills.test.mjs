@@ -80,3 +80,24 @@ test('skill_view: reference-only view does not grant write permission; truncated
  assert.equal((await call('skill_view',a)).error,'skill_oversized');
  assert.equal((await call('skill_propose',{...a,content:valid()})).error,'skill_view_required');
 });
+
+test('remote forwarded metadata is preserved for every runner operation', async () => {
+ const calls=[];
+ const body=valid();
+ const fake={
+   listFiles:async(_a,ctx)=>{calls.push(ctx.meta?.client_session);return {ok:true,files:['skills/example/SKILL.md']};},
+   readFile:async(_a,ctx)=>{calls.push(ctx.meta?.client_session);return {ok:true,content:body,size:body.length,truncated:false};},
+   writeFile:async(_a,ctx)=>{calls.push(ctx.meta?.client_session);return {ok:true};}
+ };
+ const handlers=new Map();
+ registerSkillTools({registerTool(n,_c,h){handlers.set(n,h);}},()=>({
+   authorize:()=>true, principal:{id:'oidc:owner'},audit:async()=>{}
+ }),{createRunner:()=>fake});
+ const args={workspace_id:'ws_1234567890123456',worktree_id:'wt_1234567890123456',name:'example'};
+ const meta={meta:{client_session:'test-remote-session'}};
+ const run=async(n,a)=>JSON.parse((await handlers.get(n)(a,meta)).content[0].text);
+ assert.equal((await run('skills_list',args)).ok,true);
+ assert.equal((await run('skill_view',args)).ok,true);
+ assert.equal((await run('skill_propose',{...args,content:body})).ok,true);
+ assert.deepEqual(calls,Array(4).fill('test-remote-session'));
+});
