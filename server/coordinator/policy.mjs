@@ -88,6 +88,7 @@ export const OPERATION_CAPABILITY = Object.freeze({
   source_changes_list: CAPABILITIES.READ,
   source_change_status: CAPABILITIES.READ,
   source_change_history: CAPABILITIES.READ,
+  source_reconcile: CAPABILITIES.WRITE,
   // Context memory across conversations (repatriated SentinelX context_*): the runtime's store.
   memory_save: CAPABILITIES.WRITE,
   memory_search: CAPABILITIES.READ,

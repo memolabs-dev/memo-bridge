@@ -19,6 +19,7 @@ import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
 import { MEMORY_TOOLS, registerMemoryTools } from './tools/memory-tools.mjs';
 import { SOURCE_TOOLS, registerSourceTools } from './tools/source-tools.mjs';
 import { CONTEXT_TOOLS, registerContextTools } from './tools/context-tools.mjs';
+import { SOURCE_RECONCILE_TOOLS, registerSourceReconcileTools } from './tools/source-reconcile-tools.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 import { DELEGATION_INSTRUCTIONS, LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
@@ -37,7 +38,7 @@ const TOOL_GROUPS = {
   github: [...GITHUB_TOOLS],
   audit: [...AUDIT_TOOLS],
   memory: [...MEMORY_TOOLS],
-  source: [...SOURCE_TOOLS, ...CONTEXT_TOOLS]
+  source: [...SOURCE_TOOLS, ...CONTEXT_TOOLS, ...SOURCE_RECONCILE_TOOLS]
 };
 const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
 
@@ -184,5 +185,6 @@ registerAuditTools(counted, getRuntime);
 registerMemoryTools(counted, getRuntime);
 registerSourceTools(counted, getRuntime);
 registerContextTools(counted, getRuntime);
+registerSourceReconcileTools(counted, getRuntime);
 
 await server.connect(new StdioServerTransport());
