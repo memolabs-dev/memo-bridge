@@ -1,0 +1,37 @@
+# PROPOSAL — not an active GitHub Actions workflow.
+# Authorized repository maintainer: copy this exact file to
+#   .github/workflows/standalone-windows.yml
+# after protected-path and security review. Memo Bridge intentionally cannot write there.
+name: Windows standalone acceptance
+on:
+  pull_request:
+    paths:
+      - 'standalone/**'
+      - 'server/runners/gpu*.mjs'
+      - 'scripts/windows-native-check.mjs'
+      - 'scripts/install-standalone.mjs'
+      - 'tests/windows-native.test.mjs'
+      - 'tests/standalone*'
+      - 'tests/personal-*.test.mjs'
+      - 'tests/gpu*.test.mjs'
+      - 'package.json'
+      - '.github/workflows/standalone-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v6.1.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build:standalone
+      - run: pnpm run build:personal-remote
+      - name: Native Windows local MCP, GPU and OAuth tests
+        run: pnpm run smoke:windows
