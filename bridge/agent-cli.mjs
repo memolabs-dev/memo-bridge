@@ -4,7 +4,7 @@
 //   memo-bridge-vps-agent.service. Key: $MEMO_BRIDGE_AGENT_CONFIG/agent.key, or the
 //   `agent-key` credential when $CREDENTIALS_DIRECTORY is set.
 // MEMO_BRIDGE_AGENT_MODE=runtime: memo-bridge-runner.service (spec D1). Hosts
-//   createRuntime({host:'vps'}) and serves the runtime tools to hub principals, each request
+//   createRuntime({host}) and serves the runtime tools to hub principals, each request
 //   on runtime.as(principalFromHub(id)). Secrets are read only from $CREDENTIALS_DIRECTORY,
 //   filled by LoadCredential= in the unit:
 //     agent-key   Ed25519 private key of the vps agent identity     (required, read here)
@@ -31,6 +31,7 @@
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { createAgent, createRuntimeOperations, probeOperations, wireClaim } from './agent.mjs';
+import { executableRuntimeHost } from './runtime-placement.mjs';
 
 const env = process.env;
 const mode = env.MEMO_BRIDGE_AGENT_MODE || 'probe';
@@ -63,8 +64,9 @@ let base = null;
 let supervisor = null;
 
 if (mode === 'runtime') {
-  // Phase 4 hosts the runtime on the VPS only; the Mac keeps its local stdio runtime.
-  if (host !== 'vps') throw new Error('runtime mode runs on host vps only');
+  // Mac runtime is an explicit opt-in and uses the same credential, policy and lease gates.
+  // Merely seeing a Mac project in the discovery snapshot NEVER turns this on.
+  executableRuntimeHost(host, env);
   if (!credentialFile('agent-key')) throw new Error('CREDENTIALS_DIRECTORY required in runtime mode');
   const keyFile = ['agent-key', 'agent.key'].map(credentialFile).find(p => existsSync(p));
   if (!keyFile) throw new Error('agent-key credential missing');
@@ -85,7 +87,7 @@ if (mode === 'runtime') {
   const pushPresent = github.push !== 'missing';
   // The ledger client gets its token per call and hands it only to its python child, with a
   // private gh configuration under the state directory (server/runtime.mjs).
-  base = createRuntime({ host: 'vps', githubCredentials });
+  base = createRuntime({ host, githubCredentials });
   runtimeOps = await createRuntimeOperations({
     runtimeFor: principal => base.as(principal),
     principalFromWire: wire => base.principalFromHub(wireClaim(wire)),

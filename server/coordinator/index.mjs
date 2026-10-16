@@ -54,8 +54,7 @@ const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_clo
   'secret_detected', 'instruction_refused', 'not_a_fact', 'evidence_required', 'duplicate_fact', 'memory_full', 'revision_conflict',
   // Delegation (#47).
   ...DELEGATION_REFUSALS]);
-// Phase 5: the only host a remote (OIDC) principal's workspace may live on. Mac-hosted
-// workspaces driven remotely are deferred to Phase 5b (spec non-goals, REQ-P5-08).
+// Remotes use VPS by default; opted-in Mac runtimes only accept Mac host workspaces.
 const REMOTE_HOST = 'vps';
 const UNCERTAIN = new Set(['ledger_unavailable', 'ledger_outcome_unknown']);
 const MAX_LIST = 200;
@@ -708,8 +707,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     memoryGet: args => memory.get(args),
     memoryList: args => memory.list(args),
     async workspaceOpen(args) {
-      // A client kind the server derived (principal.client_type, Phase 5 D6) wins over the
-      // argument a model wrote; otherwise the argument, as before.
+      // The authenticated client kind overrides untrusted model arguments.
       const clientType = principal.client_type ?? args.client_type ?? 'other';
       if (!CLIENT_TYPES.includes(clientType)) return fail('invalid_input', 'client_type');
       const label = cleanText(args.client_label, 80);
@@ -717,7 +715,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const remote = isRemotePrincipal(principal);
       const hostId = args.host ?? (remote ? REMOTE_HOST : host);
       if (!HOSTS.includes(hostId)) return fail('invalid_input', 'host');
-      if (remote && hostId !== REMOTE_HOST) return fail('host_not_remote_enabled');
+      if (remote && hostId !== (remotePolicy?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST))
+        return fail('host_not_remote_enabled');
       if (args.branch !== undefined && args.branch !== null && !validBranch(args.branch)) return fail('invalid_input', 'branch');
       const project = await resolve(args.project);
       if (!project.ok) return project;
@@ -1420,9 +1419,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     return origins;
   }
 
-  // The project an op works on, for the allowlist: the argument of workspace_open, else the
-  // project of the owned workspace it names. null when there is nothing to check yet (the
-  // operation itself then refuses the unknown or foreign workspace).
+  // Resolve the project for the remote allowlist, never trusting foreign workspaces.
   async function projectOf(op, args) {
     if (op === 'workspace_open' || op === 'batch_create' || op === 'batch_status') return typeof args.project === 'string' ? args.project : '';
     if (!WS_RE.test(args.workspace_id ?? '')) return null;

@@ -76,6 +76,8 @@ export function parseRemotePolicy(value) {
   }
   deadline ??= SOFT_DEADLINE.default;
   if (!Number.isInteger(deadline) || deadline < SOFT_DEADLINE.min || deadline > SOFT_DEADLINE.max) throw new Error('invalid_remote_policy');
+  const macRoute = value.mac_runtime_routing ?? 'disabled';
+  if (!['enabled', 'disabled'].includes(macRoute)) throw new Error('invalid_remote_policy');
   const writes = value.remote_writes ?? 'disabled';
   if (!['enabled', 'disabled'].includes(writes)) throw new Error('invalid_remote_policy');
   const oidc = value.oidc ?? {};
@@ -83,7 +85,8 @@ export function parseRemotePolicy(value) {
   const ownerSub = oidc.owner_sub ?? value.owner_sub ?? null;
   if (ownerSub !== null && (typeof ownerSub !== 'string' || !SUB_RE.test(ownerSub))) throw new Error('invalid_remote_policy');
   return Object.freeze({ projects: Object.freeze([...new Set(names)]), session_binding: binding,
-    soft_deadline_ms: deadline, remote_writes: writes, owner_sub: ownerSub, configured: true });
+    soft_deadline_ms: deadline, remote_writes: writes, owner_sub: ownerSub, configured: true,
+    ...(macRoute === 'enabled' ? { allow_mac_runtime: true } : {}) });
 }
 
 // Without a readable policy every remote project check fails closed (empty allowlist), the

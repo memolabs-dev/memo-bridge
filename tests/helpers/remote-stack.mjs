@@ -129,7 +129,7 @@ async function gitSandbox(t, base) {
 }
 
 // Build the stack. remote: overrides of remote.json; systemctl: the write gate fixture.
-export async function remoteStack(t, { remote = {}, systemctl = SYSTEMCTL_NO_RUNNER } = {}) {
+export async function remoteStack(t, { remote = {}, systemctl = SYSTEMCTL_NO_RUNNER, runtimeHost = 'vps' } = {}) {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'memo-remote-stack-')));
   t.after(() => rm(base, { recursive: true, force: true }));
   t.after(await gitSandbox(t, base));
@@ -159,7 +159,7 @@ export async function remoteStack(t, { remote = {}, systemctl = SYSTEMCTL_NO_RUN
   t.after(() => { if (previous === undefined) delete process.env.MEMO_BRIDGE_REMOTE_CONFIG; else process.env.MEMO_BRIDGE_REMOTE_CONFIG = previous; });
 
   const runtime = createRuntime({ stateDir: join(base, 'state'), principal: makePrincipal('local:owner', Object.values(CAPABILITIES)),
-    ledger: stubLedger(), catalogOptions: { projectsRoot, layoutRoot: projectsRoot }, host: 'vps',
+    ledger: stubLedger(), catalogOptions: { projectsRoot, layoutRoot: projectsRoot }, host: runtimeHost,
     projectRemote: async () => 'memolabs-dev/demo', env: { MEMO_BRIDGE_REMOTE_CONFIG: configPath } });
   t.after(() => runtime.close());
   const wire = [];
@@ -171,20 +171,20 @@ export async function remoteStack(t, { remote = {}, systemctl = SYSTEMCTL_NO_RUN
   const { tlsKey, tlsCert } = await tlsPair(t);
   const identity = generateAgentIdentity();
   const hub = createHub({ tlsKey, tlsCert, tokenSha256: createHash('sha256').update('x'.repeat(64)).digest('hex'),
-    allowedAgentKeys: { vps: identity.publicKey }, port: 0 });
+    allowedAgentKeys: { [runtimeHost]: identity.publicKey }, port: 0 });
   const { port: hubPort } = await hub.start();
   t.after(() => hub.stop());
-  const agent = createAgent({ host: 'vps', url: `wss://127.0.0.1:${hubPort}/agent`, privateKey: identity.privateKey, ca: tlsCert,
+  const agent = createAgent({ host: runtimeHost, url: `wss://127.0.0.1:${hubPort}/agent`, privateKey: identity.privateKey, ca: tlsCert,
     reconnectMs: 100_000, operations: { ...probeOperations('vps'), ...ops.handlers } });
   t.after(() => agent.stop());
-  await until(() => hub.agentInfo('vps')?.version === 2);
+  await until(() => hub.agentInfo(runtimeHost)?.version === 2);
 
   const pair = await generateKeyPair('ES256');
   const jwks = createLocalJWKSet({ keys: [{ ...(await exportJWK(pair.publicKey)), kid: 'k1', alg: 'ES256', use: 'sig' }] });
   const verifier = createOidcVerifier({ issuer: ISSUER, ownerSub: SUB, allowedClientIds: [CHATGPT], jwks, remoteWrites: raw.remote_writes });
   const journal = [];
   const listener = await createRemoteService({ raw, tlsKey, tlsCert, requestAgent: hub.requestAgent, audit: e => journal.push(e),
-    systemctl, verifier, port: 0 });
+    systemctl, verifier, port: 0, stateDir: join(base, 'hub-state') });
   const { port } = await listener.start();
   t.after(() => listener.stop());
 

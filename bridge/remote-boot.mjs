@@ -12,6 +12,7 @@
 // the agent keys or the 9443 listener.
 import { assertWriteGate } from './write-gate.mjs';
 import { createForwarder } from './forward.mjs';
+import { createWorkspaceHostRouter } from './workspace-host-router.mjs';
 import { createAuthFailureLimiter, createRateLimiter } from './ratelimit.mjs';
 import { REMOTE_RUNTIME_HOST, createRemoteServerFactory, unlistedToolCalls } from './remote-surface.mjs';
 import { createPublicListener } from './public-listener.mjs';
@@ -30,7 +31,7 @@ import { isOperatorOp } from './ops.mjs';
 // Resolves with the listener (not started). Throws Error('invalid_remote_config ...') or
 // Error('remote writes refused: <code>').
 export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, requestOperator = null, audit = () => {}, systemctl,
-  verifier, port } = {}) {
+  verifier, port, stateDir = null } = {}) {
   if (typeof requestAgent !== 'function') throw new Error('requestAgent required');
   const parsed = parseRemoteJson(raw);
   if (!parsed.ok) throw new Error(`${parsed.error}${parsed.field ? ` (${parsed.field})` : ''}`);
@@ -48,10 +49,12 @@ export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, 
   }
 
   const journal = event => { try { audit(event); } catch { /* the journal never fails a call */ } };
+  const router = createWorkspaceHostRouter({ requestAgent, enabled: surface.mac_runtime_routing === 'enabled', stateDir,
+    audit: journal });
   const forwarder = createForwarder({
     requestAgent: (host, op, o) => {
       const envelope = { args: o.args, principal: o.principal, requestId: o.requestId, clientSession: o.clientSession };
-      if (!isOperatorOp(op)) return requestAgent(host, op, envelope);
+      if (!isOperatorOp(op)) return router.call(host, op, envelope);
       if (typeof requestOperator !== 'function') return { ok: false, error: 'operator_disabled' };
       return requestOperator(o.args?.host, op, envelope);
     },
