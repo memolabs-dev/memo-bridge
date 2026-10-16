@@ -1,0 +1,46 @@
+# Memo Labs controlled Mergify pilot.
+# No PR is auto-queued without TWO explicit labels and a real approving review.
+# This is not a replacement for GitHub branch protections or the existing landing contract.
+merge_queue:
+  max_parallel_checks: 1
+
+queue_rules:
+  - name: memo-labs-canary
+    batch_size: 1
+    merge_method: squash
+    queue_conditions:
+      - "base = main"
+      - "-draft"
+      - "author = memo-labs-automation[bot]"
+      - "label = mergify:pilot"
+      - "label = landing:approved"
+      - "label != hold-merge"
+      - "#approved-reviews-by >= 1"
+      - "check-success = @github-actions/test (22)"
+      - "check-success = @github-actions/test (24)"
+    merge_conditions:
+      - "base = main"
+      - "-draft"
+      - "author = memo-labs-automation[bot]"
+      - "label = mergify:pilot"
+      - "label = landing:approved"
+      - "label != hold-merge"
+      - "#approved-reviews-by >= 1"
+      - "check-success = @github-actions/test (22)"
+      - "check-success = @github-actions/test (24)"
+
+pull_request_rules:
+  - name: Queue authorized Memo Labs pilot PRs only
+    conditions:
+      - "base = main"
+      - "-draft"
+      - "author = memo-labs-automation[bot]"
+      - "label = mergify:pilot"
+      - "label = landing:approved"
+      - "label != hold-merge"
+      - "#approved-reviews-by >= 1"
+      - "check-success = @github-actions/test (22)"
+      - "check-success = @github-actions/test (24)"
+    actions:
+      queue:
+        name: memo-labs-canary
