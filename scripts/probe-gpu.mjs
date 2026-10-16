@@ -1,5 +1,5 @@
-// Local hardware discovery only. Does not start an MCP server, jobs or remote hub.
-import { probeNvidiaGpus } from '../server/runners/gpu.mjs';
+// Local, read-only, vendor-neutral hardware discovery. Does not start remote MCP/jobs.
+import { probeGpus } from '../server/runners/gpu-inventory.mjs';
 
-const report = await probeNvidiaGpus();
+const report = await probeGpus();
 process.stdout.write(JSON.stringify(report, null, 2) + '\n');
