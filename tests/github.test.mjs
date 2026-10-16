@@ -543,3 +543,77 @@ test('helpers: parseRepo and cleanText', () => {
   assert.equal(cleanText('line1\r\nline2', 50, { multiline: true }), 'line1\nline2');
   assert.equal(cleanText('x'.repeat(20), 5), 'xxxx…');
 });
+
+
+
+test('partial PR leaves its parent Issue open: no closing keyword is added', async t => {
+  const fx = await gitFixture(t);
+  const { gh, calls } = fakeGh(prRoutes());
+  const { rt, server } = await setup(t, { gh });
+  await seed(rt, { worktree: { path: fx.clone } });
+  const res = await server.call('github_create_pr', {
+    workspace_id: WS, worktree_id: WT, title: 'First slice of #7',
+    body: 'Implements one prerequisite; the remaining acceptance items stay open. Refs #7.',
+    close_issue: false
+  });
+  assert.equal(res.ok, true);
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post, 'the PR is created');
+  const payload = JSON.parse(post.input);
+  assert.equal(payload.body, 'Implements one prerequisite; the remaining acceptance items stay open. Refs #7.');
+  assert.equal(/Closes? #7/i.test(payload.body), false);
+});
+
+test('an explicitly terminal PR still closes its Issue by default', async t => {
+  const fx = await gitFixture(t);
+  const { gh, calls } = fakeGh(prRoutes());
+  const { rt, server } = await setup(t, { gh });
+  await seed(rt, { worktree: { path: fx.clone } });
+  const res = await server.call('github_create_pr', {
+    workspace_id: WS, worktree_id: WT, title: 'Final slice of #7', body: 'All acceptance items met.',
+    close_issue: true
+  });
+  assert.equal(res.ok, true);
+  const payload = JSON.parse(calls.find(c => c.method === 'POST').input);
+  assert.equal(payload.body, 'All acceptance items met.' + String.fromCharCode(10, 10) + 'Closes #7');
+});
+
+test('partial PR refuses embedded closing directives and invalid close_issue input', async t => {
+  const fx = await gitFixture(t);
+  const { gh, calls } = fakeGh(prRoutes());
+  const { rt, server } = await setup(t, { gh });
+  await seed(rt, { worktree: { path: fx.clone } });
+  for (const body of [
+    'Closes #7', 'fixes #7', 'Resolved: #123',
+    'CLOSES memolabs-dev/drop#7', 'Fix #13'
+  ]) {
+    const res = await server.call('github_create_pr', {
+      workspace_id: WS, worktree_id: WT, title: 'partial', body, close_issue: false
+    });
+    assert.equal(res.ok, false, body);
+    assert.equal(res.error, 'invalid_input', body);
+    assert.equal(res.detail, 'closing_keyword_disallowed', body);
+  }
+  assert.equal((await server.call('github_create_pr', {
+    workspace_id: WS, worktree_id: WT, title: 'partial', close_issue: 'false'
+  })).error, 'invalid_input');
+  assert.equal(calls.filter(c => c.method === 'POST').length, 0);
+});
+
+test('two PR slices on the same Issue distinguish partial from terminal', async t => {
+  const fx = await gitFixture(t);
+  async function bodyFor(close_issue) {
+    const { gh, calls } = fakeGh(prRoutes());
+    const { rt, server } = await setup(t, { gh });
+    await seed(rt, { worktree: { path: fx.clone } });
+    assert.equal((await server.call('github_create_pr', {
+      workspace_id: WS, worktree_id: WT, title: 'slice', body: 'Implementation slice.',
+      close_issue
+    })).ok, true);
+    return JSON.parse(calls.find(c => c.method === 'POST').input).body;
+  }
+  const first = await bodyFor(false);
+  const last = await bodyFor(true);
+  assert.equal(first, 'Implementation slice.');
+  assert.equal(last, 'Implementation slice.' + String.fromCharCode(10, 10) + 'Closes #7');
+});

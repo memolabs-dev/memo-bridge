@@ -46,6 +46,9 @@ const repoArg = z.string().max(140).describe('owner/repo of a registered project
 const limitArg = z.number().int().min(LIMITS.list.min).max(LIMITS.list.max).optional()
   .describe(`Maximum items returned (default ${LIMITS.list.default}, first page only).`);
 
+// Refuse GitHub auto-close directives in partial PR bodies.
+const ANY_CLOSING_DIRECTIVE = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*\b`, 'i');
+
 // The body already references the Issue with a GitHub closing keyword?
 function closesIssue(body, issue) {
   const ref = `(?:${issue.repo.replace(/[.]/g, '\\.')})?#${issue.number}(?![0-9])`;
@@ -169,13 +172,14 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_create_pr', {
-    description: 'Open a pull request from the branch of an active worktree of your workspace into the repository default branch. The branch must already be pushed, the workspace must hold a live claim on the worktree Issue (verified by the lease ledger), and "Closes #<n>" is appended when the Issue is in the same repository. Returns the existing pull request when one is already open for the branch. Never merges and never enables auto-merge: the memolabs-dev/.github landing contract lands pull requests.',
+    description: 'Open a pull request from the branch of an active worktree of your workspace into the repository default branch. The branch must already be pushed, the workspace must hold a live claim on the worktree Issue (verified by the lease ledger), and by default "Closes #<n>" is appended when the Issue is in the same repository. For partial PRs pass close_issue: false to leave the Issue open. Returns the existing pull request when one is already open for the branch. Never merges and never enables auto-merge: the memolabs-dev/.github landing contract lands pull requests.',
     inputSchema: z.object({
       workspace_id: z.string().max(40).describe('Workspace id returned by workspace_open (ws_…).'),
       worktree_id: z.string().max(60).describe('Worktree id returned by worktree_create.'),
       title: z.string().min(1).max(LIMITS.title),
       body: z.string().max(LIMITS.body).optional(),
       draft: z.boolean().optional(),
+      close_issue: z.boolean().optional().describe('Default true. Set false for an incremental or partial PR: no closing keyword is allowed and the parent Issue stays open when the PR merges.'),
       client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
         .describe('Your own id for this call (8 to 128 letters, digits, _ or -). A retry with the same id returns the first result.')
     }),
@@ -221,6 +225,8 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   // Pull requests go out under the owner's name: no AI attribution, as for commit messages.
   if (AI_ATTRIBUTION.some(rx => rx.test(`${args.title}\n${args.body ?? ''}`))) return fail('invalid_input', 'AI attribution');
   if (args.draft !== undefined && typeof args.draft !== 'boolean') return fail('invalid_input', 'draft');
+  if (args.close_issue !== undefined && typeof args.close_issue !== 'boolean') return fail('invalid_input', 'close_issue');
+  if (args.close_issue === false && ANY_CLOSING_DIRECTIVE.test(args.body ?? '')) return fail('invalid_input', 'closing_keyword_disallowed');
 
   // Local preconditions in one consistent read: owned active workspace, its active worktree on
   // this host, and a live local claim on the worktree's Issue.
@@ -291,7 +297,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
     head: branch, base: existing.pull.base };
 
   let body = (args.body ?? '').trim();
-  if (issue.repo.toLowerCase() === repo.full.toLowerCase() && !closesIssue(body, issue)) {
+  if (args.close_issue !== false && issue.repo.toLowerCase() === repo.full.toLowerCase() && !closesIssue(body, issue)) {
     body = body ? `${body}\n\nCloses #${issue.number}` : `Closes #${issue.number}`;
   }
 
