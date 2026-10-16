@@ -75,8 +75,9 @@ const HOST_TOOLS = ['host_capabilities', 'host_resources'];
 const GITHUB_TOOLS = ['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks', 'github_create_pr'];
 const AUDIT_TOOLS = ['audit_events', 'audit_operation'];
 const MEMORY_TOOLS = ['memory_save', 'memory_search', 'memory_get', 'memory_list'];
+const SKILL_TOOLS = ['skills_list', 'skill_view', 'skill_learn', 'skill_propose'];
 const EXPECTED = [...BASE_TOOLS, ...OBSERVER_TOOLS, ...COORDINATOR_TOOLS, ...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS,
-  ...GITHUB_TOOLS, ...AUDIT_TOOLS, ...MEMORY_TOOLS].sort();
+  ...GITHUB_TOOLS, ...AUDIT_TOOLS, ...MEMORY_TOOLS, ...SKILL_TOOLS].sort();
 
 const client = new Client({ name: 'memo-bridge-smoke', version: '0.2.0' });
 const transport = new StdioClientTransport({
