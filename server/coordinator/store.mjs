@@ -10,10 +10,11 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { MEMORY_SCHEMA, memoryRepository } from './memory-store.mjs';
 import { CONTINUITY_SCHEMA, continuityRepository } from './continuity-store.mjs';
 import { delegationRepository, migrateV7 } from './delegation-store.mjs';
+import { SOURCE_SCHEMA, sourceRepository } from './source-store.mjs';
 
 // v5: context memory across conversations (server/coordinator/memory-store.mjs), additive.
 // v6: structured handoffs and learning counters (server/coordinator/continuity-store.mjs), additive.
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -456,6 +457,7 @@ function migrate(db) {
       if (current < 5) db.exec(MEMORY_SCHEMA);
       if (current < 6) db.exec(CONTINUITY_SCHEMA);
       if (current < 7) migrateV7(db);
+      if (current < 8) db.exec(SOURCE_SCHEMA);
       if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
@@ -508,7 +510,7 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
     db.close();
     throw error;
   }
-  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db), ...delegationRepository(db) };
+  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db), ...delegationRepository(db), ...sourceRepository(db) };
   // One connection per process: serialize transactions so concurrent MCP calls in the same
   // process never interleave inside BEGIN/COMMIT. Cross-process exclusion is SQLite's lock.
   let queue = Promise.resolve();
