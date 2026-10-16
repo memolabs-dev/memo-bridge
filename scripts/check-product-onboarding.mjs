@@ -7,7 +7,7 @@ import { assessProductOnboarding } from '../server/onboarding-readiness.mjs';
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  process.stdout.write('Usage: node scripts/check-product-onboarding.mjs <project-name> [...]\\n');
+  process.stdout.write('Usage: node scripts/check-product-onboarding.mjs <project-name> [...]\n');
 } else {
   try {
     const names = args.length ? args : ['rebuild-radar', 'mobile-explorer'];
@@ -26,12 +26,12 @@ if (args.includes('--help')) {
     process.stdout.write(JSON.stringify({
       ...result, ledger_readable: Boolean(ledger.ok),
       note: 'Neither GitHub App installation nor landing eligibility is proven by this preflight.'
-    }, null, 2) + '\\n');
+    }, null, 2) + '\n');
     if (!result.all_coordinator_ready || !ledger.ok) process.exitCode = 1;
   } catch (error) {
     // No raw exception paths or environment values leak to logs.
     process.stderr.write(JSON.stringify({ ok: false,
-      error: error?.message === 'invalid_names' ? 'invalid_names' : 'preflight_unavailable' }) + '\\n');
+      error: error?.message === 'invalid_names' ? 'invalid_names' : 'preflight_unavailable' }) + '\n');
     process.exitCode = 2;
   }
 }
