@@ -17,6 +17,7 @@ import { HOST_TOOLS, registerHostTools } from './tools/host-tools.mjs';
 import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
 import { MEMORY_TOOLS, registerMemoryTools } from './tools/memory-tools.mjs';
+import { SKILL_TOOLS, registerSkillTools } from './tools/skill-tools.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 import { DELEGATION_INSTRUCTIONS, LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
@@ -34,7 +35,8 @@ const TOOL_GROUPS = {
   run: [...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS],
   github: [...GITHUB_TOOLS],
   audit: [...AUDIT_TOOLS],
-  memory: [...MEMORY_TOOLS]
+  memory: [...MEMORY_TOOLS],
+  skills: [...SKILL_TOOLS]
 };
 const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
 
@@ -179,5 +181,6 @@ registerHostTools(counted, getRuntime);
 registerGithubTools(counted, getRuntime);
 registerAuditTools(counted, getRuntime);
 registerMemoryTools(counted, getRuntime);
+registerSkillTools(counted, getRuntime);
 
 await server.connect(new StdioServerTransport());

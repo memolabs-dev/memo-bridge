@@ -26,7 +26,8 @@ export const TOOL_MODULES = Object.freeze([
   ['./tools/github-tools.mjs', 'registerGithubTools'],
   ['./tools/audit-tools.mjs', 'registerAuditTools'],
   ['./tools/catalog-tools.mjs', 'registerCatalogTools'],
-  ['./tools/memory-tools.mjs', 'registerMemoryTools']
+  ['./tools/memory-tools.mjs', 'registerMemoryTools'],
+  ['./tools/skill-tools.mjs', 'registerSkillTools']
 ].map(Object.freeze));
 
 // The public ChatGPT surface (spec §1 non-goals, D5). Excluded on purpose:
@@ -42,7 +43,8 @@ export const REMOTE_TOOLS_READ = Object.freeze([
   'host_capabilities',
   'github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
   'audit_events', 'audit_operation',
-  'memory_search', 'memory_get', 'memory_list'
+  'memory_search', 'memory_get', 'memory_list',
+  'skills_list', 'skill_view', 'skill_learn'
 ]);
 export const REMOTE_TOOLS_WRITE = Object.freeze([
   'workspace_open', 'workspace_close',
@@ -52,7 +54,7 @@ export const REMOTE_TOOLS_WRITE = Object.freeze([
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push',
   'jobs_submit', 'job_cancel',
   'github_create_pr',
-  'memory_save'
+  'memory_save', 'skill_propose'
 ]);
 export const REMOTE_TOOLS = Object.freeze([...REMOTE_TOOLS_READ, ...REMOTE_TOOLS_WRITE]);
 const REMOTE_WRITE_SET = new Set(REMOTE_TOOLS_WRITE);
