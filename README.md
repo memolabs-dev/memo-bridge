@@ -85,7 +85,7 @@ pnpm run install:standalone
 pnpm run smoke:standalone
 ```
 
-A public/remote MCP is a separate secured project (#74), and a safe GPU job runner follows
+A preliminary **personal, read-only OAuth resource server** lives separately from the owner hub; see\n[PERSONAL_REMOTE_MCP.md](docs/PERSONAL_REMOTE_MCP.md) for its security boundary and remaining\nmanual steps. No public endpoint or new user has been deployed.\n\nA public/remote MCP is a separate secured project (#74), and a safe GPU job runner follows
 device/backend verification (#73). No collaborator should be enrolled on the owner-only
 `bridge.memolabs.dev` hub.
 

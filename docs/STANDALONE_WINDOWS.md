@@ -65,7 +65,7 @@ Configure a client that supports **local MCP stdio** with the installed executab
 
 Alternatively, in a local checkout point to `standalone/index.mjs` directly. The server communicates over stdin/stdout (JSON-RPC); launching it in a console will appear to wait for a client, which is expected. The helper `pnpm run smoke:standalone` tests the **built** executable using a real MCP client and a temporary isolated user config.
 
-**Important:** local MCP stdio is **not** a ChatGPT cloud connector. Linking an independent Windows PC to ChatGPT remotely requires a separate authenticated HTTPS service, device enrollment, revocation and a security review (#74). Do **not** use `bridge.memolabs.dev`, the owner's Pocket ID account, SSH credentials or Github Apps. An owner-controlled MCP client on the local PC runs with that OS user's permissions: don't enable this server for untrusted apps.
+A separate [personal remote OAuth resource-server prototype](PERSONAL_REMOTE_MCP.md)\nexists for later self-hosting. Its loopback listener is **not** by itself a public ChatGPT endpoint.\n\n**Important:** local MCP stdio is **not** a ChatGPT cloud connector. Linking an independent Windows PC to ChatGPT remotely requires a separate authenticated HTTPS service, device enrollment, revocation and a security review (#74). Do **not** use `bridge.memolabs.dev`, the owner's Pocket ID account, SSH credentials or Github Apps. An owner-controlled MCP client on the local PC runs with that OS user's permissions: don't enable this server for untrusted apps.
 
 ## GPU
 
