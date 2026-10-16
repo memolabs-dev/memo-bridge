@@ -30,7 +30,7 @@ import { isOperatorOp } from './ops.mjs';
 // Resolves with the listener (not started). Throws Error('invalid_remote_config ...') or
 // Error('remote writes refused: <code>').
 export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, requestOperator = null, audit = () => {}, systemctl,
-  verifier, port } = {}) {
+  verifier, port, diagnose = null } = {}) {
   if (typeof requestAgent !== 'function') throw new Error('requestAgent required');
   const parsed = parseRemoteJson(raw);
   if (!parsed.ok) throw new Error(`${parsed.error}${parsed.field ? ` (${parsed.field})` : ''}`);
@@ -60,13 +60,13 @@ export async function createRemoteService({ raw, tlsKey, tlsCert, requestAgent, 
   const factory = createRemoteServerFactory({
     config: surface,
     dispatch: (host, op, o) => forwarder.call({ op, args: o.args, principal: o.principal, ctx: o.ctx, clientId: o.clientId }),
-    audit: journal
+    audit: journal, diagnose
   });
   return createPublicListener({
     tlsKey, tlsCert, ...listener, ...(port !== undefined ? { port } : {}), ...(verifier ? { verifier } : {}),
     writeGateCheck: () => gate, factory, audit: journal,
     authLimiter: createAuthFailureLimiter(authFailures),
-    unlistedCalls: (authInfo, message) => unlistedToolCalls(authInfo, surface, message),
+    unlistedCalls: (authInfo, message) => unlistedToolCalls(authInfo, surface, message, { diagnose: typeof diagnose === 'function' }),
     clientCert
   });
 }

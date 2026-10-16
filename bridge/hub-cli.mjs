@@ -80,7 +80,8 @@ let publicListener = null;
 if (remotePath) {
   if (!isAbsolute(remotePath)) throw new Error(REMOTE_CONFIG_ENV + ' must be an absolute path');
   publicListener = await createRemoteService({ raw: JSON.parse(readFileSync(remotePath, 'utf8')), tlsKey, tlsCert,
-    requestAgent: hub.requestAgent, requestOperator: hub.requestOperator, audit });
+    requestAgent: hub.requestAgent, requestOperator: hub.requestOperator,
+    diagnose: hub.diagnose, audit });
 }
 
 // The operator bot: only with the operator key, the owner chat id and the token credential.

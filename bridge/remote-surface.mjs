@@ -23,6 +23,7 @@
 // which adds the request id, the session hash (from ctx), rate limits and the soft deadline.
 // The principal travels as {id} only; the runtime maps it with its own grants.
 import { McpServer } from '@modelcontextprotocol/server';
+import { z } from 'zod/v4';
 import { CAPABILITIES, CLIENT_TYPES, REMOTE_DEFAULT_CEILING, authorize, isPrincipal, makePrincipal, remotePrincipal }
   from '../server/coordinator/policy.mjs';
 import { collectOperatorDefinitions, collectToolDefinitions, isRemoteOperatorTool, isRemoteWriteTool, operatorRegistryProblems,
@@ -233,7 +234,7 @@ function checkedDefinitions() {
 }
 
 // One McpServer for one request of one principal.
-function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
+function buildServer(principal, clientId, cfg, defs, dispatch, audit, diagnose) {
   const server = new McpServer({ name: 'memo-bridge', version: PACKAGE_VERSION }, { instructions: INSTRUCTIONS });
   const allowed = new Set([...toolsFor(principal, { remoteWrites: cfg.remoteWrites }),
     ...operatorToolsFor(principal, { remoteWrites: cfg.remoteWrites })]);
@@ -241,6 +242,19 @@ function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
     audit({ at: new Date().toISOString(), event: 'remote_denied', principal: principal.id, op, reason: error });
     return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error }) }] };
   };
+  if (typeof diagnose === 'function') {
+    server.registerTool('bridge_diagnose', {
+      description:'Read-only diagnosis from redacted in-memory hub event classes (no raw logs).',
+      inputSchema:z.object({}),
+      annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false}
+    }, async () => {
+      try {
+        const data=await diagnose();
+        const out=boundedResult('bridge_diagnose', data, cfg.budgetBytes);
+        return {content:[{type:'text',text:out.text}]};
+      } catch { return refuse('bridge_diagnose','diagnostic_unavailable'); }
+    });
+  }
   for (const op of [...allowed].sort()) {
     const def = defs.get(op);
     server.registerTool(op, { description: def.description, inputSchema: def.inputSchema, annotations: def.annotations },
@@ -276,7 +290,7 @@ function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
 // The config is checked here, at construction; a bad one throws before anything is served.
 // audit(event) receives refusals and over-budget results: principal, op and a code, never
 // arguments or results.
-export function createRemoteServerFactory({ authInfo, config, dispatch, audit = () => {} } = {}) {
+export function createRemoteServerFactory({ authInfo, config, dispatch, audit = () => {}, diagnose = null } = {}) {
   if (typeof dispatch !== 'function') throw new Error('dispatch required');
   const cfg = parseRemoteConfig(config);
   // The journal never takes a call down.
@@ -289,7 +303,7 @@ export function createRemoteServerFactory({ authInfo, config, dispatch, audit = 
       throw new RemoteAccessError(decided.error);
     }
     const defs = await checkedDefinitions();
-    return buildServer(decided.principal, auth.clientId, cfg, defs, dispatch, note);
+    return buildServer(decided.principal, auth.clientId, cfg, defs, dispatch, note, diagnose);
   };
 }
 
@@ -305,12 +319,13 @@ export function remoteToolNames(principal, config) {
 // listener journals them from here (AC-P5-07). Names that are not op-shaped come back as
 // 'invalid'; nothing else of the request is read.
 const CALL_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
-export function unlistedToolCalls(authInfo, config, message) {
+export function unlistedToolCalls(authInfo, config, message, { diagnose = false } = {}) {
   const decided = remotePrincipalFor(authInfo, config);
   if (!decided.ok) return [];
   const cfg = normalized(config);
   const listed = new Set([...toolsFor(decided.principal, { remoteWrites: cfg.remoteWrites }),
     ...operatorToolsFor(decided.principal, { remoteWrites: cfg.remoteWrites })]);
+  if (diagnose) listed.add('bridge_diagnose');
   const out = [];
   for (const msg of Array.isArray(message) ? message : [message]) {
     if (msg?.method !== 'tools/call') continue;

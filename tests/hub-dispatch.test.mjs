@@ -308,7 +308,7 @@ test('hub configuration is validated; without a runtime host only the hub tools 
   assert.throws(() => createHub({ ...base, readOnlyTokenSha256: sha(OWNER_TOKEN) }), /read-only/);
   assert.throws(() => createHub({ ...base, runtimeHost: 'cloud' }), /runtime host/);
   const { tools, callTool, audit } = await startHub(t, { runtimeHost: null, toolDefinitions: null });
-  assert.deepEqual(await tools(OWNER_TOKEN), ['bridge_info', 'host_status', 'list_hosts']);
+  assert.deepEqual(await tools(OWNER_TOKEN), ['bridge_diagnose', 'bridge_info', 'host_status', 'list_hosts']);
   await callTool(OWNER_TOKEN, 'job_status', { job_id: 'job_x' });
   assert.equal(audit.findLast(e => e.event === 'op_denied').reason, 'runtime_disabled');
   await callTool(OWNER_TOKEN, 'exec', { command: 'id' });
