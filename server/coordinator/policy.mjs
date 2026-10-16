@@ -84,6 +84,7 @@ export const OPERATION_CAPABILITY = Object.freeze({
   audit_operation: CAPABILITIES.READ,
   // Catalogue (Phase 5, FU-4): served by the runtime so a hub client can discover project names.
   projects_list: CAPABILITIES.READ,
+  project_context: CAPABILITIES.READ,
   source_changes_list: CAPABILITIES.READ,
   source_change_status: CAPABILITIES.READ,
   source_change_history: CAPABILITIES.READ,
