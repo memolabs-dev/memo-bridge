@@ -38,7 +38,7 @@ test('registry: the collected tools are exactly the policy table and the runtime
   // Each caller gets its own Map: one surface cannot change another one's list.
   defs.delete('tasks_list');
   assert.ok((await collectToolDefinitions()).has('tasks_list'));
-  assert.equal(TOOL_MODULES.length, 10);
+  assert.equal(TOOL_MODULES.length, 11);
   assert.ok(Object.isFrozen(TOOL_MODULES) && TOOL_MODULES.every(Object.isFrozen));
 });
 
@@ -85,7 +85,7 @@ test('toolsFor: gate layer 1 lists writes only with remote_writes "enabled", and
   const claimer = makePrincipal('oidc:claimer', [CAPABILITIES.READ, CAPABILITIES.WRITE]);
   assert.deepEqual(toolsFor(claimer, { remoteWrites: true }),
     [...REMOTE_TOOLS_READ, 'workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
-      'task_next', 'memory_save', 'workspace_delegate', 'delegation_join', 'delegation_report', 'delegation_end'].sort());
+      'task_next', 'memory_save', 'source_reconcile', 'workspace_delegate', 'delegation_join', 'delegation_report', 'delegation_end'].sort());
   assert.deepEqual(toolsFor(makePrincipal('oidc:none', [])), []);
   assert.deepEqual(toolsFor(null), []);
   for (const value of [undefined, null, {}, { remote_writes: 'disabled' }, { remote_writes: 'yes' }, { remote_writes: true }]) {
