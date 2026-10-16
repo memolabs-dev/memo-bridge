@@ -28,6 +28,7 @@ export const TOOL_MODULES = Object.freeze([
   ['./tools/catalog-tools.mjs', 'registerCatalogTools'],
   ['./tools/memory-tools.mjs', 'registerMemoryTools'],
   ['./tools/source-tools.mjs', 'registerSourceTools'],
+  ['./tools/context-tools.mjs', 'registerContextTools'],
   ['./tools/source-reconcile-tools.mjs', 'registerSourceReconcileTools']
 ].map(Object.freeze));
 
@@ -36,7 +37,7 @@ export const TOOL_MODULES = Object.freeze([
 //  - list_hosts, host_status and bridge_info, answered from hub state the remote surface does
 //    not hold; project_info, project_git_status and projects_audit (local paths, stdio only).
 export const REMOTE_TOOLS_READ = Object.freeze([
-  'projects_list',
+  'projects_list', 'project_context',
   'workspace_status', 'workspace_list', 'workspace_recover', 'sessions_overview', 'delegation_status',
   'tasks_list', 'task_status', 'batch_status',
   'worktrees_list', 'worktree_status', 'worktree_list_files', 'worktree_read_file', 'worktree_diff',

@@ -38,7 +38,7 @@ test('registry: the collected tools are exactly the policy table and the runtime
   // Each caller gets its own Map: one surface cannot change another one's list.
   defs.delete('tasks_list');
   assert.ok((await collectToolDefinitions()).has('tasks_list'));
-  assert.ok(TOOL_MODULES.length >= 10);
+  assert.equal(TOOL_MODULES.length, 11);
   assert.ok(Object.isFrozen(TOOL_MODULES) && TOOL_MODULES.every(Object.isFrozen));
 });
 
