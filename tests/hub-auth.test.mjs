@@ -64,6 +64,14 @@ test('auth, TLS, agent proof, scope and MCP tools', async()=>{
     assert.equal(tools.status,200,tools.body);
     const names=JSON.parse(tools.body).result.tools.map(x=>x.name).sort();
     assert.deepEqual(names,['bridge_diagnose','bridge_info','host_status','list_hosts']);
+    const diagnosed=await call({port,ca:tlsCert,token,body:{jsonrpc:'2.0',id:17,method:'tools/call',params:{name:'bridge_diagnose',arguments:{}}}});
+    assert.equal(diagnosed.status,200,diagnosed.body);
+    const diagnosis=JSON.parse(JSON.parse(diagnosed.body).result.content[0].text);
+    assert.equal(diagnosis.ok,true);
+    assert.ok(Array.isArray(diagnosis.evidence));
+    assert.equal(JSON.stringify(diagnosis).includes(token),false);
+    const deniedDiagnostic=await call({port,ca:tlsCert,body:{jsonrpc:'2.0',id:18,method:'tools/call',params:{name:'bridge_diagnose',arguments:{}}}});
+    assert.equal(deniedDiagnostic.status,401);
     const status=await call({port,ca:tlsCert,token,body:{jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'host_status',arguments:{host:'mac'}}}});
     assert.equal(status.status,200,status.body);
     const parsed=JSON.parse(status.body);
