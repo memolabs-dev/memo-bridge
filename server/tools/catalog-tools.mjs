@@ -43,7 +43,13 @@ export function registerCatalogTools(server, getRuntime, deps = {}) {
       await rt.audit('projects_list', 'denied', refusal.error);
       return result(refusal);
     }
-    const projects = listed.projects.filter(p => !remoteProjectRefusal(rt.principal, p.name, policy));
+    // Opt-in owner discovery: offline Mac snapshot entries are *metadata only*. It never
+    // expands the existing project allowlist checked by workspace_open / task_claim / runners.
+    // Other remote principals still see only explicitly allowed repositories.
+    const ownerDiscovery = rt.catalogDiscoveryEnabled === true && policy?.configured === true &&
+      typeof policy.owner_sub === 'string' && rt.principal.id === `oidc:${policy.owner_sub}`;
+    const projects = listed.projects.filter(p =>
+      !remoteProjectRefusal(rt.principal, p.name, policy) || (ownerDiscovery && p.metadata_only === true));
     return result({ ...listed, total: projects.length, count: projects.length, projects });
   });
 }

@@ -4,6 +4,7 @@ import { resolve, relative, isAbsolute, join, basename } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { memolabsRoot } from './memolabs-root.mjs';
+import { loadCatalogSnapshot, projectDiscoveryProjection } from './catalog-snapshot.mjs';
 
 const execFileAsync = promisify(execFile);
 // The registry root: PROJECTS.md lives there and its Path column is relative to it. On the Mac
@@ -105,11 +106,24 @@ export async function listProjects(filters = {}, options = {}) {
   const catalog = await readProjectRegistry(options);
   const query = (filters.search ?? '').trim().toLowerCase();
   const status = filters.status ?? '';
-  const projects = catalog.projects.filter(p =>
+  // The host-local registry remains authoritative for executable checkouts. Mac metadata is
+  // merged into this READ-ONLY list only when an operator configured an absolute snapshot file.
+  let projected = { source: catalog.source, total: catalog.count,
+    projects: catalog.projects.map(p => publicProject(p)) };
+  if (options.snapshotFile) {
+    try {
+      const snapshot = await loadCatalogSnapshot(options.snapshotFile, { now: options.now?.() ?? Date.now() });
+      projected = projectDiscoveryProjection(projected, snapshot);
+    } catch {
+      // Fail closed: never promote malformed or missing snapshot rows. Local projects remain usable.
+      projected.snapshot = { available: false, error: 'snapshot_unavailable' };
+    }
+  }
+  const projects = projected.projects.filter(p =>
     (!query || p.name.toLowerCase().includes(query) || p.nature.toLowerCase().includes(query)) &&
     (!status || p.status === status)
-  ).map(p => publicProject(p));
-  return { source: catalog.source, total: catalog.count, count: projects.length, projects };
+  );
+  return { ...projected, count: projects.length, projects };
 }
 
 export async function projectInfo(name, options = {}) {
