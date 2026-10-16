@@ -101,7 +101,12 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const policy = () => remotePolicy ?? remotePolicyFromEnv(env);
 
   const runtime = {
-    now, host, stateDir, catalogOptions,
+    now, host, stateDir,
+    // Configured by the operator, never by a tool argument. Metadata-only discovery must not
+    // change Coordinator resolution, GitHub allowlists or the host-local Git/worktree policy.
+    catalogOptions: env.MEMO_BRIDGE_CATALOG_SNAPSHOT
+      ? { ...catalogOptions, snapshotFile: env.MEMO_BRIDGE_CATALOG_SNAPSHOT } : catalogOptions,
+    catalogDiscoveryEnabled: env.MEMO_BRIDGE_CATALOG_DISCOVERY === 'enabled',
     githubCredentials: credentials,
     remotePolicy: policy,
     store: openStore,
