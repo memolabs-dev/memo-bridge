@@ -1,0 +1,14 @@
+# Template only; not installed or enabled by this PR.
+[Unit]
+Description=Memo Source Engine periodic reconciliation (operator opt-in)
+
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=3min
+AccuracySec=1min
+Persistent=true
+Unit=memo-source-poll.service
+
+[Install]
+WantedBy=timers.target

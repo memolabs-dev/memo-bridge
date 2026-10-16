@@ -1,0 +1,29 @@
+# Template ONLY. Replace @@...@@ with absolute, verified operator-owned paths.
+# Never install or enable without a successful dry-run canary on an allowlisted repo.
+[Unit]
+Description=Memo Source Engine trusted reconciliation (no GitHub writes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=memo-runner
+Group=memo-runner
+UMask=0077
+Environment=MEMO_BRIDGE_STATE_DIR=@@PRIVATE_STATE@@
+Environment=MEMO_BRIDGE_PROJECTS_ROOT=@@PROJECTS_ROOT@@
+WorkingDirectory=@@CHECKOUT@@
+# Reuse the existing Memo Bridge GitHub App READ credential wiring for this unit.
+# Do not embed tokens or PATs in the unit or Environment=.
+ExecStart=/usr/bin/flock -n @@PRIVATE_STATE@@/source-poll.lock /usr/bin/node @@CHECKOUT@@/server/source-engine/poll-cli.mjs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@@PRIVATE_STATE@@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=8min
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
