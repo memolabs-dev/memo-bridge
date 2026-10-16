@@ -28,7 +28,7 @@ const LEDGER_CHAIN_OPS = new Set(['task_claim', 'task_next', 'batch_create', 'ta
 const GITHUB_READ_OPS = new Set(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks']);
 
 // Ops answered by the hub itself (no agent, no capability beyond authentication).
-export const HUB_LOCAL_OPS = Object.freeze(['list_hosts', 'bridge_info']);
+export const HUB_LOCAL_OPS = Object.freeze(['list_hosts', 'bridge_info', 'bridge_diagnose']);
 export const HOSTS = Object.freeze(['mac', 'vps']);
 export const OPERATOR_INTERNAL_OPS = Object.freeze(['operator_audit_head', 'operator_owner_unfreeze',
   // The source side of operator_transfer (bridge/operator-transfer-source.mjs), sent by the hub only.

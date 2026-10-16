@@ -45,6 +45,7 @@ import { createTransfers } from './operator-transfer.mjs';
 import { operatorContent } from './operator-content.mjs';
 import { NOTIFY_LIMITS, createNotifier } from './operator-notifications.mjs';
 import { createHubState } from './hub-state.mjs';
+import { diagnoseHubJournal } from './hub-diagnose.mjs';
 import { NOTIFICATION_TOOLS } from '../server/tools/operator-notifications.mjs';
 import { untrusted } from './operator-output.mjs';
 
@@ -58,6 +59,7 @@ const MAX_HTTP_BYTES = 64 * 1024;
 export const hubFreezeDenial = (tier, frozen) => (frozen && tier > 0 ? 'frozen' : null);
 
 export function createHub(options) {
+  const diagnosticEvents = [];
   // The OIDC options of Phase 1 are refused rather than ignored: a deployment still setting
   // them must fail visibly, not silently fall back to the bearer.
   for (const key of ['oidc', 'oidcPrincipal']) if (Object.hasOwn(options ?? {}, key)) throw new Error(`hub does not take ${key}: OAuth is served by the public listener only`);
@@ -189,7 +191,12 @@ export function createHub(options) {
   let definitions = toolDefinitions;
   let pinger = null;
 
-  function record(event, host, details={}) { audit({at:new Date().toISOString(),event,host,...details}); }
+  function record(event, host, details={}) {
+    const at=new Date().toISOString();
+    diagnosticEvents.push(`${at} ${String(event).slice(0,80)}`);
+    if(diagnosticEvents.length>5000)diagnosticEvents.shift();
+    audit({at,event,host,...details});
+  }
   // Refusals are journaled with principal, op and reason only; never arguments or secrets.
   function denied(principal, op, reason) {
     record('op_denied', null, {principal: principal?.id ?? null, op: OP_RE.test(String(op)) ? op : 'invalid', reason});
@@ -794,6 +801,7 @@ export function createHub(options) {
       const out=await requestAgent(host,'host_status',{principal});
       return result(out?.ok===false ? {host,online:false,error:out.error} : out);
     });
+    mcp.registerTool('bridge_diagnose',{description:'Read-only classification of bounded redacted hub events; no corrections.',inputSchema:z.object({}),annotations:tags},async()=>result(diagnoseHubJournal(diagnosticEvents)));
     mcp.registerTool('bridge_info',{description:'Show current security and feature limitations',inputSchema:z.object({}),annotations:tags},async()=>result({
       mode: gate.mutatingOps==='owner' ? 'read-write-owner' : 'read-only', protocol: PROTOCOL_VERSION, version: PACKAGE_VERSION,
       transport:'https private-loopback', agent_transport:'authenticated-wss',
