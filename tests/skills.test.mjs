@@ -101,3 +101,24 @@ test('remote forwarded metadata is preserved for every runner operation', async 
  assert.equal((await run('skill_propose',{...args,content:body})).ok,true);
  assert.deepEqual(calls,Array(4).fill('test-remote-session'));
 });
+
+test('new skill: requires viewing missing name, explicit create, and no overwrite',async()=>{
+ const handlers=new Map();
+ let exists=false;let writes=0;
+ const fake={
+  readFile:async()=>exists?{ok:true,content:valid(),size:valid().length,truncated:false}:{ok:false,error:'not_found'},
+  writeFile:async()=>{writes++;exists=true;return {ok:true};}
+ };
+ registerSkillTools({registerTool(n,_c,h){handlers.set(n,h);}},()=>({
+   authorize:()=>true,principal:{id:'local:owner'},audit:async()=>{}
+ }),{createRunner:()=>fake});
+ const call=async(n,a)=>JSON.parse((await handlers.get(n)(a)).content[0].text);
+ const a={workspace_id:'ws_1234567890123456',worktree_id:'wt_1234567890123456',name:'example'};
+ assert.equal((await call('skill_propose',{...a,create:true,content:valid()})).error,'skill_view_required');
+ assert.equal((await call('skill_view',a)).exists,false);
+ assert.equal((await call('skill_propose',{...a,content:valid()})).error,'create_flag_required');
+ assert.equal((await call('skill_propose',{...a,create:true,content:valid()})).ok,true);
+ assert.equal(writes,1);
+ assert.equal((await call('skill_view',a)).exists,undefined);
+ assert.equal((await call('skill_propose',{...a,create:true,content:valid()})).error,'skill_already_exists');
+});
