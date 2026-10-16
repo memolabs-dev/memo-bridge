@@ -96,6 +96,8 @@ export function parseRemoteConfig(raw) {
   const known = new Set(Object.values(CAPABILITIES));
   const ceiling = raw.ceiling ?? REMOTE_DEFAULT_CEILING;
   if (!Array.isArray(ceiling) || ceiling.some(c => !known.has(c))) throw invalid('ceiling');
+  const routing = raw.mac_runtime_routing ?? 'disabled';
+  if (!['enabled', 'disabled'].includes(routing)) throw invalid('mac_runtime_routing');
   const writes = raw.remote_writes ?? 'disabled';
   if (writes !== 'enabled' && writes !== 'disabled') throw invalid('remote_writes');
   return Object.freeze({
@@ -103,6 +105,7 @@ export function parseRemoteConfig(raw) {
     clientTypes: new Map(entries),
     ceiling: Object.freeze([...new Set(ceiling)]),
     remoteWrites: writes === 'enabled',
+    macRuntimeRouting: routing === 'enabled',
     runtimeHost: REMOTE_RUNTIME_HOST,
     budgetBytes: boundedInt(raw.result_budget_bytes, 'result_budget_bytes', REMOTE_LIMITS.resultBudgetBytes),
     listLimit: boundedInt(raw.list_limit, 'list_limit', REMOTE_LIMITS.listLimit),
@@ -154,6 +157,7 @@ export function remoteArgs(op, raw, principal, cfg) {
     // Repatriation D-R14 (bench 2026-10-14 20:04): a workspace is a coordination record. A chat
     // that asks for the Mac gets its workspace on the vps runtime anyway, the requested host kept
     // in the label, and a note in the result; operator tools still act on the host they name.
+    if (cfg.macRuntimeRouting === true && args.host === 'mac') return { ok: true, args };
     if (args.host !== undefined && args.host !== REMOTE_RUNTIME_HOST) {
       const requested = HOST_NAMES.has(args.host) ? args.host : 'other';
       const label = typeof args.client_label === 'string' ? args.client_label : '';
