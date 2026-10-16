@@ -2,51 +2,67 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+const text = readFileSync(fileURLToPath(new URL('../.mergify.yml', import.meta.url)), 'utf8');
 
-const config = readFileSync(fileURLToPath(new URL('../.mergify.yml', import.meta.url)), 'utf8');
-
-// A static opt-in regression check, NOT a substitute for Mergify dashboard
-// validation of the actual YAML and live GitHub App configuration.
-const ruleText = heading => {
-  const match = config.match(new RegExp('^    ' + heading + ':\\n((?:      - .+\\n)+)', 'm'));
-  assert.ok(match, heading + ' missing');
-  return match[1];
-};
-const REQUIRED = [
-  'base = main',
-  '-draft',
+// Local structural regression tests. The live Mergify Config Changed check
+// remains the authoritative syntax validation.
+function conditions(label) {
+  const pos = text.indexOf(label);
+  assert.ok(pos >= 0, 'missing '+label);
+  const next = text.indexOf('\n\n', pos);
+  return text.slice(pos,next<0?undefined:next);
+}
+const requirements = [
+  'base = main', '-draft', '-from-fork',
   'author = memo-labs-automation[bot]',
-  'label = mergify:pilot',
-  'label = landing:approved',
-  'label != hold-merge',
-  '#approved-reviews-by >= 1',
+  'created-at >= 2026-10-16T17:30:00Z',
+  'label != hold-merge', 'label != needs-human-review',
+  '#files <= 8', '#added-lines <= 400', '#deleted-lines <= 150',
   'check-success = @github-actions/test (22)',
   'check-success = @github-actions/test (24)'
 ];
 
-test('Mergify canary policy must remain explicit in both queue and merge phases', () => {
-  assert.match(config, /^queue_rules:\n/m);
-  assert.match(config, /^pull_request_rules:\n/m);
-  assert.match(config, /name: memo-labs-canary/);
-  assert.match(config, /max_parallel_checks: 1/);
-  assert.match(config, /batch_size: 1/);
-  assert.match(config, /merge_method: squash/);
-  const sections = [
-    ruleText('queue_conditions'),
-    ruleText('merge_conditions'),
-    config.slice(config.indexOf('pull_request_rules:'))
-  ];
-  for (const section of sections) {
-    for (const requirement of REQUIRED) {
-      assert.ok(section.includes(JSON.stringify(requirement)), 'missing gate: ' + requirement);
-    }
-  }
+test('auto merging is conditional, never enabled for all PRs', () => {
+  assert.match(text,/merge_protections_settings:\s*\n\s+auto_merge_conditions:\s*\n/);
+  assert.doesNotMatch(text,/auto_merge_conditions:\s*(true|\[\])/);
+  assert.doesNotMatch(text,/autoqueue:/);
+  assert.doesNotMatch(text,/pull_request_rules:/);
+  assert.doesNotMatch(text,/landing:approved|mergify:pilot|approved-reviews-by/);
+  assert.match(text,/name: memo-labs-safe-auto/);
+  assert.match(text,/max_parallel_checks: 1/);
+  assert.match(text,/batch_size: 1/);
+  assert.match(text,/merge_method: squash/);
 });
 
-test('Mergify pilot cannot implicitly enable all-PR queuing', () => {
-  assert.doesNotMatch(config, /autoqueue:\s*true/);
-  assert.doesNotMatch(config, /auto_merge_conditions:\s*true/);
-  assert.doesNotMatch(config, /^\s+merge:/m);
-  assert.match(config, /actions:\n\s+queue:\n\s+name: memo-labs-canary/);
-  assert.doesNotMatch(config, /\bforce\b/i);
+test('auto admission and queue match strict gates, merge uses same conditions', () => {
+  const admission = conditions('  auto_merge_conditions:');
+  const queue = conditions('    queue_conditions: &safe_auto_conditions');
+  for(const required of requirements) {
+    assert.ok(admission.includes(required),'admission missing '+required);
+    assert.ok(queue.includes(required),'queue missing '+required);
+  }
+  assert.match(text,/merge_conditions: \*safe_auto_conditions/);
+});
+
+test('no existing PR is eligible: hard start timestamp and sensitive paths blocked', () => {
+  assert.match(text, /created-at >= 2026-10-16T17:30:00Z/g);
+  const admission = conditions('  auto_merge_conditions:');
+  const queue = conditions('    queue_conditions: &safe_auto_conditions');
+  for(const section of [admission,queue]) {
+    const match = section.match(/-files ~= ([^\r\n]+)/);
+    assert.ok(match,'no file deny list');
+    for(const path of [
+      '.github/workflows/ci.yml', '.mergify.yml', 'server/index.mjs',
+      'bridge/hub-cli.mjs', 'plugin/server/index.mjs', 'deploy/install.sh',
+      'scripts/verify.js', 'tests/github.test.mjs', 'infra/ansible.yml',
+      '.env.production', 'AGENTS.md', 'CODEOWNERS', 'Dockerfile',
+      'package.json', 'pnpm-lock.yaml'
+    ]) {
+      // The condition is enclosed in YAML single quotes. Strip them and
+      // interpret the regex locally to exercise the protected path set.
+      let regex = match[1].trim().replace(/^['"]|['"]$/g,'');
+      assert.match(path,new RegExp(regex),'protected path not excluded: '+path);
+    }
+    assert.doesNotMatch('docs/guide.md',new RegExp(match[1].trim().replace(/^['"]|['"]$/g,'')));
+  }
 });

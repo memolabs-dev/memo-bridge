@@ -1,41 +1,50 @@
-# Mergify pilot for memolabs-dev/memo-bridge
+# Memo Labs — Mergify low-risk auto-merge migration
 
-Status: **canary only — not enabled for normal PRs**.
+**State: PROPOSED; must remain DRAFT until the competing GitHub `Land` workflow is disabled or proven non-overlapping. No production activation yet.**
 
-## Intent
-Mergify's free tier covers private teams of up to five active human contributors; bots do not count as active contributors. Test the managed GitHub merge queue rather than inventing another production merge worker. The GitHub App installation is an independent action performed by the repository administrator through the Mergify dashboard; committing this file alone does **not** install or authorize it.
+## Context
 
-## Install the GitHub App (repository owner action)
-1. Open https://dashboard.mergify.com/home while logged in.
-2. Select the GitHub organization `memolabs-dev`; use **Configure repositories** (or **Integrations → GitHub → Repositories**).
-3. Click **Add Repository** if `memo-bridge` is missing. GitHub asks for App authorization; choose **Only select repositories**, then select `memolabs-dev/memo-bridge` (not all private repositories).
-4. In the product grid for that repository, enable **Merge Queue** and **Workflow Automation**, then **Save Changes**. Do not configure an organization-wide default without reviewing it.
-5. Confirm Mergify sees the repository. Check the validation of `.mergify.yml` once merged to `main`; Mergify reads its configuration from the default branch, not an unmerged feature branch.
+The first Mergify pilot (`memo-bridge` PR #133) worked with two manual labels and an approving review. This is NOT the desired agent workflow. The replacement policy in issue #136 allows **new low-risk bot PRs** to enter Mergify automatically without labels or human approvals.
 
-See https://docs.mergify.com/integrations/github/ and https://docs.mergify.com/configuration/file-format/.
+Source of truth is `.mergify.yml`, with `merge_protections_settings.auto_merge_conditions`, serialized `queue_rules`, and the same `merge_conditions` at landing time.
 
-## Canary policy (from .mergify.yml)
-Only a pull request satisfying **all** conditions enters the named `memo-labs-canary` queue:
+## Eligible cohort (after activation)
 
-- Target branch is `main`, PR is not draft, author is exactly `memo-labs-automation[bot]`.
-- PR has **both** labels `mergify:pilot` AND `landing:approved`; `hold-merge` is absent.
-- At least **one genuine approved review**. GitHub itself must also continue enforcing any native ruleset/branch protection; Mergify's rules do not prevent privileged users from manually bypassing unprotected branches.
-- GitHub Actions check runs `test (22)` and `test (24)` are successful. The source app is explicitly constrained to `@github-actions`.
-- Queue size = **one PR**, max parallel checks = **one**, squash merge only. Conditions are checked for queue entry AND again before merge.
+- PR created at/after **2026-10-16T17:30:00Z**; no old/open PR is ever picked retrospectively.
+- Base `main`, non-draft, same repository, author `memo-labs-automation[bot]`.
+- Neither `hold-merge` nor `needs-human-review`; only up to 8 files, 400 additions and 150 deletions.
+- Sensitive paths excluded: `.github/`, `.mergify.yml`, `server/`, `bridge/`, `plugin/`, `deploy/`, `scripts/`, `tests/`, `infra/`, `config/`, environment files, `AGENTS.md`, CODEOWNERS, Dockerfiles, package and lockfiles.
+- Required current GitHub Actions checks `test (22)` and `test (24)` must both be **success**.
+- Exactly one queued change at a time; squash merge. No direct merge by the agent.
+- CI failed, pending, missing, stale or policy uncertain → do not merge. Protected/security/infra/migration changes remain in an explicit stronger review lane.
 
-This opt-in policy intentionally does **not** automatically merge existing PRs, even those with green CI. Do not add the canary labels to PR #89 (protected workflow proposal), #106 (SQLite v9 migration), or unrelated drafts.
+## CRITICAL: existing landing executor still active
 
-## One controlled end-to-end test
-1. Ensure the repository's existing landing automation and Mergify cannot both act on the **same test PR**. Use a fresh, non-critical PR whose single-purpose changes have been reviewed; do not use an in-flight migration or production deployment.
-2. Confirm `test (22)` and `test (24)` pass on the PR and that it targets `main`.
-3. Have an authorized independent reviewer approve it after checking its intended changes.
-4. Apply `mergify:pilot` and `landing:approved` only to that reviewed PR. Observe Mergify queue entry, fresh CI on the integration branch and exactly one squash merge. Confirm GitHub audit events and main CI.
-5. Negative canaries: draft, `hold-merge`, one missing required check, stale commits, no approval, missing pilot label, untrusted author. None may merge. Stop on any unexpected merge or status.
+Verified on 2026-10-16: `memolabs-dev/memo-bridge/.github/workflows/land.yml` triggers on completion of `CI` via `workflow_run` and invokes `memolabs-dev/.github/.github/workflows/land.yml@main`. Its governance contract `memolabs-dev/.github/docs/landing-contract.md` merges trusted same-repo PRs with green CI and no `hold-merge`.
 
-A label is an authorization signal **only insofar as its setters are restricted**. Do not let arbitrary contributors apply `landing:approved` or change `.mergify.yml`; ensure independent code-owner review on authorization/CI files if available. The current free GitHub tier for private repositories may lack mandatory branch protection. Mergify's voluntary queue rules alone cannot block direct privileged merges.
+**This overlaps Mergify's intended cohort.** A new `.mergify.yml` alone cannot safely switch off `Land`. Keep the policy-change PR as **draft** and do not deploy `auto_merge_conditions` until the active legacy `Land` workflow is disabled or modified via a separately reviewed repository-admin workflow change. Do not use `hold-merge` as a workaround: it is a genuine global human stop signal and must block BOTH engines.
+
+One-time cutover procedure:
+1. Review and disable the conflicting `Land` workflow for `memo-bridge` through the approved repo-admin route, while keeping normal CI enabled.
+2. Confirm no `Land` workflow runs can merge newly eligible PRs, including race with in-flight runs.
+3. Merge and deploy this Mergify configuration only after receiving evidence that Mergify Merge Queue and Merge Protections are enabled for `memo-bridge`.
+4. Create one harmless **new** docs-only positive canary after the cutoff; prove CI green → Mergify queue → exactly one squash merge **without labels or human interaction**.
+5. Negative canaries (draft, hold-merge, fork, protected file, failure, oversized diff, stale SHA, untrusted author) must not merge. Check GitHub/Mergify audit events.
+6. Fail closed and roll back if any legacy executor merges in the same cohort.
+
+The repo's `Land` workflow is under `.github/workflows/` and is protected against agent modification by Memo Bridge. **Do not bypass this boundary.**
+
+## Across Memo Labs
+
+The owner chose: Memo Bridge/Source Engine for task orchestration; Mergify as the sole merge executor **for each repository AFTER independent verification**. The other projects (Drop, Cuesheet, UNI, Kollio, CDKF, Emargo, lab-infra, lab-hub, etc.) remain on their existing landing contracts until their CI, paths, deployment and Mergify permissions are checked. A shared global policy is recorded in `~/memolabs/AGENTS.md` and Vault `4-Tools/Memo Labs Automatic Landing.md`; this is not an automatic change to other repos.
+
+## References
+
+- https://docs.mergify.com/merge-protections/auto-merge/
+- https://docs.mergify.com/configuration/conditions/
+- https://github.com/memolabs-dev/.github/blob/main/docs/landing-contract.md
+- https://github.com/memolabs-dev/memo-bridge/issues/136
 
 ## Rollback
-Remove the two pilot labels from queued PRs and dequeue them in the Mergify dashboard. Disable **Merge Queue** and **Workflow Automation** for just `memo-bridge` and save; use GitHub App installation settings to revoke the repository permission if appropriate. Do not change other repositories, workflows, tokens, or the repository default branch.
 
-## Follow-up
-After one successful positive canary and the negative tests, replace the temporary `mergify:pilot` opt-in with a narrowly verified automatic acceptance policy. Keep Memo Source Engine for issue/worktree/audit orchestration, not for a second competing GitHub merge executor. Coordinate this with #88 and #129.
+Keep CI, branch protections and audit history. Disable Mergify auto-merge or revert `auto_merge_conditions` using a reviewed change. Do not re-enable `Land` until Mergify is disabled for that cohort.
