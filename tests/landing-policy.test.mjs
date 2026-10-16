@@ -11,3 +11,7 @@ for(const [reason,patch] of [['draft',{draft:true}],['untrusted_author',{author:
 test('stale check SHA rejected',()=>assert.equal(check({...good(),checks:[{name:'test (22)',headSha:'b'.repeat(40),conclusion:'success'},good().checks[1]]}).eligible,false));
 test('missing or failed check rejected',()=>{assert.equal(check({...good(),checks:[good().checks[0]]}).eligible,false);assert.equal(check({...good(),checks:[{...good().checks[0],conclusion:'failure'},good().checks[1]]}).eligible,false)});
 test('duplicate status names fail closed',()=>assert.equal(check({...good(),checks:[...good().checks,good().checks[0]]}).eligible,false));
+
+test('missing required-check policy is not an approval',()=>assert.ok(evaluateLanding(good()).reasons.includes('required_checks_not_configured')));
+test('skipped or neutral required test is not green',()=>{for(const conclusion of ['skipped','neutral'])assert.equal(check({...good(),checks:[{...good().checks[0],conclusion},good().checks[1]]}).eligible,false)});
+test('duplicated required-check configuration is rejected',()=>assert.ok(evaluateLanding(good(),{requiredChecks:['test (22)','test (22)']}).reasons.includes('duplicate_required_checks')));
