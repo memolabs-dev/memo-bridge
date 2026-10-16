@@ -122,3 +122,18 @@ test('new skill: requires viewing missing name, explicit create, and no overwrit
  assert.equal((await call('skill_view',a)).exists,undefined);
  assert.equal((await call('skill_propose',{...a,create:true,content:valid()})).error,'skill_already_exists');
 });
+
+test('create-only is sent to the runner for new skills, but not for edits',async()=>{
+ const handlers=new Map(); let exists=false; const writes=[];
+ const fake={readFile:async()=>exists?{ok:true,content:valid(),size:valid().length,truncated:false}:{ok:false,error:'not_found'},
+ writeFile:async a=>{writes.push(a);exists=true;return {ok:true};}};
+ registerSkillTools({registerTool(n,_c,h){handlers.set(n,h);}},()=>({authorize:()=>true,principal:{id:'local:owner'},audit:async()=>{}}),{createRunner:()=>fake});
+ const invoke=async(n,a)=>JSON.parse((await handlers.get(n)(a)).content[0].text);
+ const a={workspace_id:'ws_1234567890123456',worktree_id:'wt_1234567890123456',name:'example'};
+ await invoke('skill_view',a);
+ assert.equal((await invoke('skill_propose',{...a,create:true,content:valid()})).ok,true);
+ assert.equal(writes[0].create_only,true);
+ await invoke('skill_view',a);
+ assert.equal((await invoke('skill_propose',{...a,content:valid()})).ok,true);
+ assert.equal(writes[1].create_only,false);
+});

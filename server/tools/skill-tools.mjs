@@ -84,7 +84,7 @@ export function registerSkillTools(server,getRuntime, deps = {}) {
     }
     const lint=lintSkill(a.content);if(lint)return {ok:false,error:lint};
     const m=metadata(a.content);if(m.name!==a.name)return {ok:false,error:'name_mismatch'};
-    const data=await runner(rt).writeFile({workspace_id:a.workspace_id,worktree_id:a.worktree_id,path:`skills/${a.name}/SKILL.md`,content:a.content},{meta:extra?.meta ?? null,ids:{}});
+    const data=await runner(rt).writeFile({workspace_id:a.workspace_id,worktree_id:a.worktree_id,path:`skills/${a.name}/SKILL.md`,content:a.content,create_only:a.create===true},{meta:extra?.meta ?? null,ids:{}});
     if(data.ok===false)return data;
     viewed.delete(key(rt,a));
     await rt.audit('skill_propose','ok',null,{workspace_id:a.workspace_id});

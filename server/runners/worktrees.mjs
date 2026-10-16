@@ -30,7 +30,7 @@
 // Authorization and audit happen in server/tools/worktree-tools.mjs before these functions run.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1052,7 +1052,18 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       } finally {
         await handle.close();
       }
-      try { await rename(tmp, target); } catch (error) { await unlink(tmp).catch(() => {}); throw error; }
+      try {
+        if (args.create_only === true) {
+          // Hard-link creation is atomic and fails with EEXIST; unlike rename it cannot
+          // replace a file that appeared after the existence check.
+          try { await link(tmp, target); } catch (error) {
+            if (error?.code === 'EEXIST') return fail('path_exists');
+            throw error;
+          } finally { await unlink(tmp).catch(() => {}); }
+        } else {
+          await rename(tmp, target);
+        }
+      } catch (error) { await unlink(tmp).catch(() => {}); throw error; }
 
       const relReal = relative(root, target).split(sep).join('/');
       await withTrack(rt, row.id, track => {
