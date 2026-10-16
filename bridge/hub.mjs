@@ -909,6 +909,7 @@ export function createHub(options) {
       await new Promise(resolve=>server.close(resolve));
     },
     inventory, requestAgent, requestOperator, availableOps,
+    diagnose: () => diagnoseHubJournal(diagnosticEvents),
     // Owner-only (spec D6): hub-cli and, in Lot 2, the Telegram bot call these. No tool does.
     setOperatorFrozen, operatorFrozen: hubFrozen, operatorKeyId: signer?.keyId ?? null, ownerUnfreeze, anchorChains,
     operatorApprovals: approvals, operatorLocks: locks, operatorTransfers: transfers, operatorGrants: grants, operatorNotifications: notifier,
