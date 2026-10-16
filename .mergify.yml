@@ -1,46 +1,40 @@
-# Memo Labs controlled Mergify pilot.
-# No PR is auto-queued without TWO explicit labels and a real approving review.
-# This is not a replacement for GitHub branch protections or the existing landing contract.
+# Memo Labs — guarded unattended Mergify landing, new low-risk agent PRs ONLY.
+# Older/open PRs, critical paths, drafts and failed CI cannot auto-queue.
 merge_queue:
   max_parallel_checks: 1
 
+merge_protections_settings:
+  auto_merge_conditions:
+    - "base = main"
+    - "-draft"
+    - "-from-fork"
+    - "author = memo-labs-automation[bot]"
+    - "created-at >= 2026-10-16T17:30:00Z"
+    - "label != hold-merge"
+    - "label != needs-human-review"
+    - "#files <= 8"
+    - "#added-lines <= 400"
+    - "#deleted-lines <= 150"
+    - '-files ~= ^(\.github/|\.mergify\.yml$|server/|bridge/|plugin/|deploy/|scripts/|tests/|infra/|config/|\.env|AGENTS\.md$|CODEOWNERS$|Dockerfile|package\.json$|pnpm-lock\.yaml$)'
+    - "check-success = @github-actions/test (22)"
+    - "check-success = @github-actions/test (24)"
+
 queue_rules:
-  - name: memo-labs-canary
+  - name: memo-labs-safe-auto
     batch_size: 1
     merge_method: squash
-    queue_conditions:
+    queue_conditions: &safe_auto_conditions
       - "base = main"
       - "-draft"
+      - "-from-fork"
       - "author = memo-labs-automation[bot]"
-      - "label = mergify:pilot"
-      - "label = landing:approved"
+      - "created-at >= 2026-10-16T17:30:00Z"
       - "label != hold-merge"
-      - "#approved-reviews-by >= 1"
+      - "label != needs-human-review"
+      - "#files <= 8"
+      - "#added-lines <= 400"
+      - "#deleted-lines <= 150"
+      - '-files ~= ^(\.github/|\.mergify\.yml$|server/|bridge/|plugin/|deploy/|scripts/|tests/|infra/|config/|\.env|AGENTS\.md$|CODEOWNERS$|Dockerfile|package\.json$|pnpm-lock\.yaml$)'
       - "check-success = @github-actions/test (22)"
       - "check-success = @github-actions/test (24)"
-    merge_conditions:
-      - "base = main"
-      - "-draft"
-      - "author = memo-labs-automation[bot]"
-      - "label = mergify:pilot"
-      - "label = landing:approved"
-      - "label != hold-merge"
-      - "#approved-reviews-by >= 1"
-      - "check-success = @github-actions/test (22)"
-      - "check-success = @github-actions/test (24)"
-
-pull_request_rules:
-  - name: Queue authorized Memo Labs pilot PRs only
-    conditions:
-      - "base = main"
-      - "-draft"
-      - "author = memo-labs-automation[bot]"
-      - "label = mergify:pilot"
-      - "label = landing:approved"
-      - "label != hold-merge"
-      - "#approved-reviews-by >= 1"
-      - "check-success = @github-actions/test (22)"
-      - "check-success = @github-actions/test (24)"
-    actions:
-      queue:
-        name: memo-labs-canary
+    merge_conditions: *safe_auto_conditions
