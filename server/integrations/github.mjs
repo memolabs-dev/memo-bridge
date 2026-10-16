@@ -178,6 +178,8 @@ function compactPull(p) {
   return { number: p.number, title: cleanText(p.title, LIMITS.title), state: p.merged_at ? 'merged' : p.state,
     draft: Boolean(p.draft), author: author(p.user),
     head: cleanText(p.head?.ref, 200), head_sha: SHA_RE.test(p.head?.sha ?? '') ? p.head.sha : null,
+    head_repo_full_name: parseRepo(p.head?.repo?.full_name)?.full ?? null,
+    base_sha: SHA_RE.test(p.base?.sha ?? '') ? p.base.sha : null,
     base: cleanText(p.base?.ref, 200),
     labels: (Array.isArray(p.labels) ? p.labels : []).slice(0, 20).map(label).filter(Boolean),
     mergeable: typeof p.mergeable === 'boolean' ? p.mergeable : null,
