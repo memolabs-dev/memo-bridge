@@ -71,6 +71,24 @@ AI clients are configured from the shared MCP registry (Vault `4-Tools/mcp/mcp.j
 
 The plugin package is under `plugin/`. It is a **local stdio plugin**, not a cloud-hosted ChatGPT MCP. The build emits two files, `plugin/server/dist/index.mjs` (the server) and `plugin/server/dist/job-runner.mjs` (the detached process that runs one job); both must ship together. Its runtime depends on local Node 22.16+ (for the built-in `node:sqlite`), `python3` and a logged-in `gh` for the lease ledger and pull requests, `git`, the toolchains of the recipes you run, and a working SSH alias `lab` with BatchMode and a pinned host key.
 
+## Independent local MCP (Windows, Linux, macOS)
+
+A separate **read-only** local stdio entry point can be installed per OS user without connecting
+to the owner's Mac/VPS hub, its OAuth account or its GitHub Apps. It lists only user-configured
+projects, observes this machine and detects GPUs without presuming NVIDIA. It does not execute
+commands, run GPU jobs or offer remote ChatGPT access. See
+[Standalone Windows installation](docs/STANDALONE_WINDOWS.md).
+
+```sh
+pnpm run build:standalone
+pnpm run install:standalone
+pnpm run smoke:standalone
+```
+
+A public/remote MCP is a separate secured project (#74), and a safe GPU job runner follows
+device/backend verification (#73). No collaborator should be enrolled on the owner-only
+`bridge.memolabs.dev` hub.
+
 ## Next architecture milestones
 
 1. Observation and project catalogue (done).
