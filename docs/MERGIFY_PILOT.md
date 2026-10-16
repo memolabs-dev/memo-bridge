@@ -1,54 +1,53 @@
-# Memo Labs — Mergify low-risk auto-merge migration
+# Memo Labs — Mergify unattended landing (memo-bridge)
 
-**State: PROPOSED; must remain DRAFT until the competing GitHub `Land` workflow is disabled or proven non-overlapping. No production activation yet.**
+**Status: ACTIVE AND VERIFIED.** One-time cutover completed on 2026-10-16.
+Source of truth: `.mergify.yml` on `main`.
 
-## Context
+## Production proof
 
-The first Mergify pilot (`memo-bridge` PR #133) worked with two manual labels and an approving review. This is NOT the desired agent workflow. The replacement policy in issue #136 allows **new low-risk bot PRs** to enter Mergify automatically without labels or human approvals.
+- [PR #137](https://github.com/memolabs-dev/memo-bridge/pull/137) merged at **2026-10-16 17:47:54 UTC**, after Node 22 / Node 24 CI and Mergify configuration/protection checks passed.
+- The former GitHub Actions workflow **`Land`** (`.github/workflows/land.yml`, workflow id `383543538`) was disabled using `gh workflow disable land.yml` with the authenticated repository ADMIN account. Official GitHub API returned **`disabled_manually`**.
+- [PR #141](https://github.com/memolabs-dev/memo-bridge/pull/141) was **created by Memo Bridge as a non-draft docs-only PR without labels, reviewer approvals or manual merge**. GitHub Actions `test (22)` and `test (24)` succeeded. Mergify then merged it automatically.
+- GitHub's official pull-request API returned `merged_by.login = mergify[bot]`, `merged_at = 2026-10-16T17:52:12Z`, `merge_commit_sha = 594161ca70152a293a63916dc15b084ece81d5a1`.
+- No new `Land` workflow run occurred after cutover. Old draft PRs #89, #106 and #135 remained open and unmerged.
+- Issue [#138](https://github.com/memolabs-dev/memo-bridge/issues/138) records the cutover, and [#140](https://github.com/memolabs-dev/memo-bridge/issues/140) records the first positive unattended canary.
 
-Source of truth is `.mergify.yml`, with `merge_protections_settings.auto_merge_conditions`, serialized `queue_rules`, and the same `merge_conditions` at landing time.
+## What is automatically eligible
 
-## Eligible cohort (after activation)
+The new policy uses `merge_protections_settings.auto_merge_conditions`, the named `memo-labs-safe-auto` queue and identical conditions on both queue entry and landing.
 
-- PR created at/after **2026-10-16T17:30:00Z**; no old/open PR is ever picked retrospectively.
-- Base `main`, non-draft, same repository, author `memo-labs-automation[bot]`.
-- Neither `hold-merge` nor `needs-human-review`; only up to 8 files, 400 additions and 150 deletions.
-- Sensitive paths excluded: `.github/`, `.mergify.yml`, `server/`, `bridge/`, `plugin/`, `deploy/`, `scripts/`, `tests/`, `infra/`, `config/`, environment files, `AGENTS.md`, CODEOWNERS, Dockerfiles, package and lockfiles.
-- Required current GitHub Actions checks `test (22)` and `test (24)` must both be **success**.
-- Exactly one queued change at a time; squash merge. No direct merge by the agent.
-- CI failed, pending, missing, stale or policy uncertain → do not merge. Protected/security/infra/migration changes remain in an explicit stronger review lane.
+PRs must satisfy **all** of the following:
 
-## CRITICAL: existing landing executor still active
+- Created at or after **2026-10-16 17:30 UTC**, targeting `main`, non-draft, same-repository, author exactly `memo-labs-automation[bot]`.
+- Not labeled `hold-merge` or `needs-human-review`.
+- Small: no more than 8 files, 400 added and 150 deleted lines.
+- No sensitive paths: `.github/`, `.mergify.yml`, `server/`, `bridge/`, `plugin/`, `deploy/`, `scripts/`, `tests/`, `infra/`, `config/`, environment files, `AGENTS.md`, CODEOWNERS, Dockerfiles, package manifests and lockfiles.
+- Exact PR head must pass **both** GitHub Actions check runs `test (22)` and `test (24)`.
+- Serialized queue (`batch_size: 1`, `max_parallel_checks: 1`), squash merge. The GitHub PR-only ruleset still applies.
 
-Verified on 2026-10-16: `memolabs-dev/memo-bridge/.github/workflows/land.yml` triggers on completion of `CI` via `workflow_run` and invokes `memolabs-dev/.github/.github/workflows/land.yml@main`. Its governance contract `memolabs-dev/.github/docs/landing-contract.md` merges trusted same-repo PRs with green CI and no `hold-merge`.
+**No label or human approval is required for this limited, objective low-risk lane.** Higher-risk changes, migrations, CI/auth/security, workflow edits and deployment are **not** eligible and still need the applicable separate review/authorization.
 
-**This overlaps Mergify's intended cohort.** A new `.mergify.yml` alone cannot safely switch off `Land`. Keep the policy-change PR as **draft** and do not deploy `auto_merge_conditions` until the active legacy `Land` workflow is disabled or modified via a separately reviewed repository-admin workflow change. Do not use `hold-merge` as a workaround: it is a genuine global human stop signal and must block BOTH engines.
+## Operator runbook
 
-One-time cutover procedure:
-1. Review and disable the conflicting `Land` workflow for `memo-bridge` through the approved repo-admin route, while keeping normal CI enabled.
-2. Confirm no `Land` workflow runs can merge newly eligible PRs, including race with in-flight runs.
-3. Merge and deploy this Mergify configuration only after receiving evidence that Mergify Merge Queue and Merge Protections are enabled for `memo-bridge`.
-4. Create one harmless **new** docs-only positive canary after the cutoff; prove CI green → Mergify queue → exactly one squash merge **without labels or human interaction**.
-5. Negative canaries (draft, hold-merge, fork, protected file, failure, oversized diff, stale SHA, untrusted author) must not merge. Check GitHub/Mergify audit events.
-6. Fail closed and roll back if any legacy executor merges in the same cohort.
+1. Agents continue Issue → claim → isolated worktree → code → test → pushed branch → non-draft PR. They **never** merge PRs directly.
+2. For normal low-risk agent PRs, do not attach `mergify:pilot`, `landing:approved`, or issue GitHub native auto-merge commands. Simply let the validated CI and Mergify queue run.
+3. If CI fails, task owner inspects failures, fixes under its own reservation and pushes a new commit. Mergify must only consider current evidence.
+4. For a PR requiring human review, use draft mode and/or `hold-merge`/separate security review. Do not remove safety controls merely to force a merge.
+5. Verify the merge actor through GitHub's API when auditing. A Mergify `Merge Queue: neutral` check *before* CI success is not an indication of a failed policy; read the check's condition summary after CI.
+6. If the old `Land` workflow is re-enabled accidentally, immediately stop new eligible canaries and correct the dual-controller configuration. **Only one merge executor** may be active for this cohort.
 
-The repo's `Land` workflow is under `.github/workflows/` and is protected against agent modification by Memo Bridge. **Do not bypass this boundary.**
+### Rollback
 
-## Across Memo Labs
+Keep CI and repository ruleset intact. Disable the affected Mergify automation / revert its `auto_merge_conditions` through a reviewed change **before** enabling legacy `Land`. Do not allow both to act simultaneously. Retain Mergify and GitHub audit logs.
 
-The owner chose: Memo Bridge/Source Engine for task orchestration; Mergify as the sole merge executor **for each repository AFTER independent verification**. The other projects (Drop, Cuesheet, UNI, Kollio, CDKF, Emargo, lab-infra, lab-hub, etc.) remain on their existing landing contracts until their CI, paths, deployment and Mergify permissions are checked. A shared global policy is recorded in `~/memolabs/AGENTS.md` and Vault `4-Tools/Memo Labs Automatic Landing.md`; this is not an automatic change to other repos.
+## Memo Labs scope
 
-## References
+This live result applies **only** to `memolabs-dev/memo-bridge`. Other projects (Drop, Cuesheet, Kollio, Emargo, UNI, lab-infra, etc.) keep their current safe landing implementation until their own Mergify GitHub App installation, checks, sensitive paths and exclusive-controller tests are validated. [Issue #139](https://github.com/memolabs-dev/memo-bridge/issues/139) tracks this matrix.
+
+Global human-readable rule is recorded in the Vault note `~/Vault/4-Tools/Memo Labs Automatic Landing.md` and shared `~/memolabs/AGENTS.md`.
+
+## Vendor references
 
 - https://docs.mergify.com/merge-protections/auto-merge/
 - https://docs.mergify.com/configuration/conditions/
 - https://github.com/memolabs-dev/.github/blob/main/docs/landing-contract.md
-- https://github.com/memolabs-dev/memo-bridge/issues/136
-
-## Rollback
-
-Keep CI, branch protections and audit history. Disable Mergify auto-merge or revert `auto_merge_conditions` using a reviewed change. Do not re-enable `Land` until Mergify is disabled for that cohort.
-
-### Activation-cutoff caveat
-
-The literal `created-at` cutoff protects PRs older than 2026-10-16T17:30:00Z. If the one-time cutover happens **after** that date, PRs created since then could be pending and would be auto-queued once the configuration is merged. Therefore, before undrafting, the release coordinator **must update the cutoff to a time later than the actual activation, inspect all currently open PRs, and prove none matches**. Re-run Mergify configuration validation and CI on that exact commit. Never treat the initial timestamp as a permanent proof that no pre-existing PR can merge.
