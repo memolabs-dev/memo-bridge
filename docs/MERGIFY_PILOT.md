@@ -48,3 +48,7 @@ The owner chose: Memo Bridge/Source Engine for task orchestration; Mergify as th
 ## Rollback
 
 Keep CI, branch protections and audit history. Disable Mergify auto-merge or revert `auto_merge_conditions` using a reviewed change. Do not re-enable `Land` until Mergify is disabled for that cohort.
+
+### Activation-cutoff caveat
+
+The literal `created-at` cutoff protects PRs older than 2026-10-16T17:30:00Z. If the one-time cutover happens **after** that date, PRs created since then could be pending and would be auto-queued once the configuration is merged. Therefore, before undrafting, the release coordinator **must update the cutoff to a time later than the actual activation, inspect all currently open PRs, and prove none matches**. Re-run Mergify configuration validation and CI on that exact commit. Never treat the initial timestamp as a permanent proof that no pre-existing PR can merge.
