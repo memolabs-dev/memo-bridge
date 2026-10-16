@@ -12,9 +12,14 @@ Group=memo-runner
 UMask=0077
 Environment=MEMO_BRIDGE_STATE_DIR=@@PRIVATE_STATE@@
 Environment=MEMO_BRIDGE_PROJECTS_ROOT=@@PROJECTS_ROOT@@
+Environment=MEMO_BRIDGE_GITHUB_APP_ID=@@GITHUB_APP_ID@@
+Environment=MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID=@@GITHUB_APP_INSTALLATION_ID@@
+Environment=HOME=@@PRIVATE_STATE@@
 WorkingDirectory=@@CHECKOUT@@
-# Reuse the existing Memo Bridge GitHub App READ credential wiring for this unit.
-# Do not embed tokens or PATs in the unit or Environment=.
+# The credential ID MUST be app-key, as expected by github-app.mjs.
+# Use a dedicated read-only GitHub App key when provisioned by the operator.
+# NEVER copy a private key, token or PAT into Environment or repository content.
+LoadCredential=app-key:@@SCOPED_GITHUB_APP_KEY_PATH@@
 ExecStart=/usr/bin/flock -n @@PRIVATE_STATE@@/source-poll.lock /usr/bin/node @@CHECKOUT@@/server/source-engine/poll-cli.mjs
 NoNewPrivileges=true
 PrivateTmp=true

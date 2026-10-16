@@ -62,3 +62,46 @@ Stop/disable the **timer**, or set `enabled: false` in the private policy. This 
 ## Limitations
 
 Only same-repo bot/owner-authored PRs backed by exact Coordinator remote checkpoints can be discovered. A legitimate branch advanced beyond a checkpoint intentionally waits for a fresh checkpoint; a PR created outside Memo Bridge is intentionally not enrolled. It is safe to skip and report rather than guess. No automatic code edits, CI repairs, mergers, releases or deployments are performed by the poller.
+
+## Production preflight observation (2026-10-16)
+
+The actual VPS unit `/etc/systemd/system/memo-bridge-runner.service` confirms
+`User=memo-runner`, checkout `/opt/memo-bridge/app`,
+`MEMO_BRIDGE_STATE_DIR=/var/lib/memo-runner/state`, and
+`MEMO_BRIDGE_PROJECTS_ROOT=/var/lib/memo-runner/repos`. The running
+`memo-bridge-runner.service` is active. Those observations do not authorize
+the poller or imply that its files are deployed: `poll-cli.mjs` and the earlier
+`reconcile.mjs` were not found in the deployed checkout when checked.
+
+A separate unit requires **its own systemd LoadCredential**; it does not inherit
+the runner's credential directory. The template now includes the app-key
+credential ID and explicit, non-secret App identifiers. A dedicated read-only
+App installation is preferable. An existing App key with broader installation
+permissions is *not* equivalent to a read-only service identity simply because
+the client requests read-only tokens.
+
+### Verified landing blocker
+
+GitHub PR #132 passed its CI but was still open: the repository reported
+`Auto-merge is not enabled`. The existing `.mergify.yml` deliberately requires
+explicit pilot+landing labels, a genuine independent approving review, an
+allowlisted bot author, no hold label and passing Node 22/24 checks. None of
+those requirements may be spoofed or bypassed to deploy this poller.
+
+### Required operator preflight before any production mutation
+
+1. Verify #132 merged through authorized review/landing; then deploy the
+   reviewed `main` using the existing lab-infra-owned release procedure.
+2. Confirm both `server/source-engine/reconcile.mjs` and
+   `server/source-engine/poll-cli.mjs` exist in the active checkout and that
+   all required tests and runtime smoke checks were completed.
+3. Provision a dedicated per-service GitHub App read credential via systemd
+   LoadCredential and independently verify the authenticated repo allowlist,
+   state ownership (0700/0600), code identity, and rendered unit paths.
+4. Run with a PRIVATE `enabled:true, apply:false` policy using the approved
+   allowlist; review bounded candidate evidence and audit receipts.
+5. Only after a clean, explicitly reviewed canary authorize `apply:true`
+   and enable the timer. Rollback = disable timer or policy; never rewrite
+   Source Engine append-only history.
+
+**Current deployment status remains NOT INSTALLED and NOT ENABLED.**
