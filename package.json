@@ -19,6 +19,7 @@
     "smoke": "node tests/mcp-smoke.mjs",
     "smoke:remote": "node --test tests/remote-e2e.test.mjs tests/remote-boot.test.mjs",
     "remote:toolsize": "node scripts/remote-toolsize.mjs",
+    "probe:gpu": "node scripts/probe-gpu.mjs",
     "release:manifest": "node scripts/release-manifest.mjs",
     "package:plugin": "pnpm run build && node scripts/package-plugin.mjs",
     "start:hub": "node bridge/hub-cli.mjs",
