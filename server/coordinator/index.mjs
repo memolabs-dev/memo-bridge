@@ -8,6 +8,7 @@
 // - this module adds what the ledger does not own: per-session workspaces, the identity of the
 //   worker (derived by the server, never by the model), Git-verified checkpoints and an audit
 //   journal, all in the private local store.
+import { withOwnerPrivateRepos } from './owner-private-repos.mjs';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
@@ -330,11 +331,18 @@ export { workerFor };
 export function createCoordinator({ store, principal, ledger, now = Date.now, catalogOptions = {},
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
-  readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
+  readAllowlist = () => readPublicAllowlist(governanceRoot),
+  privatePolicyFile = process.env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE,
+  searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
   remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
   learningThresholds = thresholdsFromEnv() }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
+  // Mac owner-only private enrollment is an explicit local file grant, never
+  // the VPS metadata-only snapshot or a request-provided repository name.
+  const effectiveAllowlist = async () => withOwnerPrivateRepos(await readAllowlist(), {
+    file: privatePolicyFile, principal, remotePolicy, host
+  });
   // Where the call came from and which client made it, as the server set them on the principal
   // (D6); never read from arguments. Absent attributes stay null in the journal.
   const principalVia = ['stdio', 'hub'].includes(principal.via) ? principal.via : (remote ? 'hub' : null);
@@ -576,7 +584,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     if (!project.ok) return project;
     const origin = await projectRemote(project.project);
     if (!origin) return fail('project_origin_unknown');
-    const allowlist = await readAllowlist();
+    const allowlist = await effectiveAllowlist();
     if (!allowlist.ok) return allowlist;
     const repo = allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase());
     if (!repo) return fail('repo_not_allowed');
@@ -847,7 +855,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09).
         if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
       }
-      const allowlist = await readAllowlist();
+      const allowlist = await effectiveAllowlist();
       if (!allowlist.ok) return allowlist;
       const allowed = new Map(allowlist.repos.map(r => [r.toLowerCase(), r]));
       const origins = await Promise.all(projects.map(async p => ({ name: p.name, origin: await projectRemote(p) })));
