@@ -53,7 +53,7 @@ test('source changes are append-only, durable and replay idempotently', async t 
   const another = openSqliteStore({ dir });
   assert.equal((await sourceChange(another, origin.id)).change.ci_state, 'success');
   await another.close();
-  assert.equal(SCHEMA_VERSION, 8);
+  assert.equal(SCHEMA_VERSION, 9);
 });
 
 test('source optimistic locking serializes concurrent updates', async t => {
@@ -109,7 +109,7 @@ test('coordinator v7 migrates source tables in place without losing data', async
   db.exec('DROP TABLE source_change_events; DROP TABLE source_changes; PRAGMA user_version = 7;');
   db.close();
   const reopened = openSqliteStore({ dir });
-  assert.equal(reopened.settings().schema_version, 8);
+  assert.equal(reopened.settings().schema_version, 9);
   assert.equal((await reopened.transaction(repo => repo.getWorkspace('ws_1'), { write: false })).id, 'ws_1');
   assert.equal((await recordSourceChange(reopened, origin)).ok, true);
   await reopened.close();

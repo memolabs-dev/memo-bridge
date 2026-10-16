@@ -40,3 +40,18 @@ Available through the same runtime registry on stdio and the authorized remote s
 All three tools require `coordinator:read`. For a remote user, the project must appear in the explicit remote project allowlist. Every request checks the canonical `PROJECTS.md` registry and resolves the registered GitHub origin before querying SQLite. A stored Issue whose owner/repo does not match that origin is omitted (or returns `not_found`). GitHub Issue, PR and commit-check URLs are constructed only from the verified origin; no arbitrary user-provided URL or local source path is returned.
 
 The API reports **observed metadata** from Source Engine V0. Empty results mean no observations have been imported, *not* that a GitHub PR does not exist. Automatic GitHub ingestion/reconciliation is out of scope for issue #87 and must use authenticated read-only operations in a separate follow-up. Do not use these observations by themselves as permission to merge; the landing policy remains authoritative.
+
+
+## Landing coordination queue — issue #86 (experimental, OFF by default)
+
+The Coordinator's schema v9 adds a **private, durable queue** in `source_landing_queue`, and `server/source-engine/landing-queue.mjs` provides `assessLanding`, `enqueueLanding`, `claimLanding`, `finishLanding`, and `landingQueueStatus`.
+
+The queue is **not a merge service**. It makes no GitHub mutations and exports no unrestricted MCP write tool. The existing reviewed GitHub landing contract remains solely responsible for merges. An adapter must obtain the snapshot from authenticated GitHub reads; model/user-provided booleans do not constitute approval.
+
+Admission refuses repos outside an explicit allowlist, drafts, forks, non-open PRs, changed head SHA or target SHA, missing approvals/branch protections, non-mergeable PRs, and missing/pending/failing required checks. A successful admission only stores a *point-in-time observation*.
+
+Consumers take **one lease per repository** under SQLite's `BEGIN IMMEDIATE` transaction. Leases are fenced with random UUIDs, expire, and may be reclaimed in FIFO order. An expired worker cannot update a reclaimed entry. The consumer must **re-fetch PR head, current base HEAD, required checks, reviews, branch protections and merge eligibility immediately before any GitHub landing action**. If any mismatch occurs it must fail closed (mark blocked) instead of merging.
+
+**Known limitation:** SQLite queue state is local to each Coordinator host. It is not yet a global Mac/VPS lease authority. Until a single VPS coordinator or a cross-host Git-ref lease is explicitly integrated and exercised, **do not use this component for autonomous cross-host merging**. No landing worker is connected by default, and no automatic merge policy is changed by this patch. Issue #88 separately owns the GitHub-side protected landing workflow.
+
+Tests: `tests/source-landing-queue.test.mjs` verifies fail-closed admission, FIFO, idempotent enqueue, fenced leases, concurrent claims and additive v8→v9 migration. Keeping cross-host arbitration and integration with #88 as explicit production gates prevents this initial slice from silently weakening security.
