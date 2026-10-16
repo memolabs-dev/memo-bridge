@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-16",
+  "source": "Read-only owner GitHub API: repo metadata, Actions workflows, sample PR check runs, rulesets and main .mergify.yml as of 2026-10-16. Snapshot is not evidence of current eligibility.",
+  "totalProjectsRegistered": 72,
+  "coverage": "11 initial priority GitHub repo checks; others remain unassessed",
+  "repositories": [
+    {
+      "repo": "memolabs-dev/memo-bridge",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": false,
+      "checks": [
+        "test (22)",
+        "test (24)"
+      ],
+      "legacyMerger": "disabled",
+      "mergifyVerified": true,
+      "branchRulesReviewed": true,
+      "canaryPassed": true,
+      "notes": "LIVE VERIFIED #141 and #142 merged by mergify[bot]. Legacy Land workflow disabled_manually. Strict low-risk lane only."
+    },
+    {
+      "repo": "memolabs-dev/drop",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": false,
+      "checks": [
+        "test",
+        "test-macos",
+        "test-windows"
+      ],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Flagship. GitHub check runs test, test-macos, test-windows and CodeQL. Multiple active branch/tag rulesets; signing/release policy and old merge controller require inspection."
+    },
+    {
+      "repo": "memolabs-dev/cuesheet",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": false,
+      "checks": [
+        "Core and integration tests"
+      ],
+      "legacyMerger": "active",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Workflow .github/workflows/auto-merge.yml active. CI sample successful; do not enable second merger."
+    },
+    {
+      "repo": "memolabs-dev/uni-protocol",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": false,
+      "checks": [
+        "UNI required checks",
+        "lint",
+        "matrix (ubuntu-latest)",
+        "matrix (macos-latest)",
+        "matrix (windows-latest)"
+      ],
+      "legacyMerger": "active",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Workflow auto-merge.yml active; CI matrix and required checks; determine exact required contexts on a fresh PR."
+    },
+    {
+      "repo": "memolabs-dev/emargo",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": true,
+      "checks": [
+        "Lint · Types · Tests"
+      ],
+      "legacyMerger": "active",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Workflow .github/workflows/auto-merge.yml active; same-provider migration requires exclusive controller and new canaries."
+    },
+    {
+      "repo": "memolabs-dev/clinical-data-knowledge-foundation",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": true,
+      "checks": [
+        "build"
+      ],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Clinical data/referentials: regulated and domain-sensitive; a build check alone cannot qualify clinical correctness. Require stronger review and provenance gates."
+    },
+    {
+      "repo": "memolabs-dev/lab-hub",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": false,
+      "checks": [],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "No representative PR check found; CI requirements unknown, cannot enable."
+    },
+    {
+      "repo": "memolabs-dev/rebuild-radar",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": true,
+      "checks": [
+        "validate"
+      ],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "CI sample validate success. New project; no Mergify config or app evidence."
+    },
+    {
+      "repo": "memolabs-dev/mobile-explorer",
+      "accessible": true,
+      "defaultBranch": "main",
+      "archived": false,
+      "private": true,
+      "checks": [
+        "swift-build"
+      ],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "CI swift-build sample success. New project; app and ruleset must be checked."
+    },
+    {
+      "repo": "memolabs-dev/kollio-mac",
+      "accessible": false,
+      "defaultBranch": null,
+      "archived": null,
+      "private": null,
+      "checks": [],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Repository not found under memolabs-dev; location/owner must be resolved (potentially guillaume-flambard)."
+    },
+    {
+      "repo": "memolabs-dev/lab-infra",
+      "accessible": false,
+      "defaultBranch": null,
+      "archived": null,
+      "private": null,
+      "checks": [],
+      "legacyMerger": "unknown",
+      "mergifyVerified": false,
+      "branchRulesReviewed": false,
+      "canaryPassed": false,
+      "notes": "Repository not found under memolabs-dev; do not infer remote from local project name."
+    }
+  ]
+}
