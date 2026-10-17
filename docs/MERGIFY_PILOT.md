@@ -24,8 +24,9 @@ PRs land when **all** of the following hold on the exact head:
 - Target `main`, non-draft, same repository.
 - Author `memo-labs-automation[bot]` or `guillaume-flambard`.
 - Not labeled `hold-merge` or `needs-human-review`.
-- No sensitive path: `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`, `deploy/`,
-  `infra/`, environment files. Code under `server/`, `bridge/`, `plugin/`, `scripts/`, `tests/` and the manifests lands
+- No sensitive path: `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`, root
+  environment files (narrowed to the gate itself by the owner on 2026-10-17; `deploy/` and
+  `infra/` land on green CI). Code under `server/`, `bridge/`, `plugin/`, `scripts/`, `tests/` and the manifests lands
   on green CI like anything else.
 - GitHub Actions `test (22)` and `test (24)` succeeded.
 - Serialized queue `memo-labs-autoloop` (`batch_size: 1`, `max_parallel_checks: 1`), squash.

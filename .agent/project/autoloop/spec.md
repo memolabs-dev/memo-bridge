@@ -100,9 +100,11 @@ pinned SHA (manual bump), memo-bridge Mac runtime install-local (manual).
 - REQ-M03: Dependabot PRs that only bump pinned GitHub Actions or lockfiles land on green CI
   (they touch .github/ so REQ-M04 applies unless explicitly allowed per repo).
 - REQ-M04: A PR touching a sensitive path is not merged automatically and gets the
-  `needs-human-review` label plus one comment naming the matched paths. Sensitive set:
-  `.github/`, `.mergify.yml`, `CODEOWNERS`, `deploy/`, `ansible/`, `infra/`, `stacks/`,
-  `migrations/`, `.env*`, plus a per-repo extra list.
+  `needs-human-review` label plus one comment naming the matched paths. Sensitive set, narrowed
+  by the owner on 2026-10-17 to the gate itself: `.github/`, `.mergify.yml`, `CODEOWNERS`, the
+  root `AGENTS.md`, root `.env*`, plus a per-repo extra list (uni-protocol keeps its trust paths,
+  from its own roadmap rule). `deploy/`, `ansible/`, `infra/`, `stacks/` and `migrations/` land
+  on green CI.
 - REQ-M05: Merge method squash, queue batch size 1, merge on the exact tested head.
 - REQ-M06: A shared template lives in docs/MERGIFY_FLEET_ADOPTION.md; per-repo files differ only
   in required checks and extra sensitive paths.

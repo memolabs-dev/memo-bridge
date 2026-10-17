@@ -11,9 +11,10 @@ not a draft, does not come from a fork, its author is `memo-labs-automation[bot]
 `guillaume-flambard`, it carries neither `hold-merge` nor `needs-human-review`, it touches no
 sensitive path, and every required CI check of the repository is green. Squash, one at a time.
 
-Sensitive paths (REQ-M04): `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`,
-`deploy/`, `ansible/`, `infra/`, `stacks/`, any `migrations/` directory, root `.env*`, plus a
-per-repository list. A sensitive PR stays open with green CI. Mergify posts no comment on it:
+Sensitive paths (REQ-M04, narrowed by the owner on 2026-10-17 to the gate itself): `.github/`,
+`.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`, root `.env*`, plus a per-repository list.
+They are what decides whether a PR may land; everything else, deploy and infrastructure code
+included, lands on green CI. A sensitive PR stays open with green CI. Mergify posts no comment on it:
 the reason is in the "Mergify Merge Queue" check of the PR, which lists the unmet `-files`
 condition. The `Sensitive paths` workflow (`.github/workflows/sensitive-paths.yml`, T-M2b) adds
 the `needs-human-review` label and one comment naming the matched paths. It reads the pattern
@@ -40,7 +41,7 @@ shared:
         - author = guillaume-flambard
     - label != hold-merge
     - label != needs-human-review
-    - "-files ~= ^(\\.github/|\\.mergify\\.yml$|CODEOWNERS$|AGENTS\\.md$|deploy/|ansible/|infra/|stacks/|\\.env)|(^|/)migrations/"
+    - "-files ~= ^(\\.github/|\\.mergify\\.yml$|CODEOWNERS$|AGENTS\\.md$|\\.env)"
     - "check-success = @github-actions/<required check>"
 
 merge_queue:
