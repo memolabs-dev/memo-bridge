@@ -3,43 +3,106 @@
   "issue": "memolabs-dev/memo-bridge#149",
   "updated": "2026-10-17",
   "phase": "IMPLEMENT",
-  "requirements": { "total": 22, "covered": 22 },
+  "requirements": {
+    "total": 22,
+    "covered": 22
+  },
   "todos": {
-    "done": ["T-SPEC", "T-C1", "T-C2 (Mac)", "T-M1", "T-M2", "T-M3", "T-M4", "T-M4c"],
-    "in_progress": [],
+    "done": [
+      "T-SPEC",
+      "T-C1",
+      "T-C2 (Mac)",
+      "T-M1",
+      "T-M2",
+      "T-M3",
+      "T-M4",
+      "T-M4c",
+      "T-D1"
+    ],
+    "in_progress": [
+      "T-M2b (owner merges memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37)"
+    ],
     "p0_open": 0,
-    "p1_open": 11,
+    "p1_open": 10,
     "p2_open": 1,
-    "blocked": ["T-M4d drop (U-03)", "T-M5 (U-02)", "T-M6 (U-01)"],
-    "next": "T-M2b (label and comment on sensitive PRs) or T-D1 (deploy targets); owner decisions U-01, U-02, U-03 unblock the rest of the fleet"
+    "blocked": [
+      "T-M4d drop (U-03)",
+      "T-M5 (U-02)",
+      "T-M6 (U-01)",
+      "T-D2 runtime canary (U-04)"
+    ],
+    "next": "T-M2b runtime check after the merges; T-D2 deploy receipt on fixtures; owner decisions U-01..U-04"
   },
   "acceptance": {
     "total": 13,
-    "verified": ["AC-C01", "AC-C02", "AC-C03", "AC-C04", "AC-C05", "AC-M01"],
+    "verified": [
+      "AC-C01",
+      "AC-C02",
+      "AC-C03",
+      "AC-C04",
+      "AC-C05",
+      "AC-M01"
+    ],
     "partial": [
       "AC-M02 (stays open: verified on memo-bridge, cuesheet, problem-intelligence-engine, uni-protocol; label and comment: T-M2b)",
       "AC-M03 (verified for the 4 adopted repos; drop, private and personal repos not adopted)"
     ],
     "failed": [],
-    "pending": ["AC-D01", "AC-D02", "AC-D03", "AC-D04", "AC-O01"]
+    "pending": [
+      "AC-D01",
+      "AC-D02",
+      "AC-D03",
+      "AC-D04",
+      "AC-O01"
+    ]
   },
-  "risks": { "critical_open": 0, "high_open": 3, "closed": ["R-07"], "mitigated": ["R-02"] },
+  "risks": {
+    "critical_open": 0,
+    "high_open": 3,
+    "closed": [
+      "R-07"
+    ],
+    "mitigated": [
+      "R-02"
+    ]
+  },
   "issues": {
     "spec": "memolabs-dev/memo-bridge#149",
     "reaper": "memolabs-dev/memo-bridge#150",
     "merge_policy": "memolabs-dev/memo-bridge#151"
   },
-  "adopted_repos": ["memolabs-dev/memo-bridge", "memolabs-dev/cuesheet", "memolabs-dev/problem-intelligence-engine", "memolabs-dev/uni-protocol"],
+  "adopted_repos": [
+    "memolabs-dev/memo-bridge",
+    "memolabs-dev/cuesheet",
+    "memolabs-dev/problem-intelligence-engine",
+    "memolabs-dev/uni-protocol"
+  ],
   "pull_requests": {
-    "merged": ["#152", "#153", "#154", "#155", "#157", "#158", "#159"],
+    "merged": [
+      "#152",
+      "#153",
+      "#154",
+      "#155",
+      "#157",
+      "#158",
+      "#159",
+      "#160"
+    ],
     "open_for_owner": [
       "memo-bridge#156 (negative canary, deploy/; real doc fix)",
       "cuesheet#83 (negative canary, .github/; real CI hardening)",
       "problem-intelligence-engine#33 (negative canary, AGENTS.md; real doc fix)",
-      "uni-protocol#36 (negative canary, .github/; real CI hardening)"
+      "uni-protocol#36 (negative canary, .github/; real CI hardening)",
+      "memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37 (T-M2b workflow)"
     ],
-    "held_by_hold_merge": ["cuesheet#79", "problem-intelligence-engine#30"]
+    "held_by_hold_merge": [
+      "cuesheet#79",
+      "problem-intelligence-engine#30"
+    ]
   },
-  "verification": { "status": "in_progress", "evidence": "spec.md section 08" },
+  "verification": {
+    "status": "in_progress",
+    "evidence": "spec.md section 08"
+  },
   "ready_for_manual_acceptance": false
 }

@@ -183,14 +183,14 @@ pinned SHA (manual bump), memo-bridge Mac runtime install-local (manual).
 | T-C3 | P1 | TODO | C07 | - | delete_branch_on_merge on adopted repos (repo setting, owner or App admin). Off today on memo-bridge and uni-protocol; on for cuesheet, problem-intelligence-engine, drop, lab-hub | gh api |
 | T-M1 | P0 | DONE | M02,M04,M05 | T-SPEC | new memo-bridge .mergify.yml (#151), merged by the owner as #154 | Mergify check |
 | T-M2 | P0 | DONE | M07 | T-M1 | positive + negative canary on memo-bridge | runtime E-01, E-02 |
-| T-M2b | P1 | TODO | M04 | T-M2 | label `needs-human-review` + one comment naming the matched paths on sensitive PRs, without a paid Mergify feature (a small workflow under .github/, so the owner merges it) | runtime on a deploy/ PR |
+| T-M2b | P1 | IN_PROGRESS (owner merges memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37) | M04 | T-M2 | label `needs-human-review` + one comment naming the matched paths on sensitive PRs, without a paid Mergify feature (a small workflow under .github/, so the owner merges it) | runtime on a deploy/ PR |
 | T-M3 | P1 | DONE | M06,M08 | T-M2 | fleet template + adoption doc, merged as #158 (docs/MERGIFY_FLEET_ADOPTION.md) | review |
 | T-M4 | P1 | DONE | M01,M07 | T-M3 | adopt public repos: cuesheet#81, problem-intelligence-engine#31, uni-protocol#34, merged by the owner. lab-hub (memolabs-dev) has no PR traffic: nothing to adopt | E-08, E-09 |
 | T-M4c | P1 | DONE | M07 | T-M4 | positive + negative canary on cuesheet, problem-intelligence-engine, uni-protocol | runtime E-09 |
 | T-M4d | P1 | BLOCKED | M01,M07 | T-M3, U-03 | adopt drop | canary |
 | T-M5 | P1 | BLOCKED | M01,M07 | T-M3, U-02 | adopt private memolabs-dev repos: emargo (disable auto-merge.yml), lab-console, rebuild-radar, mobile-explorer, kollio-v3 | canary proves Mergify Free on private |
 | T-M6 | P1 | BLOCKED | M01 | U-01 | personal repos (lab-infra, kollio-mac, world-kernel, memo-cc, stasis, intentlane) | owner decision |
-| T-D1 | P1 | TODO | D01 | T-SPEC | deploy target column in PROJECTS.md / catalog | inspection |
+| T-D1 | P1 | DONE | D01 | T-SPEC | deploy targets derived from what deploys (VPS compose images, release workflows), not a PROJECTS.md column; snapshot in docs/DEPLOY_TARGETS.md | inspection E-11 |
 | T-D2 | P1 | TODO | D02,D03,O02 | T-D1 | deploy receipt: read autodeploy status on VPS, post memo/deploy + PR comment + Issue on failure | automated + lab-hub canary |
 | T-D3 | P1 | TODO | D04 | T-D2, T-M6 | lab-infra stack deploy-on-merge with drift check and rollback | automated fixture |
 | T-D4 | P1 | TODO | D05 | T-D2 | memo-bridge pin bump PR to lab-infra after green main | runtime |
@@ -224,6 +224,11 @@ targets depend on T-M5, T-M6, T-D3..D5, which are listed with their blockers, no
   reviews and merges", with a security review on protocol, relay, node, runner, capabilities and
   requester-mcp. Owner decision: remove the `merge_queue` rule (or exempt Mergify) and rewrite
   those CONTRIBUTING lines, or keep drop out of the autoloop.
+
+- U-04 BLOCKING for the T-D2 runtime canary: no Mergify-adopted repository deploys an image on
+  merge (docs/DEPLOY_TARGETS.md). Owner decision: bring a `vps-image` repository into the loop
+  (lab-hub-public, which needs PRs to become its way in; drop after U-03; emargo after U-02;
+  personal ones after U-01). T-D2 code can be written and tested on fixtures before that.
 
 ## 07. Verification plan
 STATIC: Mergify config check on the PR; node --check. UNIT/INTEGRATION: node:test fixtures with
@@ -283,3 +288,12 @@ Times are UTC. Mac = the owner's Mac, memo-bridge main checkout at d2d0b7a for E
   The PIE and uni positives are docs: code landing was proven on memo-bridge (#155) and
   cuesheet (#82), and the policy has no code exclusion left, so path rules are what each canary
   tests. The three negatives are real fixes left for the owner to merge or close.
+- E-10 (T-M2b, 2026-10-17): `.github/workflows/sensitive-paths.yml` opened on the four adopted
+  repositories (memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37).
+  Dry run of its script on the eight canaries: the four sensitive PRs matched with the right
+  path, the four others not; both pattern spellings and uni's trust paths handled. Not yet run
+  on GitHub (`pull_request_target` uses the base copy): after each merge, close and reopen that
+  repository's negative canary and check the label and the single comment.
+- E-11 (T-D1, 2026-10-17): read-only inventory of `/opt/stacks` on the VPS: 23 own images in 20
+  stacks; emargo held. None of the four adopted repositories deploys an image. Nine running
+  images have no `PROJECTS.md` row. Details and derivation commands: docs/DEPLOY_TARGETS.md.
