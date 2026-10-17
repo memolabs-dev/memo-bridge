@@ -1,6 +1,6 @@
 {
   "role": "index",
-  "updated": "2026-10-15",
+  "updated": "2026-10-17",
   "note": "Index of the per-project states under .agent/project/. Each project's own state.json is canonical. Until 2026-10-15 this file held the Phase 2 and 3 state, kept below as phase_2_3.",
   "projects": {
     "phase-4": {
@@ -82,6 +82,11 @@
     "vps-runner-proof": {
       "evidence": ".agent/project/vps-runner-proof/evidence.md",
       "phase": "evidence only, no state"
+    },
+    "autoloop": {
+      "state": ".agent/project/autoloop/state.json",
+      "phase": "PLANNED",
+      "merged": ""
     }
   },
   "reality": {
