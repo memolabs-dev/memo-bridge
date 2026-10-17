@@ -4,65 +4,58 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 const text = readFileSync(fileURLToPath(new URL('../.mergify.yml', import.meta.url)), 'utf8');
 
-// Local structural regression tests. The live Mergify Config Changed check
-// remains the authoritative syntax validation.
-function conditions(label) {
-  const pos = text.indexOf(label);
-  assert.ok(pos >= 0, 'missing '+label);
+// Local structural regression tests for the autoloop policy (#151, owner decision of
+// 2026-10-17). The live Mergify "Configuration changed" check remains the authoritative syntax
+// validation.
+function conditions() {
+  const pos = text.indexOf('land_conditions: &land_conditions');
+  assert.ok(pos >= 0, 'missing shared land_conditions');
   const next = text.indexOf('\n\n', pos);
-  return text.slice(pos,next<0?undefined:next);
+  return text.slice(pos, next < 0 ? undefined : next);
 }
 const requirements = [
   'base = main', '-draft', '-from-fork',
-  'author = memo-labs-automation[bot]',
-  'created-at >= 2026-10-16T17:30:00Z',
+  'author = memo-labs-automation[bot]', 'author = guillaume-flambard',
   'label != hold-merge', 'label != needs-human-review',
-  '#files <= 8', '#added-lines <= 400', '#deleted-lines <= 150',
   'check-success = @github-actions/test (22)',
   'check-success = @github-actions/test (24)'
 ];
 
 test('auto merging is conditional, never enabled for all PRs', () => {
-  assert.match(text,/merge_protections_settings:\s*\n\s+auto_merge_conditions:\s*\n/);
-  assert.doesNotMatch(text,/auto_merge_conditions:\s*(true|\[\])/);
-  assert.doesNotMatch(text,/autoqueue:/);
-  assert.doesNotMatch(text,/pull_request_rules:/);
-  assert.doesNotMatch(text,/landing:approved|mergify:pilot|approved-reviews-by/);
-  assert.match(text,/name: memo-labs-safe-auto/);
-  assert.match(text,/max_parallel_checks: 1/);
-  assert.match(text,/batch_size: 1/);
-  assert.match(text,/merge_method: squash/);
+  assert.match(text, /merge_protections_settings:\s*\n\s+auto_merge_conditions: \*land_conditions\n/);
+  assert.doesNotMatch(text, /auto_merge_conditions:\s*(true|\[\])/);
+  assert.doesNotMatch(text, /autoqueue:/);
+  // pull_request_rules need Mergify Workflow Automation, which is not activated (seen on #154).
+  assert.doesNotMatch(text, /pull_request_rules:/);
+  assert.doesNotMatch(text, /landing:approved|mergify:pilot|approved-reviews-by/);
+  assert.match(text, /name: memo-labs-autoloop/);
+  assert.match(text, /max_parallel_checks: 1/);
+  assert.match(text, /batch_size: 1/);
+  assert.match(text, /merge_method: squash/);
 });
 
-test('auto admission and queue match strict gates, merge uses same conditions', () => {
-  const admission = conditions('  auto_merge_conditions:');
-  const queue = conditions('    queue_conditions: &safe_auto_conditions');
-  for(const required of requirements) {
-    assert.ok(admission.includes(required),'admission missing '+required);
-    assert.ok(queue.includes(required),'queue missing '+required);
+test('admission, queue entry and merge use the same gates', () => {
+  const shared = conditions();
+  for (const required of requirements) assert.ok(shared.includes(required), 'missing ' + required);
+  assert.match(text, /queue_conditions: \*land_conditions/);
+  assert.match(text, /merge_conditions: \*land_conditions/);
+});
+
+test('no cutoff date and no size cap: green code PRs are eligible', () => {
+  assert.doesNotMatch(text, /created-at/);
+  assert.doesNotMatch(text, /#files|#added-lines|#deleted-lines/);
+});
+
+test('sensitive paths stay with the owner, code paths land', () => {
+  const match = conditions().match(/-files ~= ([^\r\n]+)/);
+  assert.ok(match, 'no file deny list');
+  const regex = new RegExp(match[1].trim().replace(/^['"]|['"]$/g, ''));
+  for (const path of ['.github/workflows/ci.yml', '.mergify.yml', 'CODEOWNERS', 'deploy/install.sh',
+    'infra/ansible.yml', '.env.production', 'AGENTS.md']) {
+    assert.match(path, regex, 'sensitive path not excluded: ' + path);
   }
-  assert.match(text,/merge_conditions: \*safe_auto_conditions/);
-});
-
-test('no existing PR is eligible: hard start timestamp and sensitive paths blocked', () => {
-  assert.match(text, /created-at >= 2026-10-16T17:30:00Z/g);
-  const admission = conditions('  auto_merge_conditions:');
-  const queue = conditions('    queue_conditions: &safe_auto_conditions');
-  for(const section of [admission,queue]) {
-    const match = section.match(/-files ~= ([^\r\n]+)/);
-    assert.ok(match,'no file deny list');
-    for(const path of [
-      '.github/workflows/ci.yml', '.mergify.yml', 'server/index.mjs',
-      'bridge/hub-cli.mjs', 'plugin/server/index.mjs', 'deploy/install.sh',
-      'scripts/verify.js', 'tests/github.test.mjs', 'infra/ansible.yml',
-      '.env.production', 'AGENTS.md', 'CODEOWNERS', 'Dockerfile',
-      'package.json', 'pnpm-lock.yaml'
-    ]) {
-      // The condition is enclosed in YAML single quotes. Strip them and
-      // interpret the regex locally to exercise the protected path set.
-      let regex = match[1].trim().replace(/^['"]|['"]$/g,'');
-      assert.match(path,new RegExp(regex),'protected path not excluded: '+path);
-    }
-    assert.doesNotMatch('docs/guide.md',new RegExp(match[1].trim().replace(/^['"]|['"]$/g,'')));
+  for (const path of ['server/index.mjs', 'bridge/hub-cli.mjs', 'scripts/reap-worktrees.mjs',
+    'tests/github.test.mjs', 'package.json', 'pnpm-lock.yaml', 'docs/guide.md', 'docs/AGENTS.md']) {
+    assert.doesNotMatch(path, regex, 'code path wrongly excluded: ' + path);
   }
 });
