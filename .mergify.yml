@@ -1,9 +1,7 @@
 # Memo Labs autoloop (docs/MERGIFY_PILOT.md, spec .agent/project/autoloop REQ-M02..M05).
-# A green PR from a trusted author lands without a human. Only sensitive paths wait for the owner,
-# and they say so: label needs-human-review plus one comment, instead of waiting in silence.
+# A green PR from a trusted author lands without a human. Only sensitive paths wait for the owner;
+# Mergify's own Merge Protections comment on the PR names the condition that blocks it.
 shared:
-  sensitive_paths: &sensitive_paths
-    - files ~= ^(\.github/|\.mergify\.yml$|CODEOWNERS$|deploy/|infra/|\.env)
   land_conditions: &land_conditions
     - base = main
     - -draft
@@ -13,7 +11,7 @@ shared:
         - author = guillaume-flambard
     - label != hold-merge
     - label != needs-human-review
-    - -files ~= ^(\.github/|\.mergify\.yml$|CODEOWNERS$|deploy/|infra/|\.env)
+    - -files ~= ^(\.github/|\.mergify\.yml$|CODEOWNERS$|AGENTS\.md$|deploy/|infra/|\.env)
     - check-success = @github-actions/test (22)
     - check-success = @github-actions/test (24)
 
@@ -29,20 +27,3 @@ queue_rules:
     merge_method: squash
     queue_conditions: *land_conditions
     merge_conditions: *land_conditions
-
-pull_request_rules:
-  - name: sensitive paths wait for the owner
-    conditions:
-      - base = main
-      - -draft
-      - and: *sensitive_paths
-    actions:
-      label:
-        add:
-          - needs-human-review
-      comment:
-        message: |
-          This pull request touches a path that Memo Labs keeps for the owner
-          (`.github/`, `.mergify.yml`, `CODEOWNERS`, `deploy/`, `infra/` or an environment file),
-          so Mergify will not merge it on its own. Everything else lands automatically once
-          `test (22)` and `test (24)` are green.

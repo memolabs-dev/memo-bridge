@@ -24,14 +24,16 @@ PRs land when **all** of the following hold on the exact head:
 - Target `main`, non-draft, same repository.
 - Author `memo-labs-automation[bot]` or `guillaume-flambard`.
 - Not labeled `hold-merge` or `needs-human-review`.
-- No sensitive path: `.github/`, `.mergify.yml`, `CODEOWNERS`, `deploy/`, `infra/`, environment
-  files. Code under `server/`, `bridge/`, `plugin/`, `scripts/`, `tests/` and the manifests lands
+- No sensitive path: `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`, `deploy/`,
+  `infra/`, environment files. Code under `server/`, `bridge/`, `plugin/`, `scripts/`, `tests/` and the manifests lands
   on green CI like anything else.
 - GitHub Actions `test (22)` and `test (24)` succeeded.
 - Serialized queue `memo-labs-autoloop` (`batch_size: 1`, `max_parallel_checks: 1`), squash.
 
-A PR that touches a sensitive path gets the `needs-human-review` label and one comment naming the
-reason, so it never waits in silence. The owner merges it, or removes the path from the PR.
+A PR that touches a sensitive path is not merged; Mergify's Merge Protections comment on the PR
+names the failing condition, and the daily stuck-PR report (autoloop T-O1) lists it for the owner.
+Labelling such PRs through `pull_request_rules` needs Mergify Workflow Automation, which is not
+activated on this organization (Configuration changed check on #154).
 
 Pausing: add `hold-merge` to a PR, or put it back to draft.
 
