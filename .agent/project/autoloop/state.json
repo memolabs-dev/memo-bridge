@@ -2,21 +2,33 @@
   "project": "autoloop",
   "issue": "memolabs-dev/memo-bridge#149",
   "updated": "2026-10-17",
-  "phase": "PLANNED",
+  "phase": "IMPLEMENT",
   "requirements": { "total": 22, "covered": 22 },
   "todos": {
-    "p0_open": 4,
+    "done": ["T-SPEC", "T-C1", "T-C2 (Mac)", "T-M1", "T-M2"],
+    "p0_open": 0,
     "p1_open": 12,
     "p2_open": 1,
-    "blocked": ["T-M5 (U-02)", "T-M6 (U-01)"]
+    "blocked": ["T-M5 (U-02)", "T-M6 (U-01)"],
+    "next": "T-M3"
   },
-  "acceptance": { "total": 13, "verified": 0, "failed": 0, "pending": 13 },
-  "risks": { "critical_open": 0, "high_open": 4 },
+  "acceptance": {
+    "total": 13,
+    "verified": ["AC-C01", "AC-C02", "AC-C03", "AC-C04", "AC-C05", "AC-M01"],
+    "partial": ["AC-M02 (stays open: verified; label and comment: T-M2b)"],
+    "failed": [],
+    "pending": ["AC-M03", "AC-D01", "AC-D02", "AC-D03", "AC-D04", "AC-O01"]
+  },
+  "risks": { "critical_open": 0, "high_open": 3, "closed": ["R-07"], "mitigated": ["R-02"] },
   "issues": {
     "spec": "memolabs-dev/memo-bridge#149",
     "reaper": "memolabs-dev/memo-bridge#150",
     "merge_policy": "memolabs-dev/memo-bridge#151"
   },
-  "verification": { "status": "not_started" },
+  "pull_requests": {
+    "merged": ["#152", "#153", "#154", "#155"],
+    "open_for_owner": ["#156 (negative canary, deploy/; a real doc fix, merge or close)"]
+  },
+  "verification": { "status": "in_progress", "evidence": "spec.md section 08" },
   "ready_for_manual_acceptance": false
 }
