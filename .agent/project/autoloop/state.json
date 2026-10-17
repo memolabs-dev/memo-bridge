@@ -5,12 +5,13 @@
   "phase": "IMPLEMENT",
   "requirements": { "total": 22, "covered": 22 },
   "todos": {
-    "done": ["T-SPEC", "T-C1", "T-C2 (Mac)", "T-M1", "T-M2"],
+    "done": ["T-SPEC", "T-C1", "T-C2 (Mac)", "T-M1", "T-M2", "T-M3"],
+    "in_progress": ["T-M4 (adoption PRs wait for the owner's merge)"],
     "p0_open": 0,
-    "p1_open": 12,
+    "p1_open": 13,
     "p2_open": 1,
-    "blocked": ["T-M5 (U-02)", "T-M6 (U-01)"],
-    "next": "T-M3"
+    "blocked": ["T-M4d drop (U-03)", "T-M5 (U-02)", "T-M6 (U-01)"],
+    "next": "T-M4c, once cuesheet#81, problem-intelligence-engine#31 and uni-protocol#34 are merged"
   },
   "acceptance": {
     "total": 13,
@@ -26,8 +27,14 @@
     "merge_policy": "memolabs-dev/memo-bridge#151"
   },
   "pull_requests": {
-    "merged": ["#152", "#153", "#154", "#155"],
-    "open_for_owner": ["#156 (negative canary, deploy/; a real doc fix, merge or close)"]
+    "merged": ["#152", "#153", "#154", "#155", "#157", "#158"],
+    "open_for_owner": [
+      "memo-bridge#156 (negative canary, deploy/; a real doc fix, merge or close)",
+      "cuesheet#81 (adoption)",
+      "problem-intelligence-engine#31 (adoption)",
+      "uni-protocol#34 (adoption; keep hold-merge until merged by hand)"
+    ],
+    "held_by_hold_merge": ["cuesheet#79", "problem-intelligence-engine#30"]
   },
   "verification": { "status": "in_progress", "evidence": "spec.md section 08" },
   "ready_for_manual_acceptance": false
