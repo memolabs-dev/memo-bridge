@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Hourly reaper (docs/REAPER.md). Replace __BRIDGE_CHECKOUT__ with the absolute path of a main
-     checkout of memo-bridge. A login shell gives launchd the owner's PATH (node, gh, git). -->
+     checkout of memo-bridge and __USER__ with the macOS short user name (launchd does not expand
+     ~ or $HOME in these paths). A login shell gives launchd the owner's PATH (node, gh, git). -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
