@@ -5,20 +5,23 @@
   "phase": "IMPLEMENT",
   "requirements": { "total": 22, "covered": 22 },
   "todos": {
-    "done": ["T-SPEC", "T-C1", "T-C2 (Mac)", "T-M1", "T-M2", "T-M3"],
-    "in_progress": ["T-M4 (adoption PRs wait for the owner's merge)"],
+    "done": ["T-SPEC", "T-C1", "T-C2 (Mac)", "T-M1", "T-M2", "T-M3", "T-M4", "T-M4c"],
+    "in_progress": [],
     "p0_open": 0,
-    "p1_open": 13,
+    "p1_open": 11,
     "p2_open": 1,
     "blocked": ["T-M4d drop (U-03)", "T-M5 (U-02)", "T-M6 (U-01)"],
-    "next": "T-M4c, once cuesheet#81, problem-intelligence-engine#31 and uni-protocol#34 are merged"
+    "next": "T-M2b (label and comment on sensitive PRs) or T-D1 (deploy targets); owner decisions U-01, U-02, U-03 unblock the rest of the fleet"
   },
   "acceptance": {
     "total": 13,
     "verified": ["AC-C01", "AC-C02", "AC-C03", "AC-C04", "AC-C05", "AC-M01"],
-    "partial": ["AC-M02 (stays open: verified; label and comment: T-M2b)"],
+    "partial": [
+      "AC-M02 (stays open: verified on memo-bridge, cuesheet, problem-intelligence-engine, uni-protocol; label and comment: T-M2b)",
+      "AC-M03 (verified for the 4 adopted repos; drop, private and personal repos not adopted)"
+    ],
     "failed": [],
-    "pending": ["AC-M03", "AC-D01", "AC-D02", "AC-D03", "AC-D04", "AC-O01"]
+    "pending": ["AC-D01", "AC-D02", "AC-D03", "AC-D04", "AC-O01"]
   },
   "risks": { "critical_open": 0, "high_open": 3, "closed": ["R-07"], "mitigated": ["R-02"] },
   "issues": {
@@ -26,13 +29,14 @@
     "reaper": "memolabs-dev/memo-bridge#150",
     "merge_policy": "memolabs-dev/memo-bridge#151"
   },
+  "adopted_repos": ["memolabs-dev/memo-bridge", "memolabs-dev/cuesheet", "memolabs-dev/problem-intelligence-engine", "memolabs-dev/uni-protocol"],
   "pull_requests": {
-    "merged": ["#152", "#153", "#154", "#155", "#157", "#158"],
+    "merged": ["#152", "#153", "#154", "#155", "#157", "#158", "#159"],
     "open_for_owner": [
-      "memo-bridge#156 (negative canary, deploy/; a real doc fix, merge or close)",
-      "cuesheet#81 (adoption)",
-      "problem-intelligence-engine#31 (adoption)",
-      "uni-protocol#34 (adoption; keep hold-merge until merged by hand)"
+      "memo-bridge#156 (negative canary, deploy/; real doc fix)",
+      "cuesheet#83 (negative canary, .github/; real CI hardening)",
+      "problem-intelligence-engine#33 (negative canary, AGENTS.md; real doc fix)",
+      "uni-protocol#36 (negative canary, .github/; real CI hardening)"
     ],
     "held_by_hold_merge": ["cuesheet#79", "problem-intelligence-engine#30"]
   },

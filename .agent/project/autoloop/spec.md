@@ -185,8 +185,8 @@ pinned SHA (manual bump), memo-bridge Mac runtime install-local (manual).
 | T-M2 | P0 | DONE | M07 | T-M1 | positive + negative canary on memo-bridge | runtime E-01, E-02 |
 | T-M2b | P1 | TODO | M04 | T-M2 | label `needs-human-review` + one comment naming the matched paths on sensitive PRs, without a paid Mergify feature (a small workflow under .github/, so the owner merges it) | runtime on a deploy/ PR |
 | T-M3 | P1 | DONE | M06,M08 | T-M2 | fleet template + adoption doc, merged as #158 (docs/MERGIFY_FLEET_ADOPTION.md) | review |
-| T-M4 | P1 | IN_PROGRESS | M01,M07 | T-M3 | adopt public repos. Adoption PRs open, CI green, Mergify config valid, owner merges: cuesheet#81, problem-intelligence-engine#31, uni-protocol#34. lab-hub (memolabs-dev) has no PR traffic: nothing to adopt | canary per repo |
-| T-M4c | P1 | TODO | M07 | T-M4 | positive + negative canary on cuesheet, problem-intelligence-engine, uni-protocol | runtime |
+| T-M4 | P1 | DONE | M01,M07 | T-M3 | adopt public repos: cuesheet#81, problem-intelligence-engine#31, uni-protocol#34, merged by the owner. lab-hub (memolabs-dev) has no PR traffic: nothing to adopt | E-08, E-09 |
+| T-M4c | P1 | DONE | M07 | T-M4 | positive + negative canary on cuesheet, problem-intelligence-engine, uni-protocol | runtime E-09 |
 | T-M4d | P1 | BLOCKED | M01,M07 | T-M3, U-03 | adopt drop | canary |
 | T-M5 | P1 | BLOCKED | M01,M07 | T-M3, U-02 | adopt private memolabs-dev repos: emargo (disable auto-merge.yml), lab-console, rebuild-radar, mobile-explorer, kollio-v3 | canary proves Mergify Free on private |
 | T-M6 | P1 | BLOCKED | M01 | U-01 | personal repos (lab-infra, kollio-mac, world-kernel, memo-cc, stasis, intentlane) | owner decision |
@@ -269,3 +269,17 @@ Times are UTC. Mac = the owner's Mac, memo-bridge main checkout at d2d0b7a for E
   not absorb them retroactively. `hold-merge` labels created on problem-intelligence-engine and
   uni-protocol. Merge methods: squash on cuesheet (as before), merge on the other two (their
   history), a deliberate deviation from REQ-M05. uni adds its trust paths to the sensitive set.
+- E-09 (T-M4c, 2026-10-17): the adoption PRs were merged by the owner (cuesheet#81 20:34:38,
+  problem-intelligence-engine#31 20:34:50, uni-protocol#34 20:35:04). On main afterwards each
+  repository has `.mergify.yml` and no legacy merge workflow (`gh api .../actions/workflows`).
+  Canaries, all authored by guillaume-flambard:
+  - cuesheet: positive #82 (code: `src/adapters/frontier.ts`, `src/frontier-cli.ts`, tests;
+    fixes cuesheet#78) merged by `app/mergify` at 20:41:34; negative #83 (`.github/workflows/ci.yml`,
+    `persist-credentials: false`) open, CI green, only `-files` unmet.
+  - problem-intelligence-engine: positive #32 (README, docs only) merged by `app/mergify` at
+    20:46:15; negative #33 (root `AGENTS.md`) open, CI green, only `-files` unmet.
+  - uni-protocol: positive #35 (`docs/roadmap.md`, docs only) merged by `app/mergify` at
+    20:48:56; negative #36 (`.github/workflows/uni.yml`) open, CI green, only `-files` unmet.
+  The PIE and uni positives are docs: code landing was proven on memo-bridge (#155) and
+  cuesheet (#82), and the policy has no code exclusion left, so path rules are what each canary
+  tests. The three negatives are real fixes left for the owner to merge or close.
