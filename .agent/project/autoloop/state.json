@@ -2,21 +2,108 @@
   "project": "autoloop",
   "issue": "memolabs-dev/memo-bridge#149",
   "updated": "2026-10-17",
-  "phase": "PLANNED",
-  "requirements": { "total": 22, "covered": 22 },
-  "todos": {
-    "p0_open": 4,
-    "p1_open": 12,
-    "p2_open": 1,
-    "blocked": ["T-M5 (U-02)", "T-M6 (U-01)"]
+  "phase": "IMPLEMENT",
+  "requirements": {
+    "total": 22,
+    "covered": 22
   },
-  "acceptance": { "total": 13, "verified": 0, "failed": 0, "pending": 13 },
-  "risks": { "critical_open": 0, "high_open": 4 },
+  "todos": {
+    "done": [
+      "T-SPEC",
+      "T-C1",
+      "T-C2 (Mac)",
+      "T-M1",
+      "T-M2",
+      "T-M3",
+      "T-M4",
+      "T-M4c",
+      "T-D1",
+      "T-M2b"
+    ],
+    "in_progress": [],
+    "p0_open": 0,
+    "p1_open": 9,
+    "p2_open": 1,
+    "blocked": [
+      "T-M4d drop (U-03)",
+      "T-M5 (U-02)",
+      "T-M6 (U-01)",
+      "T-D2 runtime canary (U-04)"
+    ],
+    "next": "T-D2 deploy receipt on fixtures; owner decisions U-01..U-04 unblock the rest"
+  },
+  "acceptance": {
+    "total": 13,
+    "verified": [
+      "AC-C01",
+      "AC-C02",
+      "AC-C03",
+      "AC-C04",
+      "AC-C05",
+      "AC-M01",
+      "AC-M02"
+    ],
+    "partial": [
+      "AC-M03 (verified for the 4 adopted repos; drop, private and personal repos not adopted)"
+    ],
+    "failed": [],
+    "pending": [
+      "AC-D01",
+      "AC-D02",
+      "AC-D03",
+      "AC-D04",
+      "AC-O01"
+    ]
+  },
+  "risks": {
+    "critical_open": 0,
+    "high_open": 3,
+    "closed": [
+      "R-07"
+    ],
+    "mitigated": [
+      "R-02"
+    ]
+  },
   "issues": {
     "spec": "memolabs-dev/memo-bridge#149",
     "reaper": "memolabs-dev/memo-bridge#150",
     "merge_policy": "memolabs-dev/memo-bridge#151"
   },
-  "verification": { "status": "not_started" },
+  "adopted_repos": [
+    "memolabs-dev/memo-bridge",
+    "memolabs-dev/cuesheet",
+    "memolabs-dev/problem-intelligence-engine",
+    "memolabs-dev/uni-protocol"
+  ],
+  "pull_requests": {
+    "merged": [
+      "#152",
+      "#153",
+      "#154",
+      "#155",
+      "#157",
+      "#158",
+      "#159",
+      "#160",
+      "#161",
+      "#162",
+      "#163"
+    ],
+    "open_for_owner": [
+      "memo-bridge#156 (negative canary, deploy/; real doc fix)",
+      "cuesheet#83 (negative canary, .github/; real CI hardening)",
+      "problem-intelligence-engine#33 (negative canary, AGENTS.md; real doc fix)",
+      "uni-protocol#36 (negative canary, .github/; real CI hardening)"
+    ],
+    "held_by_hold_merge": [
+      "cuesheet#79",
+      "problem-intelligence-engine#30"
+    ]
+  },
+  "verification": {
+    "status": "in_progress",
+    "evidence": "spec.md section 08"
+  },
   "ready_for_manual_acceptance": false
 }

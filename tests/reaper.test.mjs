@@ -163,6 +163,15 @@ test('AC-C03: kept when HEAD is detached', async t => {
   assert.equal(existsSync(f.wt), true);
 });
 
+test('AC-C03: kept with broken_gitdir when the repository moved under the worktree', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.wt, '.git'), `gitdir: ${join(f.base, 'gone', '.git', 'worktrees', 'wt')}\n`);
+  const report = await reapRepository(f.repo, deps({ pr: merged(f.head) }), { apply: true, graceMs: 0, archiveDir: f.archiveDir });
+  assert.equal(report[0].action, 'keep');
+  assert.equal(report[0].reason, 'broken_gitdir');
+  assert.equal(existsSync(f.wt), true);
+});
+
 test('AC-C05: a worktree whose directory vanished is pruned', async t => {
   const f = await fixture(t);
   await rm(f.wt, { recursive: true, force: true });

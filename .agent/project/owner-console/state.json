@@ -1,0 +1,10 @@
+{
+  "project": "owner-console",
+  "updated": "2026-10-18",
+  "phase": "IMPLEMENT",
+  "decisions": ["D-1 only the gate waits for the owner", "D-2 personal repositories move into memolabs-dev"],
+  "todos": {"done": ["T-T1"], "in_progress": ["T-D1 (owner merges memo-bridge#165, cuesheet#85, problem-intelligence-engine#35, uni-protocol#38)", "T-H1 (zero-friction-mac-routing spec)"], "next": "T-A1 single org rule, then T-A2 project_create", "blocked": []},
+  "acceptance": {"total": 5, "verified": [], "pending": ["AC-T1", "AC-M1", "AC-A1", "AC-A2", "AC-H1"]},
+  "held_prs": ["memo-bridge#148 (Mac runtime, deploy/)", "memo-bridge#132 (Source Engine poller)"],
+  "ready_for_manual_acceptance": false
+}

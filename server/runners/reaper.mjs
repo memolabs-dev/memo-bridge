@@ -13,7 +13,7 @@
 // Every outside call (GitHub, lsof, the Memo Bridge store) is injected, so tests run offline.
 import { execFile } from 'node:child_process';
 import { closeSync, openSync, statSync, unlinkSync, writeSync } from 'node:fs';
-import { lstat, mkdir, readdir, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { runGit } from './worktrees.mjs';
 
@@ -86,6 +86,16 @@ export function decide({ wt, pr, dirty, busy, inUse, newest, now, graceMs }) {
   return { action: dirty ? 'archive_and_remove' : 'remove', reason: `merged_pr_${pr.number}` };
 }
 
+// True when the worktree's `.git` file points at a gitdir that no longer exists, which is what a
+// moved repository leaves behind (`git worktree repair` from the new location fixes it).
+export async function brokenGitdir(worktreePath) {
+  let text;
+  try { text = await readFile(join(worktreePath, '.git'), 'utf8'); } catch { return false; }
+  const match = /^gitdir:\s*(.+)$/m.exec(text);
+  if (!match) return false;
+  try { await lstat(resolve(worktreePath, match[1].trim())); return false; } catch { return true; }
+}
+
 async function archive(wt, archiveDir, slug, env) {
   const name = `${slug}-${wt.branch}`.replace(/[^A-Za-z0-9._-]/g, '_');
   await mkdir(archiveDir, { recursive: true, mode: 0o700 });
@@ -122,7 +132,10 @@ export async function reapRepository(repoPath, deps, options = {}) {
     const entry = { repo: slug, path: wt.path, branch: wt.branch };
     if (wt.prunable) { report.push({ ...entry, action: 'prune', reason: 'missing_directory' }); removedAny = true; continue; }
     const status = await runGit(wt.path, ['status', '--porcelain'], { env, readOnly: true });
-    if (status.code !== 0) { report.push({ ...entry, action: 'keep', reason: 'status_failed' }); continue; }
+    if (status.code !== 0) {
+      report.push({ ...entry, action: 'keep', reason: (await brokenGitdir(wt.path)) ? 'broken_gitdir' : 'status_failed' });
+      continue;
+    }
     const dirty = out(status).length > 0;
     const pr = wt.branch && !wt.detached ? await deps.prForBranch(slug, wt.branch) : null;
     const decision = decide({
