@@ -17,13 +17,12 @@
       "T-M3",
       "T-M4",
       "T-M4c",
-      "T-D1"
+      "T-D1",
+      "T-M2b"
     ],
-    "in_progress": [
-      "T-M2b (memo-bridge done; owner merges cuesheet#84, problem-intelligence-engine#34, uni-protocol#37)"
-    ],
+    "in_progress": [],
     "p0_open": 0,
-    "p1_open": 10,
+    "p1_open": 9,
     "p2_open": 1,
     "blocked": [
       "T-M4d drop (U-03)",
@@ -31,7 +30,7 @@
       "T-M6 (U-01)",
       "T-D2 runtime canary (U-04)"
     ],
-    "next": "T-M2b runtime check after the merges; T-D2 deploy receipt on fixtures; owner decisions U-01..U-04"
+    "next": "T-D2 deploy receipt on fixtures; owner decisions U-01..U-04 unblock the rest"
   },
   "acceptance": {
     "total": 13,
@@ -41,10 +40,10 @@
       "AC-C03",
       "AC-C04",
       "AC-C05",
-      "AC-M01"
+      "AC-M01",
+      "AC-M02"
     ],
     "partial": [
-      "AC-M02 (stays open: verified on the 4 adopted repos; label and comment: verified on memo-bridge, E-12; pending on the 3 others until their T-M2b PRs merge)",
       "AC-M03 (verified for the 4 adopted repos; drop, private and personal repos not adopted)"
     ],
     "failed": [],
@@ -88,14 +87,14 @@
       "#159",
       "#160",
       "#161",
-      "#162"
+      "#162",
+      "#163"
     ],
     "open_for_owner": [
       "memo-bridge#156 (negative canary, deploy/; real doc fix)",
       "cuesheet#83 (negative canary, .github/; real CI hardening)",
       "problem-intelligence-engine#33 (negative canary, AGENTS.md; real doc fix)",
-      "uni-protocol#36 (negative canary, .github/; real CI hardening)",
-      "cuesheet#84, problem-intelligence-engine#34, uni-protocol#37 (T-M2b workflow)"
+      "uni-protocol#36 (negative canary, .github/; real CI hardening)"
     ],
     "held_by_hold_merge": [
       "cuesheet#79",
