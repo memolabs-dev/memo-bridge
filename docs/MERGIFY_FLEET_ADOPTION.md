@@ -15,7 +15,10 @@ Sensitive paths (REQ-M04): `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `A
 `deploy/`, `ansible/`, `infra/`, `stacks/`, any `migrations/` directory, root `.env*`, plus a
 per-repository list. A sensitive PR stays open with green CI. Mergify posts no comment on it:
 the reason is in the "Mergify Merge Queue" check of the PR, which lists the unmet `-files`
-condition. Labelling and commenting such PRs is T-M2b.
+condition. The `Sensitive paths` workflow (`.github/workflows/sensitive-paths.yml`, T-M2b) adds
+the `needs-human-review` label and one comment naming the matched paths. It reads the pattern
+from the base branch's `.mergify.yml`, so the label and Mergify's refusal cannot disagree, and it
+never checks out or runs PR code.
 
 ## The template
 
@@ -65,15 +68,17 @@ queue_rules:
    (workflow file deleted, so both switch at the merge commit). When the legacy engine is a
    `pull_request_target` auto-merge workflow, open the PR as a draft, add `hold-merge`, then mark
    it ready: the base branch's copy of the workflow would otherwise arm auto-merge on the
-   adoption PR itself. The PR touches `.mergify.yml`, so the owner merges it.
+   adoption PR itself. Copy `.github/workflows/sensitive-paths.yml` from memo-bridge unchanged
+   in the same PR: it needs no per-repository edit. The PR touches `.mergify.yml`, so the owner
+   merges it.
 4. A ruleset `merge_queue` rule blocks every Mergify merge. It is removed, or Mergify is added as
    an `exempt` bypass actor on that ruleset, before adoption. Both are owner settings.
    Source: https://docs.mergify.com/merge-queue/github-rulesets.md
 5. Positive canary: a small real code change, no sensitive path. Pass when
    `gh pr view <n> --json mergedBy` says `mergify`.
 6. Negative canary: a small real change under a sensitive path. Pass when CI is green and the PR
-   is still open with the `-files` condition unmet in the Mergify Merge Queue check. The owner
-   then merges or closes it.
+   is still open with the `-files` condition unmet in the Mergify Merge Queue check, labelled
+   `needs-human-review` with one comment naming the path. The owner then merges or closes it.
 7. Set `delete_branch_on_merge` on the repository (T-C3, owner setting) and record the result in
    the table below.
 

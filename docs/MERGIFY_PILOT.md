@@ -34,7 +34,9 @@ A PR that touches a sensitive path is not merged. Mergify posts no comment on it
 #156): the "Mergify Merge Queue" check of the PR lists the unmet `-files` condition, and the
 daily stuck-PR report (autoloop T-O1) lists it for the owner.
 Labelling such PRs through `pull_request_rules` needs Mergify Workflow Automation, which is not
-activated on this organization (Configuration changed check on #154).
+activated on this organization (Configuration changed check on #154). The `Sensitive paths`
+GitHub Actions workflow does it instead: label `needs-human-review` and one comment listing the
+matched paths (`.github/workflows/sensitive-paths.yml`, autoloop T-M2b).
 
 Pausing: add `hold-merge` to a PR, or put it back to draft.
 
