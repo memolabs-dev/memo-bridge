@@ -29,6 +29,10 @@ repository for that), never merges and never deploys.
 Unknown is treated as "keep": a failing `gh` call means no PR, a failing `lsof` means every
 worktree is in use, an unreadable Memo Bridge store refuses `--apply`.
 
+A worktree whose `.git` file points at a gitdir that no longer exists is kept with the reason
+`broken_gitdir`. Moving a repository leaves this behind; `git worktree repair <path>` run from the
+repository's new location relinks it, after which the reaper can judge it again.
+
 ## Run it
 
 ```sh
