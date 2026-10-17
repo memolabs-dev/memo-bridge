@@ -30,8 +30,9 @@ PRs land when **all** of the following hold on the exact head:
 - GitHub Actions `test (22)` and `test (24)` succeeded.
 - Serialized queue `memo-labs-autoloop` (`batch_size: 1`, `max_parallel_checks: 1`), squash.
 
-A PR that touches a sensitive path is not merged; Mergify's Merge Protections comment on the PR
-names the failing condition, and the daily stuck-PR report (autoloop T-O1) lists it for the owner.
+A PR that touches a sensitive path is not merged. Mergify posts no comment on it (checked on
+#156): the "Mergify Merge Queue" check of the PR lists the unmet `-files` condition, and the
+daily stuck-PR report (autoloop T-O1) lists it for the owner.
 Labelling such PRs through `pull_request_rules` needs Mergify Workflow Automation, which is not
 activated on this organization (Configuration changed check on #154).
 
