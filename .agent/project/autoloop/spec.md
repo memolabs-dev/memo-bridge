@@ -180,12 +180,14 @@ pinned SHA (manual bump), memo-bridge Mac runtime install-local (manual).
 | T-SPEC | P0 | DONE | all | - | this document (#149), merged as #152 | review |
 | T-C1 | P0 | DONE | C01-C05 | T-SPEC | reaper module + CLI + tests (#150), merged as #153; broken_gitdir reason #155 | pnpm test |
 | T-C2 | P1 | DONE (Mac) | C06 | T-C1 | launchd/systemd examples, install on the Mac; VPS timer not installed | runtime E-05 |
-| T-C3 | P1 | TODO | C07 | - | delete_branch_on_merge on adopted repos (repo setting, owner or App admin) | gh api |
+| T-C3 | P1 | TODO | C07 | - | delete_branch_on_merge on adopted repos (repo setting, owner or App admin). Off today on memo-bridge and uni-protocol; on for cuesheet, problem-intelligence-engine, drop, lab-hub | gh api |
 | T-M1 | P0 | DONE | M02,M04,M05 | T-SPEC | new memo-bridge .mergify.yml (#151), merged by the owner as #154 | Mergify check |
 | T-M2 | P0 | DONE | M07 | T-M1 | positive + negative canary on memo-bridge | runtime E-01, E-02 |
 | T-M2b | P1 | TODO | M04 | T-M2 | label `needs-human-review` + one comment naming the matched paths on sensitive PRs, without a paid Mergify feature (a small workflow under .github/, so the owner merges it) | runtime on a deploy/ PR |
-| T-M3 | P1 | TODO | M06,M08 | T-M2 | fleet template + adoption doc | review |
-| T-M4 | P1 | TODO | M01,M07 | T-M3 | adopt public repos: cuesheet (relax rules), problem-intelligence-engine, drop (replace native queue, signing paths extra), lab-hub, uni-protocol (disable auto-merge.yml first) | canary per repo |
+| T-M3 | P1 | DONE | M06,M08 | T-M2 | fleet template + adoption doc, merged as #158 (docs/MERGIFY_FLEET_ADOPTION.md) | review |
+| T-M4 | P1 | IN_PROGRESS | M01,M07 | T-M3 | adopt public repos. Adoption PRs open, CI green, Mergify config valid, owner merges: cuesheet#81, problem-intelligence-engine#31, uni-protocol#34. lab-hub (memolabs-dev) has no PR traffic: nothing to adopt | canary per repo |
+| T-M4c | P1 | TODO | M07 | T-M4 | positive + negative canary on cuesheet, problem-intelligence-engine, uni-protocol | runtime |
+| T-M4d | P1 | BLOCKED | M01,M07 | T-M3, U-03 | adopt drop | canary |
 | T-M5 | P1 | BLOCKED | M01,M07 | T-M3, U-02 | adopt private memolabs-dev repos: emargo (disable auto-merge.yml), lab-console, rebuild-radar, mobile-explorer, kollio-v3 | canary proves Mergify Free on private |
 | T-M6 | P1 | BLOCKED | M01 | U-01 | personal repos (lab-infra, kollio-mac, world-kernel, memo-cc, stasis, intentlane) | owner decision |
 | T-D1 | P1 | TODO | D01 | T-SPEC | deploy target column in PROJECTS.md / catalog | inspection |
@@ -216,6 +218,12 @@ targets depend on T-M5, T-M6, T-D3..D5, which are listed with their blockers, no
 - U-01 BLOCKING for T-M6: for guillaume-flambard/* repos, install Mergify on the personal
   account, or transfer them into memolabs-dev. Owner decision (outward, account-level).
 - U-02 BLOCKING for T-M5: Mergify Free on private repos. Resolved by the emargo canary.
+
+- U-03 BLOCKING for T-M4d: drop requires GitHub's merge queue through ruleset 24880009 (merge
+  commits only), which blocks every Mergify merge, and its CONTRIBUTING says "The maintainer
+  reviews and merges", with a security review on protocol, relay, node, runner, capabilities and
+  requester-mcp. Owner decision: remove the `merge_queue` rule (or exempt Mergify) and rewrite
+  those CONTRIBUTING lines, or keep drop out of the autoloop.
 
 ## 07. Verification plan
 STATIC: Mergify config check on the PR; node --check. UNIT/INTEGRATION: node:test fixtures with
@@ -250,3 +258,14 @@ Times are UTC. Mac = the owner's Mac, memo-bridge main checkout at d2d0b7a for E
   `broken_gitdir` once the checkout runs #155).
 - E-06 (T-C3, observation): `delete_branch_on_merge` is `false` on memo-bridge, so
   `fix/reaper-broken-gitdir` stayed on the remote after #155 merged.
+- E-07 (T-M3, 2026-10-17): #158 merged by `app/mergify`. The previous French fleet page is kept
+  verbatim as an annex; `scripts/mergify-fleet.mjs candidate` still emits the superseded pilot
+  rules and must not be used for an adoption until aligned.
+- E-08 (T-M4, 2026-10-17): cuesheet#81, problem-intelligence-engine#31, uni-protocol#34 open with
+  CI green and the Mergify "Configuration changed" check reporting a valid configuration. uni#34
+  was opened as a draft, labelled `hold-merge`, then marked ready: its legacy `pull_request_target`
+  job "Enable merge after required CI" was skipped and no native auto-merge is armed. Existing
+  open PRs cuesheet#79 and problem-intelligence-engine#30 got `hold-merge` so the new policy does
+  not absorb them retroactively. `hold-merge` labels created on problem-intelligence-engine and
+  uni-protocol. Merge methods: squash on cuesheet (as before), merge on the other two (their
+  history), a deliberate deviation from REQ-M05. uni adds its trust paths to the sensitive set.
