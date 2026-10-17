@@ -158,9 +158,10 @@ pinned SHA (manual bump), memo-bridge Mac runtime install-local (manual).
   file under server/ goes green, then mergify[bot] merges it. Runtime canary. Evidence: E-01.
 - AC-M02 (REQ-M04, M07): Given a PR touching deploy/, then it gets `needs-human-review` and a
   comment, and stays open. Runtime canary. Evidence: E-02. Verified: stays open with green CI,
-  and the "Mergify Merge Queue" check names the failing `-files` condition. Not verified:
-  label and comment. #154 dropped the comment rule (paid Mergify feature) and Mergify posts no
-  comment of its own on such a PR (checked on #156). Gap tracked as T-M2b.
+  and the "Mergify Merge Queue" check names the failing `-files` condition. Label and comment:
+  verified on memo-bridge since #161 (E-12), through the `Sensitive paths` workflow, because
+  Mergify's own labelling is a paid feature. Pending on cuesheet, problem-intelligence-engine and
+  uni-protocol until their T-M2b PRs are merged.
 - AC-M03 (REQ-M01, M08): For each adopted repo, `gh api repos/X/actions/workflows` shows legacy
   merge workflows disabled and `.mergify.yml` present. Inspection.
 - AC-D01 (REQ-D02): Given a merged SHA of a vps-image project, when autodeploy reports success,
@@ -183,7 +184,7 @@ pinned SHA (manual bump), memo-bridge Mac runtime install-local (manual).
 | T-C3 | P1 | TODO | C07 | - | delete_branch_on_merge on adopted repos (repo setting, owner or App admin). Off today on memo-bridge and uni-protocol; on for cuesheet, problem-intelligence-engine, drop, lab-hub | gh api |
 | T-M1 | P0 | DONE | M02,M04,M05 | T-SPEC | new memo-bridge .mergify.yml (#151), merged by the owner as #154 | Mergify check |
 | T-M2 | P0 | DONE | M07 | T-M1 | positive + negative canary on memo-bridge | runtime E-01, E-02 |
-| T-M2b | P1 | IN_PROGRESS (owner merges memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37) | M04 | T-M2 | label `needs-human-review` + one comment naming the matched paths on sensitive PRs, without a paid Mergify feature (a small workflow under .github/, so the owner merges it) | runtime on a deploy/ PR |
+| T-M2b | P1 | IN_PROGRESS (memo-bridge done, E-12; owner merges cuesheet#84, problem-intelligence-engine#34, uni-protocol#37) | M04 | T-M2 | label `needs-human-review` + one comment naming the matched paths on sensitive PRs, without a paid Mergify feature (a small workflow under .github/, so the owner merges it) | runtime on a deploy/ PR |
 | T-M3 | P1 | DONE | M06,M08 | T-M2 | fleet template + adoption doc, merged as #158 (docs/MERGIFY_FLEET_ADOPTION.md) | review |
 | T-M4 | P1 | DONE | M01,M07 | T-M3 | adopt public repos: cuesheet#81, problem-intelligence-engine#31, uni-protocol#34, merged by the owner. lab-hub (memolabs-dev) has no PR traffic: nothing to adopt | E-08, E-09 |
 | T-M4c | P1 | DONE | M07 | T-M4 | positive + negative canary on cuesheet, problem-intelligence-engine, uni-protocol | runtime E-09 |
@@ -297,3 +298,8 @@ Times are UTC. Mac = the owner's Mac, memo-bridge main checkout at d2d0b7a for E
 - E-11 (T-D1, 2026-10-17): read-only inventory of `/opt/stacks` on the VPS: 23 own images in 20
   stacks; emargo held. None of the four adopted repositories deploys an image. Nine running
   images have no `PROJECTS.md` row. Details and derivation commands: docs/DEPLOY_TARGETS.md.
+- E-12 (T-M2b, AC-M02, 2026-10-17): #161 merged by the owner. #156 closed and reopened at
+  21:39 UTC: run 39071846636 (`pull_request_target`, success) added `needs-human-review` and one
+  `github-actions[bot]` comment naming `deploy/reaper/dev.memolabs.memo-reaper.plist.example`;
+  #156 stays open. Reopened again: run 39071889017 succeeded and the PR still has exactly one such
+  comment. This PR (non-sensitive) is the clean-side check: no label, merged by Mergify.

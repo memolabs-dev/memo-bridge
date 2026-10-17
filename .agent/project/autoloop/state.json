@@ -20,7 +20,7 @@
       "T-D1"
     ],
     "in_progress": [
-      "T-M2b (owner merges memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37)"
+      "T-M2b (memo-bridge done; owner merges cuesheet#84, problem-intelligence-engine#34, uni-protocol#37)"
     ],
     "p0_open": 0,
     "p1_open": 10,
@@ -44,7 +44,7 @@
       "AC-M01"
     ],
     "partial": [
-      "AC-M02 (stays open: verified on memo-bridge, cuesheet, problem-intelligence-engine, uni-protocol; label and comment: T-M2b)",
+      "AC-M02 (stays open: verified on the 4 adopted repos; label and comment: verified on memo-bridge, E-12; pending on the 3 others until their T-M2b PRs merge)",
       "AC-M03 (verified for the 4 adopted repos; drop, private and personal repos not adopted)"
     ],
     "failed": [],
@@ -86,14 +86,16 @@
       "#157",
       "#158",
       "#159",
-      "#160"
+      "#160",
+      "#161",
+      "#162"
     ],
     "open_for_owner": [
       "memo-bridge#156 (negative canary, deploy/; real doc fix)",
       "cuesheet#83 (negative canary, .github/; real CI hardening)",
       "problem-intelligence-engine#33 (negative canary, AGENTS.md; real doc fix)",
       "uni-protocol#36 (negative canary, .github/; real CI hardening)",
-      "memo-bridge#161, cuesheet#84, problem-intelligence-engine#34, uni-protocol#37 (T-M2b workflow)"
+      "cuesheet#84, problem-intelligence-engine#34, uni-protocol#37 (T-M2b workflow)"
     ],
     "held_by_hold_merge": [
       "cuesheet#79",
