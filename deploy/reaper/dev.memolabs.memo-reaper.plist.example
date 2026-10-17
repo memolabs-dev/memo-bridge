@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hourly reaper (docs/REAPER.md). Replace __BRIDGE_CHECKOUT__ with the absolute path of a main
+     checkout of memo-bridge. A login shell gives launchd the owner's PATH (node, gh, git). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.memolabs.memo-reaper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "__BRIDGE_CHECKOUT__" &amp;&amp; exec node scripts/reap-worktrees.mjs --apply</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/__USER__/Library/Logs/memo-reaper.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/__USER__/Library/Logs/memo-reaper.log</string>
+</dict>
+</plist>

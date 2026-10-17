@@ -17,6 +17,7 @@
     "test:runner": "node --test tests/agent-protocol.test.mjs tests/hub-dispatch.test.mjs tests/runtime-principal.test.mjs tests/credentials.test.mjs tests/github-app.test.mjs tests/worktrees.test.mjs tests/executor-systemd.test.mjs tests/job-queue.test.mjs tests/lease-supervisor.test.mjs tests/job-unit.test.mjs tests/runner-integration.test.mjs tests/release-manifest.test.mjs tests/coordinator-store-contract.test.mjs && pnpm run test:deploy",
     "test:deploy": "python3 -I -B -m unittest discover -s deploy/tests",
     "smoke": "node tests/mcp-smoke.mjs",
+    "reap": "node scripts/reap-worktrees.mjs",
     "smoke:remote": "node --test tests/remote-e2e.test.mjs tests/remote-boot.test.mjs",
     "remote:toolsize": "node scripts/remote-toolsize.mjs",
     "probe:gpu": "node scripts/probe-gpu.mjs",

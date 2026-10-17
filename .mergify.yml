@@ -1,40 +1,29 @@
-# Memo Labs — guarded unattended Mergify landing, new low-risk agent PRs ONLY.
-# Older/open PRs, critical paths, drafts and failed CI cannot auto-queue.
+# Memo Labs autoloop (docs/MERGIFY_PILOT.md, spec .agent/project/autoloop REQ-M02..M05).
+# A green PR from a trusted author lands without a human. Only sensitive paths wait for the owner;
+# Mergify's own Merge Protections comment on the PR names the condition that blocks it.
+shared:
+  land_conditions: &land_conditions
+    - base = main
+    - -draft
+    - -from-fork
+    - or:
+        - author = memo-labs-automation[bot]
+        - author = guillaume-flambard
+    - label != hold-merge
+    - label != needs-human-review
+    - -files ~= ^(\.github/|\.mergify\.yml$|CODEOWNERS$|AGENTS\.md$|\.env)
+    - check-success = @github-actions/test (22)
+    - check-success = @github-actions/test (24)
+
 merge_queue:
   max_parallel_checks: 1
 
 merge_protections_settings:
-  auto_merge_conditions:
-    - "base = main"
-    - "-draft"
-    - "-from-fork"
-    - "author = memo-labs-automation[bot]"
-    - "created-at >= 2026-10-16T17:30:00Z"
-    - "label != hold-merge"
-    - "label != needs-human-review"
-    - "#files <= 8"
-    - "#added-lines <= 400"
-    - "#deleted-lines <= 150"
-    - '-files ~= ^(\.github/|\.mergify\.yml$|server/|bridge/|plugin/|deploy/|scripts/|tests/|infra/|config/|\.env|AGENTS\.md$|CODEOWNERS$|Dockerfile|package\.json$|pnpm-lock\.yaml$)'
-    - "check-success = @github-actions/test (22)"
-    - "check-success = @github-actions/test (24)"
+  auto_merge_conditions: *land_conditions
 
 queue_rules:
-  - name: memo-labs-safe-auto
+  - name: memo-labs-autoloop
     batch_size: 1
     merge_method: squash
-    queue_conditions: &safe_auto_conditions
-      - "base = main"
-      - "-draft"
-      - "-from-fork"
-      - "author = memo-labs-automation[bot]"
-      - "created-at >= 2026-10-16T17:30:00Z"
-      - "label != hold-merge"
-      - "label != needs-human-review"
-      - "#files <= 8"
-      - "#added-lines <= 400"
-      - "#deleted-lines <= 150"
-      - '-files ~= ^(\.github/|\.mergify\.yml$|server/|bridge/|plugin/|deploy/|scripts/|tests/|infra/|config/|\.env|AGENTS\.md$|CODEOWNERS$|Dockerfile|package\.json$|pnpm-lock\.yaml$)'
-      - "check-success = @github-actions/test (22)"
-      - "check-success = @github-actions/test (24)"
-    merge_conditions: *safe_auto_conditions
+    queue_conditions: *land_conditions
+    merge_conditions: *land_conditions

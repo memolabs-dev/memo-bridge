@@ -1,6 +1,6 @@
 # Memo Labs — Mergify unattended landing (memo-bridge)
 
-**Status: ACTIVE AND VERIFIED.** One-time cutover completed on 2026-10-16.
+**Status: ACTIVE.** Cutover on 2026-10-16; autoloop policy (#151) replaces the pilot rules once its PR lands and its canaries pass.
 Source of truth: `.mergify.yml` on `main`.
 
 ## Production proof
@@ -14,18 +14,32 @@ Source of truth: `.mergify.yml` on `main`.
 
 ## What is automatically eligible
 
-The new policy uses `merge_protections_settings.auto_merge_conditions`, the named `memo-labs-safe-auto` queue and identical conditions on both queue entry and landing.
+**Policy since the autoloop change (Issue #151, owner decision of 2026-10-17):** a green PR from a
+trusted author lands without a human. The 2026-10-16 pilot rules (bot author only, created-at
+cutoff, size cap, all code paths excluded) are gone: in practice they let only documentation land
+and left about twenty green PRs open across the fleet.
 
-PRs must satisfy **all** of the following:
+PRs land when **all** of the following hold on the exact head:
 
-- Created at or after **2026-10-16 17:30 UTC**, targeting `main`, non-draft, same-repository, author exactly `memo-labs-automation[bot]`.
+- Target `main`, non-draft, same repository.
+- Author `memo-labs-automation[bot]` or `guillaume-flambard`.
 - Not labeled `hold-merge` or `needs-human-review`.
-- Small: no more than 8 files, 400 added and 150 deleted lines.
-- No sensitive paths: `.github/`, `.mergify.yml`, `server/`, `bridge/`, `plugin/`, `deploy/`, `scripts/`, `tests/`, `infra/`, `config/`, environment files, `AGENTS.md`, CODEOWNERS, Dockerfiles, package manifests and lockfiles.
-- Exact PR head must pass **both** GitHub Actions check runs `test (22)` and `test (24)`.
-- Serialized queue (`batch_size: 1`, `max_parallel_checks: 1`), squash merge. The GitHub PR-only ruleset still applies.
+- No sensitive path: `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`, root
+  environment files (narrowed to the gate itself by the owner on 2026-10-17; `deploy/` and
+  `infra/` land on green CI). Code under `server/`, `bridge/`, `plugin/`, `scripts/`, `tests/` and the manifests lands
+  on green CI like anything else.
+- GitHub Actions `test (22)` and `test (24)` succeeded.
+- Serialized queue `memo-labs-autoloop` (`batch_size: 1`, `max_parallel_checks: 1`), squash.
 
-**No label or human approval is required for this limited, objective low-risk lane.** Higher-risk changes, migrations, CI/auth/security, workflow edits and deployment are **not** eligible and still need the applicable separate review/authorization.
+A PR that touches a sensitive path is not merged. Mergify posts no comment on it (checked on
+#156): the "Mergify Merge Queue" check of the PR lists the unmet `-files` condition, and the
+daily stuck-PR report (autoloop T-O1) lists it for the owner.
+Labelling such PRs through `pull_request_rules` needs Mergify Workflow Automation, which is not
+activated on this organization (Configuration changed check on #154). The `Sensitive paths`
+GitHub Actions workflow does it instead: label `needs-human-review` and one comment listing the
+matched paths (`.github/workflows/sensitive-paths.yml`, autoloop T-M2b).
+
+Pausing: add `hold-merge` to a PR, or put it back to draft.
 
 ## Operator runbook
 
