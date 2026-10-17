@@ -1,0 +1,12 @@
+# Reaper, one run (docs/REAPER.md). systemd user unit: ~/.config/systemd/user/memo-reaper.service
+# Replace __BRIDGE_CHECKOUT__ with the absolute path of a main checkout of memo-bridge.
+[Unit]
+Description=Memo Bridge reaper: remove worktrees whose pull request merged
+
+[Service]
+Type=oneshot
+WorkingDirectory=__BRIDGE_CHECKOUT__
+ExecStart=/usr/bin/env node scripts/reap-worktrees.mjs --apply
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=900

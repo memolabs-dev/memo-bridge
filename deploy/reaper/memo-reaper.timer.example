@@ -1,0 +1,12 @@
+# Hourly reaper (docs/REAPER.md). systemd user unit: ~/.config/systemd/user/memo-reaper.timer
+[Unit]
+Description=Run the Memo Bridge reaper every hour
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
