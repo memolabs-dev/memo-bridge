@@ -1,7 +1,8 @@
 # Mac runtime activation: state, owner steps, end-to-end proof (issues #110, #114, #147)
 
-Status: READY_FOR_MANUAL_ACCEPTANCE once the three PRs below are green. Nothing is deployed and
-the Mac agent is still in probe mode until the owner runs the steps of section 3.
+Status (2026-10-18 10:50 Paris): hub side DEPLOYED on the VPS (owner-console E-08: memo-bridge
+9125909, `mac_runtime_routing` enabled). The Mac agent stays in probe mode until the owner runs
+the Mac step of section 3; until then a Mac workspace answers `host_offline` with the reason.
 
 ## 1. What makes a private project executable from ChatGPT
 
@@ -59,8 +60,8 @@ rebuild-radar, reprisette, vulnforge.
 
 ## 3. Owner steps (in this order; each one needs the owner's go)
 
-Values: `M` = the memo-bridge merge commit of this change, `G` = the memolabs-dev/.github merge
-commit of #63, owner sub `b31f467f-7326-49c7-91f1-3659a177ec9e` (lab-infra
+Values: `M` = `9125909722ac0ed3b5d604f0104f0c194ab77e8e` (the memo-bridge commit the VPS runs),
+`G` = `ff63ce8d43971bdf368892569f35d9f2147f5a4f` (memolabs-dev/.github with #63), owner sub `b31f467f-7326-49c7-91f1-3659a177ec9e` (lab-infra
 `memo_bridge_remote_owner_sub`).
 
 Mac (installs a persistent launchd agent in the owner's account):
@@ -77,9 +78,9 @@ The first run stages everything and prints the enrolled list; the second keeps t
 installs the runtime one and waits for `runtime_ready` in `~/Library/Logs/memo-bridge/stderr.log`.
 Rollback: `deploy/mac/install-runtime-agent.sh --rollback`.
 
-VPS (after the lab-infra PR is merged by the owner): `make check`, then `make deploy-memo-bridge`
-from a clean lab-infra checkout. Rollback: `memo_bridge_mac_runtime_routing: false` and the previous
-`memo_bridge_version`, then the same deploy.
+VPS: done on 2026-10-18 (lab-infra#245, `make deploy-memo-operator`, owner-console E-08).
+Rollback: revert lab-infra#245, stop the runner, `PRAGMA user_version = 7` on
+`/var/lib/memo-runner/state/coordinator.sqlite` (backup `coordinator.sqlite.pre-9125909`), redeploy.
 
 Either side can go first: with routing on and the Mac still in probe mode, a Mac workspace
 answers `host_offline` with the reason; with the Mac runtime on and routing off, nothing reaches it.
