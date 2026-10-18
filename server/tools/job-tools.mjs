@@ -12,8 +12,8 @@ export const JOB_TOOLS = Object.freeze(['jobs_submit', 'jobs_list', 'job_status'
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
 
-const workspaceId = z.string().max(40).describe('Workspace id returned by workspace_open (ws_…).');
-const jobId = z.string().max(40).describe('Job id returned by jobs_submit (job_…).');
+const workspaceId = z.string().max(40).describe('One ws_... workspace id.');
+const jobId = z.string().max(40).describe('job_... id from jobs_submit.');
 
 // `options` is passed to createJobService (runnerPath, maxJobs…); the entry point normally omits it.
 export function registerJobTools(server, getRuntime, options = {}) {
@@ -35,67 +35,54 @@ export function registerJobTools(server, getRuntime, options = {}) {
   };
 
   server.registerTool('jobs_submit', {
-    description: 'Run a predefined recipe (test, build or lint) in a worktree of your workspace, on the machine that holds it. ' +
-      'The command is detected from the worktree (package.json scripts, Package.swift, pyproject.toml/pytest.ini, Cargo.toml, ' +
-      'go.mod, Makefile), never given by you. It runs the repository\'s own scripts on the owner\'s machine, at lower ' +
-      'priority and without a shell, inside the job sandbox: writes only to the worktree, loopback network only, no access ' +
-      'to private data or credentials, an allow-listed environment (refused with sandbox_unavailable where there is none; ' +
-      'with MEMO_BRIDGE_JOB_SANDBOX=off the owner runs jobs unsandboxed, owner-equivalent). Requires an active workspace you ' +
-      'own, an active worktree of that workspace and a live claim on the worktree\'s Issue, which the ledger confirms (a ' +
-      'delegated child passes its own workspace and its delegation\'s worktree: the job runs under the parent\'s claim). The ' +
-      'job keeps running after this session ends, and stops when the claim is released or expires or the workspace closes. ' +
-      `Timeout default ${TIMEOUT_SECONDS.default / 60} min, max ${TIMEOUT_SECONDS.max / 60} min. ` +
-      'On the Mac at most MEMO_BRIDGE_MAX_JOBS (default 2) jobs run at once; beyond that the call fails with host_busy. ' +
-      'On the VPS runner jobs queue (FIFO, one at a time, as an unprivileged systemd unit without credentials): the call ' +
-      'returns queued, the job may wait as deferred while the host is busy, and the runner keeps the claim\'s lease alive ' +
-      'while it waits or runs. Pass client_request_id to make a retry safe: the same id returns the same job. ' +
-      'Follow it with job_status, job_events and job_results.',
+    description: 'Use this to run a project\'s own test, build or lint in your worktree («lance les tests»), always before worktree_commit. The command is detected from the repository, never given by you: it runs the repository\'s own scripts on the owner\'s machine, sandboxed (writes to the worktree only, loopback network only, no credentials). Needs a live claim; on the VPS jobs queue. ' +
+      'Follow with job_status and job_results; notify: true pings the owner when it ends. Not for other commands (operator_run).',
     inputSchema: z.object({
       workspace_id: workspaceId,
-      worktree_id: z.string().max(64).describe('Worktree id of this workspace (worktree_create / worktrees_list).'),
-      recipe: z.enum(RECIPE_NAMES).describe('Recipe name; unknown or undetected recipes are refused.'),
+      worktree_id: z.string().max(64).describe('wt_... id from worktree_create or worktrees_list.'),
+      recipe: z.enum(RECIPE_NAMES).describe('"test", "build" or "lint"; one the repository does not define is refused.'),
       timeout_seconds: z.number().int().min(TIMEOUT_SECONDS.min).max(TIMEOUT_SECONDS.max).optional()
-        .describe(`Kill the job after this many seconds (default ${TIMEOUT_SECONDS.default}).`),
+        .describe(`Seconds, default ${TIMEOUT_SECONDS.default}, at most ${TIMEOUT_SECONDS.max}.`),
       client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
-        .describe('Your own id for this request (8 to 128 letters, digits, - or _). A retry with the same id returns the job the first call created and starts nothing.'),
+        .describe('Optional retry key (8 to 128 of A-Z a-z 0-9 _ -): a retry returns the same job.'),
       release_on_finish: z.boolean().optional()
-        .describe('VPS runner only: release the claim when the job ends (completed on success, otherwise cancelled or failed).'),
+        .describe('VPS only: release the claim when the job ends.'),
       notify: z.boolean().optional()
-        .describe('Through the hub (remote chats): when the job ends, one Telegram message to the owner and a notification in your inbox (notifications_check). Ignored elsewhere.')
+        .describe('Remote chats: one Telegram message to the owner and an inbox notice when it ends.')
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, call('submit'));
 
   server.registerTool('jobs_list', {
-    description: 'List your jobs, newest first, optionally for one workspace or one status. A running job whose processes are gone is reported as interrupted.',
+    description: 'Use this when the owner asks which jobs ran or are running, newest first, per workspace or status. Read-only.',
     inputSchema: z.object({
       workspace_id: workspaceId.optional(),
-      status: z.enum(JOB_STATUSES).optional(),
-      limit: z.number().int().min(1).max(200).optional()
+      status: z.enum(JOB_STATUSES).optional().describe('Only this status, e.g. "running".'),
+      limit: z.number().int().min(1).max(200).optional().describe('At most 200, e.g. 10.')
     }),
     annotations: read
   }, call('list'));
 
   server.registerTool('job_status', {
-    description: 'Status of one of your jobs: queued, deferred (VPS, waiting for room on the host), dispatched (VPS, handed to systemd), running, succeeded, failed, cancelled, timed_out, oom, budget_exceeded or interrupted, with exit code, times, the reason when there is one, and a short summary of the last output lines.',
+    description: 'Use this to follow a job from jobs_submit: queued, running, succeeded, failed, timed_out..., exit code, last lines. Read-only.',
     inputSchema: z.object({ job_id: jobId }),
     annotations: read
   }, call('status'));
 
   server.registerTool('job_events', {
-    description: 'Lifecycle events of one of your jobs (submitted, started, timeout, cancelled, exit, interrupted…). Pass next_after_seq back as after_seq to read only new events.',
-    inputSchema: z.object({ job_id: jobId, after_seq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional() }),
+    description: 'Use this for the lifecycle events of a job; pass next_after_seq back as after_seq. Read-only.',
+    inputSchema: z.object({ job_id: jobId, after_seq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional().describe('next_after_seq of the previous answer.') }),
     annotations: read
   }, call('events'));
 
   server.registerTool('job_results', {
-    description: `Last lines of a job's combined stdout/stderr log (default ${RESULTS.defaultLines}, max ${RESULTS.maxLines} lines, at most ${RESULTS.maxBytes / 1024} KiB), control characters removed. The log itself is capped at 5 MiB.`,
-    inputSchema: z.object({ job_id: jobId, tail_lines: z.number().int().min(1).max(RESULTS.maxLines).optional() }),
+    description: `Use this when a job ended, to see why it failed: last lines of its output (default ${RESULTS.defaultLines}, at most ${RESULTS.maxLines}). Read-only.`,
+    inputSchema: z.object({ job_id: jobId, tail_lines: z.number().int().min(1).max(RESULTS.maxLines).optional().describe('Last lines, e.g. 200.') }),
     annotations: read
   }, call('results'));
 
   server.registerTool('job_cancel', {
-    description: 'Cancel one of your jobs: a queued or deferred job never starts; a running job is stopped with all its processes (Mac: SIGTERM, then SIGKILL after 5 s; VPS: the dispatcher stops its unit). A finished job returns job_finished.',
+    description: 'Use this when the owner asks to stop a job («arrête les tests»): a queued job never starts, a running one is killed.',
     inputSchema: z.object({ job_id: jobId,
       workspace_id: workspaceId.optional().describe('Your own workspace when you are a delegated child.') }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }

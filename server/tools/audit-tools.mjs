@@ -74,13 +74,13 @@ export function registerAuditTools(server, getRuntime) {
   const seesEverything = rt => Boolean(rt.principal?.capabilities?.has(CAPABILITIES.AUDIT));
 
   server.registerTool('audit_events', {
-    description: 'Read the audit journal, newest first (at most 200), optionally filtered by Issue, workspace, operation and outcome. Without the coordinator:audit capability only your own events are returned. Read-only.',
+    description: 'Use this when the owner asks what Memo Bridge did and when («qu\'est-ce qui a été fait sur l\'issue 12 ?», "who claimed it?"): the audit journal, newest first, filtered by Issue, workspace, operation or outcome. Read-only.',
     inputSchema: z.object({
-      issue: z.string().max(160).optional().describe('GitHub Issue reference, e.g. memolabs-dev/cuesheet#42.'),
-      workspace_id: z.string().max(40).optional().describe('Workspace id (ws_…).'),
+      issue: z.string().max(160).optional().describe('e.g. "memolabs-dev/cuesheet#42".'),
+      workspace_id: z.string().max(40).optional().describe('A ws_... id.'),
       op: z.string().max(64).optional().describe('Operation (tool) name, e.g. task_claim.'),
-      outcome: z.enum(OUTCOMES).optional(),
-      limit: z.number().int().min(1).max(MAX_LIST).optional()
+      outcome: z.enum(OUTCOMES).optional().describe('"ok", "denied" or "error".'),
+      limit: z.number().int().min(1).max(MAX_LIST).optional().describe('At most 200, e.g. 20.')
     }),
     annotations: readonly
   }, guarded('audit_events', async (rt, args) => {
@@ -103,7 +103,7 @@ export function registerAuditTools(server, getRuntime) {
   }));
 
   server.registerTool('audit_operation', {
-    description: 'Explain one audit event by its seq: the event plus the records it can resolve and you may see (the workspace, that workspace\'s claims and checkpoints for the Issue, and its worktrees and jobs active within 30 minutes of the event). Read-only.',
+    description: 'Use this to explain one audit event by its seq: the event and the workspace, claims, checkpoints, worktrees and jobs around it. Read-only.',
     inputSchema: z.object({ seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).describe('Event seq from audit_events.') }),
     annotations: readonly
   }, guarded('audit_operation', async (rt, args) => {

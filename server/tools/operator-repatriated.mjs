@@ -11,11 +11,11 @@ import { z } from 'zod/v4';
 
 const HOSTS = ['mac', 'vps'];
 const host = z.enum(HOSTS).optional()
-  .describe('mac (the owner\'s Mac, as user memo) or vps (lab). Default: mac when connected, else vps.');
-const ref = z.string().min(1).max(128).regex(/^[\x20-\x7E]+$/).optional().describe('Optional correlation id, journaled.');
-const path = z.string().min(1).max(4096).describe('Absolute path on that host ("~/" on the Mac).');
+  .describe('"mac" or "vps" (lab). Omitted: the Mac when connected.');
+const ref = z.string().min(1).max(128).regex(/^[\x20-\x7E]+$/).optional().describe('Optional id, journaled.');
+const path = z.string().min(1).max(4096).describe('Absolute path on that host, e.g. "~/Downloads/plan.pdf".');
 const workspaceId = z.string().max(40).optional()
-  .describe('Your workspace_id (ws_...). Required from a ChatGPT conversation, with an operator_lock on dst_path.');
+  .describe('Usually omit: your conversation\'s workspace and a lock on dst_path are used.');
 const name = z.string().min(1).max(40).regex(/^[a-z][a-z0-9_]{0,39}$/);
 
 // Operations the hub answers itself, without an agent.
@@ -31,21 +31,21 @@ export const REPATRIATED_SCHEMAS = Object.freeze({
   operator_help: z.object({ ref,
     topic: name.optional().describe('start, hosts, locks, approvals, files, transfer, media, memory, playbooks, refusals.'),
     playbook: name.optional().describe('read_logs, restart_stack, free_disk, deploy_check, git_sync, backup_status, rotate_key, freeze.'),
-    offset: z.number().int().min(0).max(1000).optional(),
-    limit: z.number().int().min(1).max(50).optional() }),
+    offset: z.number().int().min(0).max(1000).optional().describe('From next_offset.'),
+    limit: z.number().int().min(1).max(50).optional().describe('e.g. 20.') }),
   operator_transfer: z.object({ ref, workspace_id: workspaceId,
-    src_host: z.enum(HOSTS), src_path: path.describe('The file to copy, readable on src_host.'),
-    dst_host: z.enum(HOSTS), dst_path: path.describe('Where to put it, inside the write roots of dst_host.'),
+    src_host: z.enum(HOSTS).describe('"mac" or "vps".'), src_path: path.describe('The file to copy, readable on src_host.'),
+    dst_host: z.enum(HOSTS).describe('"mac" or "vps".'), dst_path: path.describe('Where to put it, inside the write roots of dst_host.'),
     overwrite: z.boolean().optional().describe('Replace an existing destination (a backup is kept). Default false.') }),
-  operator_transfer_status: z.object({ ref, transfer_id: z.string().regex(TRANSFER_ID_RE) })
+  operator_transfer_status: z.object({ ref, transfer_id: z.string().regex(TRANSFER_ID_RE).describe('From operator_transfer.') })
 });
 
 export const REPATRIATED_DESCRIPTIONS = Object.freeze({
-  operator_snapshot: 'Orientation of a directory in one call, for any directory inside the host\'s read roots (not only registered projects): git branch, upstream, ahead and behind, changed and untracked counts, the last 10 commits, a tree summary (top entries, extensions, totals, project markers) and the head of the README. Secret paths are skipped. Read-only.',
-  operator_read_media: 'Look at an image (png, jpeg, gif, webp) or PDF pages on a host, returned as image content plus a text part (metadata; for PDFs the page text, as untrusted_content). Large images are downscaled on the Mac; PDFs: up to 5 pages per call, continue from next_page. Secret paths are refused. Read-only.',
-  operator_help: 'Help on the operator tools, progressively: no argument lists the topics and the playbooks; topic gives details; playbook gives reviewed steps for frequent operations (restart a stack, read logs, free disk, deploy check, git sync, backup status, rotate a key, freeze). Every answer says what to call next. Read-only.',
-  operator_transfer: 'Copy one file (up to 512 MiB) between hosts or within one: Mac to lab, lab to Mac. The hub relays it in 64 KiB chunks; the source is checked against its host\'s read policy (secrets refused), the destination against its write roots, under your operator_lock on dst_path; the SHA-256 is verified at the destination before the file is moved into place; overwrite keeps a backup. A long transfer answers status running with a transfer_id.',
-  operator_transfer_status: 'Progress or result of an operator_transfer that answered status running: running (bytes done), done (destination, SHA-256) or failed (the refusal). Read-only.'
+  operator_snapshot: 'Use this first when the owner points at a folder on a machine and wants to know what it is («c\'est quoi ce dossier ?», "where does this repo stand?"): git branch, ahead/behind, changes, last 10 commits, tree summary, README head, in one call. Read-only.',
+  operator_read_media: 'Use this when the owner wants you to look at an image or a PDF on the Mac or the VPS («regarde la capture sur mon bureau»): png, jpeg, gif, webp, or up to 5 PDF pages with their text. Read-only.',
+  operator_help: 'Use this when unsure how to do an operator task, or for reviewed playbooks (restart a stack, read logs, free disk, deploy check, git sync, backup status, rotate a key, freeze). No argument lists topics and playbooks. Read-only.',
+  operator_transfer: 'Use this when the owner asks to copy a file between the Mac and the VPS («envoie ce fichier sur le VPS»), up to 512 MiB, SHA-256 checked, backup on overwrite. Follow a long one with operator_transfer_status.',
+  operator_transfer_status: 'Use this to follow an operator_transfer that answered status running: running, done or failed. Read-only.'
 });
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };

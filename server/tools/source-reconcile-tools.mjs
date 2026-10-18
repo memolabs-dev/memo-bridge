@@ -27,10 +27,10 @@ export function registerSourceReconcileTools(server, getRuntime, deps = {}) {
     return gh;
   };
   server.registerTool('source_reconcile', {
-    description: 'Refresh verified GitHub PR/check observations for already tracked changes in an authorized project. Appends private Source Engine observations, never merges.',
+    description: 'Use this when the owner asks to refresh the PR and CI state of the changes tracked on a project. Records observations only; never merges.',
     inputSchema: z.object({
-      project: z.string().max(80).describe('Canonical allowlisted project ID from projects_list.'),
-      limit: z.number().int().min(1).max(30).optional()
+      project: z.string().max(80).describe('Registered name, e.g. "stasis".'),
+      limit: z.number().int().min(1).max(30).optional().describe('At most 30.')
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (args = {}) => {
