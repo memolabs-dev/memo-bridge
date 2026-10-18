@@ -87,7 +87,7 @@ owner are gate changes.
 | T-T3 | P1 | TODO | T1 | T-T2 | lot 3: lab-infra |
 | T-M1 | P1 | TODO | M1 | T-D1 | adopt Mergify on transferred repositories that have CI (template + canaries) |
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
-| T-A1 | P0 | IN_PROGRESS (E-02 deployed; E-04 incident, ledger fix memolabs-dev/.github#62 open) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
+| T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
 | T-H1 | P0 | IN_PROGRESS (other spec) | H1 | - | zero-friction Mac routing (#110, #114, #147, PR #148 held) |
 
@@ -143,3 +143,10 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   the "allowlist" word that issue-lease.mjs maps; memo-bridge coordinator tests 31/31 on it, 29/31
   on 836e39b. Next: merge #62, re-pin, redeploy; later teach memo-bridge `ORG_REPO` and drop the
   literal. Lesson recorded as R-6.
+- E-05 (T-A1, 2026-10-18 09:4x Paris): memolabs-dev/.github#62 merged (8a7f7ba). Before pinning,
+  on 8a7f7ba: memo-bridge `coordinator.test.mjs` 31/31 with `MEMO_BRIDGE_GOVERNANCE_ROOT` on it, and
+  the deployed VPS parser reads 18 repositories (R-6). lab-infra#244 (pin 8a7f7ba) merged after its
+  CI was green, `make deploy-memo-bridge` at a61c83b: ok=69 changed=1 failed=0. On the VPS:
+  governance at 8a7f7ba and clean; `readPublicAllowlist` ok with 18 repositories, all 17
+  `remote.json` projects in it; hub and runner active, no warning; no `ledger_unavailable` since
+  08:45. A real ChatGPT conversation is still the last check (AC-A1).
