@@ -11,8 +11,8 @@ import { createIssueLeaseClient, parseIssueRef as parseRef } from '../server/coo
 import { CAPABILITIES, OPERATION_CAPABILITY, authorize, localOwnerPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
 import { createRuntime } from '../server/runtime.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from '../server/tools/coordinator-tools.mjs';
-import { GOVERNANCE_ROOT, HAS_GOVERNANCE, OWNER, PROJECT_ORIGINS, coordinatorOn, fakeGitHub, journal, ledgerFor, skipWithoutLedger,
-  stubLedger, stubProjects, tempDir, tempStateDir } from './helpers/coordinator-fixture.mjs';
+import { GOVERNANCE_ROOT, HAS_GOVERNANCE, OWNER, PROJECT_ORIGINS, coordinatorOn, fakeGitHub, journal, ledgerFor, sequentialLedger,
+  skipWithoutLedger, stubLedger, stubProjects, tempDir, tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const DROP = 'memolabs-dev/drop#7';
 // Characters a model must never receive, built at run time so this file stays plain ASCII.
@@ -758,4 +758,40 @@ test('registered tools match the contract, the policy table and the runtime', as
     () => { throw new Error('state_dir_not_private'); });
   assert.deepEqual(JSON.parse((await broken.get('tasks_list')({})).content[0].text),
     { ok: false, error: 'store_unavailable', detail: 'state_dir_not_private' });
+});
+
+// A028: a conversation that changes target must not leave the abandoned task locked. One
+// workspace holds one task, and the pivot gives the previous lease back in the same movement.
+test('task_claim gives back the lease of the task it leaves behind', async t => {
+  const tools = new Map();
+  const server = { registerTool: (name, config, handler) => tools.set(name, { config, handler }) };
+  const rt = createRuntime({ stateDir: await tempStateDir(t), principal: OWNER, ledger: sequentialLedger(), host: 'mac',
+    resolveProject: stubProjects(), projectRemote: () => Promise.resolve(null) });
+  t.after(() => rt.close());
+  registerCoordinatorTools(server, () => rt);
+  const call = async (name, args) => JSON.parse((await tools.get(name).handler(args)).content[0].text);
+  const held = async workspace => (await call('workspace_status', { workspace_id: workspace })).claims.map(c => c.issue);
+  const SECOND = 'memolabs-dev/drop#8';
+
+  const opened = await call('workspace_open', { project: 'drop' });
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const workspace = opened.workspace.workspace_id;
+
+  const first = await call('task_claim', { workspace_id: workspace, issue: DROP });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.released, undefined, 'a first claim has nothing to give back');
+  assert.deepEqual(await held(workspace), [DROP]);
+
+  const pivot = await call('task_claim', { workspace_id: workspace, issue: SECOND });
+  assert.equal(pivot.ok, true, JSON.stringify(pivot));
+  // The abandoned target is reported, never silently dropped.
+  assert.deepEqual(pivot.released, [DROP]);
+  // One workspace, one live claim: the local mirror shows only the new target.
+  assert.deepEqual(await held(workspace), [SECOND]);
+
+  // Re-claiming what is already held gives back the superseded lease, so no ghost row stays.
+  const again = await call('task_claim', { workspace_id: workspace, issue: SECOND });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(again.released, [SECOND]);
+  assert.deepEqual(await held(workspace), [SECOND]);
 });

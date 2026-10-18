@@ -30,3 +30,15 @@ Task — Add owner-only access-token validation and deploy a staged private iden
 Action — Built JWT issuer/audience/subject/scope/time validation and protected-resource discovery; staged Pocket ID on VPS localhost 1411.
 Result — PASSED JWT/MCP test suite (7/7); Pocket ID discovery HTTP 200 with S256. The live MCP hub is unchanged. BLOCKED on owner passkey enrollment and OAuth authorization-server configuration for ChatGPT.
 Next — Finish owner passkey setup, authorization server/client registration, resource-audience tokens and a negative-tested TLS public route before exposing anything.
+
+## Cycle 4: one live claim per workspace (2026-10-18)
+
+Situation: the C03 golden prompt took task_next's first pick (#69), then pivoted to the named #192 and never gave #69 back. Its claim stayed `claimed` for the full 30 minute lease, so one workspace held two tasks at once and one of the two open p0s stayed locked by a conversation that had moved on (anomaly A028, issue #195).
+
+Task: a pivot gives the abandoned lease back, and reports it, so one workspace holds one task.
+
+Action: after recording the new claim, task_claim reads the workspace's other live claims, releases each through the lease ledger with outcome `cancelled`, reconciles the local mirror, cancels their jobs, and returns them in `released` (with `lost` and `unreleased` when the ledger says so). Same shape as workspace_close. The tool description and docs/COORDINATOR.md now say so.
+
+Result: PASSED, red first then green. New test `task_claim gives back the lease of the task it leaves behind` failed on the old code and passes now; full suite 822 pass, 0 fail, 1 skipped on the Mac. Not deployed: this reaches the VPS with the next pin bump.
+
+Next: #196, the selector proposing a task whose merged PR already carried the change.

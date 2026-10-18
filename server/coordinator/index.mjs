@@ -952,11 +952,32 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         return fail(recorded === false ? 'workspace_closed' : 'store_unavailable',
           back.ok ? 'claim released' : `claim may remain until ${receipt.expires_at}`);
       }
+      // One workspace works on one task. Changing target gives the abandoned lease back in the
+      // same movement, so a pivot never leaves the previous task locked (A028). Same shape as
+      // workspace_close: release at the ledger, then reconcile the local mirror.
+      const others = (await read(repo => repo.claimsOf(ws.workspace.id, 'claimed')))
+        .filter(claim => claim.claim_id !== receipt.claim_id);
+      const released = []; const lost = []; const unreleased = []; const abandonedJobs = [];
+      for (const claim of others) {
+        const outcome = await releaseRecorded(ws.workspace, claim, 'cancelled');
+        if (outcome.state === 'unreleased') { unreleased.push({ issue: claim.issue_ref, error: outcome.error }); continue; }
+        await write((repo, at) => repo.updateClaim(claim.claim_id, { state: 'released',
+          outcome: outcome.state === 'released' ? 'cancelled' : 'lost', fence_sha: outcome.fence ?? claim.fence_sha, updated_at: at },
+        claim.fence_sha));
+        (outcome.state === 'released' ? released : lost).push(claim.issue_ref);
+        if (outcome.state === 'released') {
+          abandonedJobs.push(...await cancelJobs(ws.workspace.id, claim.issue_ref));
+          void sync?.taskReleased({ issue: claim.issue_ref, outcome: 'cancelled' },
+            syncing({ workspace_id: ws.workspace.id, issue: claim.issue_ref }, meta));
+        }
+      }
       // Also covers task_next and the takeover of an expired lease: the new holder is Réservé.
       void sync?.taskClaimed({ issue: issue.ref, clientType: ws.workspace.client_type },
         syncing({ workspace_id: ws.workspace.id, issue: issue.ref }, meta));
       return { ok: true, issue: issue.ref, worker, claim_id: receipt.claim_id, fence: receipt.fence_sha, epoch: receipt.epoch,
-        expires_at: receipt.expires_at, project_origin_verified: Boolean(origin), ...(recovered ? { recovered: true } : {}) };
+        expires_at: receipt.expires_at, project_origin_verified: Boolean(origin), ...(recovered ? { recovered: true } : {}),
+        ...(released.length ? { released, ...(lost.length ? { lost } : {}), ...(unreleased.length ? { unreleased } : {}) } : {}),
+        ...(abandonedJobs.length ? { cancelled_jobs: abandonedJobs } : {}) };
     },
 
     async taskRenew(args) {

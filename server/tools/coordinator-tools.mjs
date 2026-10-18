@@ -104,7 +104,7 @@ export function registerCoordinatorTools(server, getService) {
   }, call('taskStatus'));
 
   server.registerTool('task_claim', {
-    description: 'Use this when the owner names an Issue to work on («travaille sur l\'issue 12 de stasis», «corrige memolabs-dev/kollio-mac#4»): reserves it through the lease ledger, one holder at a time, opening this conversation\'s workspace if needed. Next: worktree_create with the issue. The Issue must be open, agent:ready, with one priority:p0|p1|p2; otherwise create the task with batch_create. Not for unnamed work (task_next).',
+    description: 'Use this when the owner names an Issue to work on («travaille sur l\'issue 12 de stasis», «corrige memolabs-dev/kollio-mac#4»): reserves it through the lease ledger, one holder at a time, opening this conversation\'s workspace if needed. Changing target releases any other task this workspace still holds (outcome cancelled, listed as released, its jobs as cancelled_jobs): one workspace holds one task. Next: worktree_create with the issue. The Issue must be open, agent:ready, with one priority:p0|p1|p2; otherwise create the task with batch_create. Not for unnamed work (task_next).',
     inputSchema: z.object({ workspace_id: workspaceId, issue, ttl_seconds: ttl,
       client_request_id: clientRequestId }),
     annotations: write
