@@ -17,6 +17,12 @@ export const KILL_GRACE_MS = 5000;
 export const DEADLINE_GRACE_MS = KILL_GRACE_MS + 30_000;
 // A queued job whose runner pid was never recorded is only declared interrupted after this.
 export const QUEUED_GRACE_MS = 60_000;
+// Bound of a job's install phase (job-runner.mjs), the same as the VPS install unit's
+// (executor-systemd.mjs INSTALL_TIMEOUT_SECONDS). The recipe then has the whole job timeout
+// from its own start, so the deadline below adds this bound when an install ran.
+export const INSTALL_TIMEOUT_MS = 600_000;
+// Events that start a phase of a local job; the latest one names the job's current group leader.
+const PHASE_STARTS = Object.freeze(['install_started', 'started']);
 
 export function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -42,25 +48,32 @@ function detailOf(e) {
   try { return JSON.parse(e.detail); } catch { return null; }
 }
 
-// The runner pid recorded by jobs_submit ('submitted') or by the runner ('started').
+// The runner pid recorded by jobs_submit ('submitted') or by the runner ('install_started', 'started').
 export function runnerPidOf(repo, jobId) {
   let pid = null;
   for (const e of repo.listJobEvents(jobId, 0, 20)) {
-    if (e.kind !== 'submitted' && e.kind !== 'started') continue;
+    if (e.kind !== 'submitted' && !PHASE_STARTS.includes(e.kind)) continue;
     const d = detailOf(e);
     if (Number.isInteger(d?.runner_pid)) pid = d.runner_pid;
   }
   return pid;
 }
 
-// Start time of the job's group leader, recorded by the runner in its 'started' event.
+// Start time of the job's current group leader: the latest phase start the runner recorded
+// ('install_started', then 'started' for the recipe; job.pid follows the same phase).
 export function leaderStartOf(repo, jobId) {
+  let start = null;
   for (const e of repo.listJobEvents(jobId, 0, 20)) {
-    if (e.kind !== 'started') continue;
+    if (!PHASE_STARTS.includes(e.kind)) continue;
     const d = detailOf(e);
-    if (typeof d?.pid_start === 'string') return d.pid_start;
+    start = typeof d?.pid_start === 'string' ? d.pid_start : null;
   }
-  return null;
+  return start;
+}
+
+// Whether the runner started an install phase for this job.
+export function installRan(repo, jobId) {
+  return repo.listJobEvents(jobId, 0, 20).some(e => e.kind === 'install_started');
 }
 
 // Report a job whose processes are all gone as interrupted, and stop a running job past its
@@ -69,7 +82,8 @@ export function leaderStartOf(repo, jobId) {
 export function reconcileLocalJob(repo, job, at, { alive = processAlive, aliveGroup = groupAlive, signal = signalJobGroup } = {}) {
   if (job.status !== 'queued' && job.status !== 'running') return job;
   const runnerPid = runnerPidOf(repo, job.id);
-  if (job.status === 'running' && Number.isInteger(job.started_at) && at > job.started_at + job.timeout_ms + DEADLINE_GRACE_MS) {
+  const installBound = job.status === 'running' && installRan(repo, job.id) ? INSTALL_TIMEOUT_MS : 0;
+  if (job.status === 'running' && Number.isInteger(job.started_at) && at > job.started_at + installBound + job.timeout_ms + DEADLINE_GRACE_MS) {
     // The runner should have stopped it long ago: it is gone or stuck. Kill the group; a live
     // runner sees the status change and also kills every process it tracks.
     if (Number.isInteger(job.pid)) signal(job.pid, leaderStartOf(repo, job.id), 'SIGKILL');
