@@ -308,6 +308,18 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   `test:deploy` 124 ok; build ok; smoke 67 tools with `roundTrip` and `multiHost`; `coordinator.test.mjs`
   31/31 with `MEMO_BRIDGE_GOVERNANCE_ROOT` on the pinned 8a7f7ba (R-6); `remote:toolsize` unchanged
   (read 22 967, write 51 451, operator 92 722). Not deployed; the VPS still runs fb463c3.
+- E-14 (T-A1b, 2026-10-18 13:07 UTC): the routing fix merged on its own. memo-bridge#181 merged by
+  `app/mergify` without the owner acting (Mergify `land_conditions`: base main, not a draft or a
+  fork, author `guillaume-flambard`, checks `@github-actions/test (22)` and `(24)` green, no hold
+  label, no sensitive path), main at `2909e4cdadc75dbf0b8e9e84d630d81d8ac6863f`. lab-infra#249
+  pins `memo_bridge_version` at that sha, one file (`ansible/group_vars/lab.yml`), and carries #179
+  and #180 with it; the pinned release has the four bridge files the roles preflight
+  (`operator-root-cli.mjs`, `hub-state.mjs`, `public-listener.mjs`, `remote-config.mjs`) and
+  `./scripts/tests.sh` is green (116 verts, 0 rouges) before the push. The PR is open without the
+  `safe-automerge` label, which is what lab-infra's `private_merge_gate.py` requires to merge any
+  PR, so nothing is deployed until the owner adds it: merging is the deploy (the VPS `autodeploy`
+  pulls every two minutes). Rollback is the previous pin, `fb463c3`. AC-A1b closes with one
+  `github_pull_requests` call from ChatGPT on a private repository, once this pin runs.
 
 ## 09. Design: `project_create` (T-A2, REQ-A2)
 
