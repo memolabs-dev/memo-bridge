@@ -1,0 +1,7 @@
+{
+  "measured": "2026-10-18, origin/main f1a066e, before owner console REQ-Z2",
+  "rule": "the remote tools/list must not grow past these bytes (scripts/remote-toolsize.mjs --json); lower them when a change shrinks it",
+  "read": 22978,
+  "write": 53289,
+  "operator": 96129
+}

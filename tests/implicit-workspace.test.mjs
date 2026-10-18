@@ -129,13 +129,16 @@ test('Z1: a second project in the same conversation gets its own workspace; the 
 
 test('Z1: parallel first calls of one conversation share one opened workspace', async t => {
   const { call, active } = await setup(t);
-  const [x, y] = await Promise.all([
+  // The same Issue twice (one of them gets lease_held) and task_next on the same project: all three
+  // resolve the conversation's workspace at once, and only one workspace is opened.
+  const answers = await Promise.all([
     call('task_claim', { issue: 'memolabs-dev/drop#12' }, meta('chat-g')),
-    call('task_status', { issue: 'memolabs-dev/drop#12' }, meta('chat-g')),
+    call('task_claim', { issue: 'memolabs-dev/drop#12' }, meta('chat-g')),
     call('task_next', { project: 'drop' }, meta('chat-g'))
   ]);
-  assert.equal(x.ok, true, JSON.stringify(x));
-  assert.ok(y);
+  assert.ok(answers.some(a => a.ok === true), JSON.stringify(answers));
+  const ids = new Set(answers.map(a => a.implicit_workspace?.workspace_id).filter(Boolean));
+  assert.equal(ids.size, 1, JSON.stringify(answers));
   assert.equal((await active()).length, 1);
 });
 

@@ -100,13 +100,13 @@ export function registerSourceTools(server, getRuntime, options = {}) {
     });
   }
 
-  const project = z.string().max(80).describe('Registered canonical project ID from projects_list.');
-  const id = z.string().max(100).describe('Stable Source Engine change ID.');
-  const limit = z.number().int().min(1).max(MAX_LIMIT).optional();
+  const project = z.string().max(80).describe('Registered name, e.g. "stasis".');
+  const id = z.string().max(100).describe('Change id from source_changes_list.');
+  const limit = z.number().int().min(1).max(MAX_LIMIT).optional().describe('e.g. 30.');
   register('source_changes_list',
-    'List bounded Source Engine change metadata for one allowed registered project; includes verified GitHub Issue, PR and checks links.',
-    { project, issue: z.string().max(160).optional(), limit,
-      offset: z.number().int().min(0).max(10000).optional() },
+    'Use this when the owner asks which changes Memo Bridge tracks on a project and their Issue, PR and CI links. Read-only.',
+    { project, issue: z.string().max(160).optional().describe('Only this Issue, owner/repo#n.'), limit,
+      offset: z.number().int().min(0).max(10000).optional().describe('From next_offset.') },
     async (rt, args, origin) => {
       const size = args.limit ?? 30;
       const offset = args.offset ?? 0;
@@ -123,7 +123,7 @@ export function registerSourceTools(server, getRuntime, options = {}) {
     });
 
   register('source_change_status',
-    'Read one Source Engine change by ID; registered-project scoped and read-only.',
+    'Use this to read one tracked change by id. Read-only.',
     { project, id },
     async (rt, args, origin) => {
       if (typeof args.id !== 'string' || !CHANGE_ID.test(args.id)) return fail('invalid_input');
@@ -133,8 +133,8 @@ export function registerSourceTools(server, getRuntime, options = {}) {
     });
 
   register('source_change_history',
-    'Read append-only Source Engine change history with bounded pagination; never returns arbitrary file contents.',
-    { project, id, after_seq: z.number().int().min(0).optional(), limit },
+    'Use this for the history of one tracked change, paged by after_seq. Read-only.',
+    { project, id, after_seq: z.number().int().min(0).optional().describe('From next_after_seq.'), limit },
     async (rt, args, origin) => {
       if (typeof args.id !== 'string' || !CHANGE_ID.test(args.id) ||
           !Number.isInteger(args.after_seq ?? 0) || (args.after_seq ?? 0) < 0 ||

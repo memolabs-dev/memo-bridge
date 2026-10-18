@@ -1,0 +1,199 @@
+{
+  "run": {
+    "date": "AAAA-MM-JJ",
+    "deployed": "<sha>",
+    "chatgpt_model": "<modèle affiché>"
+  },
+  "results": {
+    "D01": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D02": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D03": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D04": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D05": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D06": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D07": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D08": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D09": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D10": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D11": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D12": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I01": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I02": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I03": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I04": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I05": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I06": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I07": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I08": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I09": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I10": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I11": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "I12": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "C01": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "C02": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "C03": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "C04": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "D13": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N01": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N02": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N03": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N04": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N05": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N06": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N07": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N08": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    },
+    "N09": {
+      "calls": [],
+      "questions": 0,
+      "confirmations": 0
+    }
+  }
+}

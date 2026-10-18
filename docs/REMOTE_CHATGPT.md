@@ -96,6 +96,31 @@ in the conversation's own workspace, the way operator tools already did (D-R14):
 
 `workspace_open` still works and an explicit `workspace_id` is checked exactly as before.
 
+### What ChatGPT reads (owner console REQ-Z2, REQ-Z3)
+
+Following OpenAI's "Optimize metadata" guide
+(https://developers.openai.com/apps-sdk/guides/optimize-metadata), every remote tool
+description starts with "Use this when..." and the owner's own words (French and English), says
+which sibling tool to use instead where they could be confused, and every parameter is described
+with an example. The server instructions say only what the model needs to choose and chain tools
+(3.9 KB, from 6.6 KB): the server enforces the rules. `openWorldHint` is `true` only for tools
+that reach GitHub (Issues, PRs, CI, the lease ledger); store-only tools say `false`.
+
+`pnpm run remote:toolsize` now also measures the stage ChatGPT really gets (operator tools
+included); `scripts/remote-toolsize-budget.json` holds the bytes measured on 2026-10-18 before the
+change and `tests/tool-metadata.test.mjs` fails if the listing grows past them.
+
+| Stage | Before (f1a066e) | After |
+|---|---|---|
+| read, 32 tools | 22 978 B | 22 967 B |
+| write, 54 tools | 53 289 B | 50 057 B |
+| write + operator, 88 tools | 96 129 B | 91 328 B |
+
+The golden prompt set (38 prompts in French: direct, indirect, end-to-end chains, negative) is in
+`docs/golden-prompts/prompts.json`; the owner runs it after a deploy with
+`docs/golden-prompts/PROTOCOL.md` and records precision and recall in `RESULTS.md`
+(`node scripts/golden-prompts.mjs --score`).
+
 ## Conductor workflow: one chat splits, N chats work (TODO-P5-50 to 52)
 
 ChatGPT cannot open conversations by itself (driving ChatGPT programmatically is against the
@@ -109,8 +134,8 @@ no batch table, only a GitHub label and the lease ledger.
    answer carries the batch id and the sentence to paste, for example
    `@Memo Bridge prends la prochaine tâche du lot 3f9a0c12de du projet drop`.
 2. **Worker chats.** The owner opens N conversations and pastes that same sentence in each.
-   Each one calls `workspace_open` on the project, then `task_next` with its `workspace_id` and
-   the batch id. `task_next` lists the batch Issues (GitHub Issues endpoint, not search, so a
+   Each one calls `task_next` with the batch id; since REQ-Z1 that call opens the
+   conversation's workspace itself, no `workspace_open` first. `task_next` lists the batch Issues (GitHub Issues endpoint, not search, so a
    new Issue is visible at once), keeps the claimable ones (open, `agent:ready`, one priority,
    no blocking label), skips the ones this store already records as held by a live claim, and
    claims them in order (p0 first, then Issue number) through the same code as `task_claim`.
@@ -152,31 +177,33 @@ workspace, the conversation it is bound to, the lease ledger and the operator lo
 **The sentence to paste in each worker conversation** (one line, nothing else to say):
 
 ```
-Avec Memo Bridge, prends la prochaine tâche disponible : ouvre ton workspace, lis sessions_overview, prends ta tâche avec task_next, ne travaille que sur elle, prends un operator_lock avant toute action opérateur et arrête-toi sur stale_lease, locked_by_other_session ou workspace_other_session.
+Avec Memo Bridge, prends la prochaine tâche disponible et mène-la jusqu'à la PR, sans toucher au travail des autres conversations.
 ```
 
 What each conversation does (the server instructions and the plugin skill say the same):
 
-1. `workspace_open` (any allowed project; `task_next` moves it if needed), then `sessions_overview`:
+1. No `workspace_open` (REQ-Z1). `sessions_overview` when it needs to see the others:
    every active workspace of the owner, newest first, at most 20: id, client, `session_tag` (a
    short tag of the conversation, never the ChatGPT hint), project, held task with its local
    lease state (`held`, `expired`), last recorded activity and last call, `you: true` for its
    own, and the operator locks of each. Local store and hub memory only: no ledger or GitHub call.
-2. `task_next({workspace_id})` without `batch`: the next `agent:ready` Issue of every project in
+2. `task_next({})` without `batch`: the next `agent:ready` Issue of every project in
    `remote.json` `projects` (or of `project`), p0, then p1, then p2, then oldest; Issues held by a
    live claim of this runtime or being claimed by a parallel call are skipped, and the ledger
    decides the rest (a lost race moves to the next Issue). A workspace that holds a task gets it
    back (`already_held`). A workspace with no task and no worktree moves to the task's project
    (`project_changed`, journaled `workspace_retarget`). The answer carries `brief`: the task, the
    project, the other conversations on that project (tag and task) and the rules.
-3. Operator work: `operator_lock({host, workspace_id, kind, target, reason})` first. Kinds:
+3. Operator work: single calls lock what they touch for that call (D-R14); a long multi-step
+   change takes `operator_lock({host, workspace_id, kind, target, reason})` first. Kinds:
    `path` (a subtree), `unit`, `container`, `global` (the whole host). TTL 15 min by default, at
    most 2 h, renewed by locking again; `operator_unlock` releases one lock or all of them.
 
 Rules the server enforces, whatever the model sends:
 
-- Remote `operator_*` writes, commands and root calls must name `workspace_id`
-  (`workspace_required`) and be covered by a lock of that workspace (`lock_required`): a path
+- Remote `operator_*` writes, commands and root calls without `workspace_id` use the
+  conversation's workspace and an implicit lock for that call (D-R14); with one, they must be
+  covered by a lock of that workspace (`lock_required`): a path
   lock on the file (both ends of a move, the destination of a copy), on the `cwd` of
   `operator_run`; a unit lock for `operator_service`; a `global` lock for `as_root`,
   `operator_script` and a command without `cwd` (a command line can name any path). Read-only

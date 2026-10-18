@@ -10,25 +10,30 @@
     "done": [
       "T-T1",
       "T-D1",
-      "T-A1 (public)"
+      "T-A1 (public)",
+      "T-Z1"
     ],
     "in_progress": [
-      "T-H1 (zero-friction-mac-routing spec; #148 merged)"
+      "T-H1 (zero-friction-mac-routing spec; #148 merged)",
+      "T-Z2 and T-Z3 (PR feat/intent-metadata)"
     ],
-    "next": "owner checks from ChatGPT (AC-A1); then T-A2 project_create (needs App Administration write, U-1); later teach memo-bridge ORG_REPO and drop the compatibility literal",
+    "next": "owner checks from ChatGPT (AC-A1); then T-A2 project_create (needs App Administration write, U-1); later teach memo-bridge ORG_REPO and drop the compatibility literal; deploy memo-bridge main with the owner's go (VPS at 93e3bed), then the owner runs the golden prompt protocol (AC-Z3)",
     "blocked": []
   },
   "acceptance": {
-    "total": 5,
+    "total": 8,
     "verified": [],
     "pending": [
       "AC-T1",
       "AC-M1",
       "AC-A2",
-      "AC-H1"
+      "AC-H1",
+      "AC-Z2 (CI on the metadata PR)",
+      "AC-Z3 (owner run after deploy)"
     ],
     "partial": [
-      "AC-A1 (server-side verified on 17 projects; real ChatGPT call pending)"
+      "AC-A1 (server-side verified on 17 projects; real ChatGPT call pending)",
+      "AC-Z1 (offline tests pass; live ChatGPT check after deploy)"
     ]
   },
   "held_prs": [

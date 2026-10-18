@@ -465,7 +465,15 @@ test('host default: vps when the Mac is not connected; root, script and dangerou
 test('MS-R11: the instructions, the skill and the docs carry the start sequence and the stop codes', () => {
   const rules = ['workspace_open', 'sessions_overview', 'task_next', 'task_claim', 'operator_lock', 'operator_unlock', 'global',
     ...STOP_CODES];
-  for (const text of [MULTI_SESSION_INSTRUCTIONS, REMOTE_INSTRUCTIONS]) for (const rule of rules) assert.ok(text.includes(rule), rule);
+  // Owner console REQ-Z1: the shared text no longer asks for workspace_open (stdio says it in its own
+  // flow); the remote text says the conversation's workspace is used without it.
+  for (const rule of rules) {
+    assert.ok(REMOTE_INSTRUCTIONS.includes(rule), rule);
+    if (rule !== 'workspace_open') assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(rule), rule);
+  }
+  assert.match(REMOTE_INSTRUCTIONS, /No workspace_open or workspace_id is needed/);
+  for (const step of ['batch_create', 'task_claim', 'worktree_create', 'jobs_submit', 'worktree_push', 'github_create_pr', 'task_complete'])
+    assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(step), `chain: ${step}`);
   assert.ok(REMOTE_INSTRUCTIONS.includes(OPERATOR_HOST_INSTRUCTIONS));
   // Owner, 2026-10-14 21:37: "il doit comprendre mon intention". Intent first, act through to the result, no scope creep.
   for (const phrase of ["understand the owner's intent", 'restate in one line', 'without stopping at a plan', 'never widen the scope', 'batch_create'])
