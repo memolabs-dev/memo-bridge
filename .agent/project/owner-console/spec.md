@@ -125,7 +125,7 @@ owner are gate changes.
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
-| T-H1 | P0 | AC-H1 PASSED live (E-09); memo-bridge#175 (task_status routing) to pin and deploy; a Mac test job that passes needs dependencies the sandbox can reach | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
+| T-H1 | P0 | AC-H1 PASSED live (E-09); #175 deployed (E-10); open: a Mac test job that passes (dependencies the sandbox can reach) and a Mergify-merged PR on a private repository | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
 | T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
 | T-Z3 | P1 | READY, owner run pending | Z3 | T-Z2 | golden prompt set and owner protocol (same PR); the owner runs it after the next deploy, which needs his go: the VPS runs 93e3bed, 40+ commits behind main |
@@ -248,3 +248,14 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   canary worktrees and branches were removed locally; CDKF#14 and horslot#1 closed. Nothing
   pushed. Still open: a test job that passes on the Mac (dependencies reachable offline), PR
   merged by Mergify on a private repository (none has Mergify yet).
+- E-10 (T-H1, 2026-10-18 11:34 to 11:49 Paris): on the owner's go, lab-infra#246 pins memo-bridge
+  fb463c3 (merge of #175; the only file the VPS runs that changed is
+  `bridge/workspace-host-router.mjs`, no store or hub state change). R-6: `coordinator.test.mjs`
+  31/31 on governance 8a7f7ba, 18 repositories parsed; router tests 15/15; `./scripts/tests.sh`
+  116/116; scoped dry run changed=2 failed=0. Store and hub state backed up
+  (`coordinator.sqlite.pre-fb463c3`, user_version 8). Merged after CI 4/4 (b926808),
+  `make deploy-memo-operator` from a clean detached worktree: ok=100 changed=2 failed=0. Hub and
+  runner restarted 11:46:52, no warning, Mac runtime reconnected (57 ops); remote.json 17 projects
+  with routing on, allowlist 18, 17/17 projects allowed and available. From ChatGPT, `task_status`
+  on CDKF#14 with no workspace: hub journal `outcome: ok` (was `project_not_allowed` from the VPS
+  in E-09). Rollback: revert lab-infra#246 and redeploy (no database step).
