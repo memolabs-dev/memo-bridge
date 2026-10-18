@@ -43,7 +43,7 @@ export function registerCatalogTools(server, getRuntime, deps = {}) {
     try { listed = await listProjects(args ?? {}, rt.catalogOptions ?? {}); } catch { return result(fail('catalog_unavailable')); }
     if (!isRemotePrincipal(rt.principal)) return result(listed);
     const policy = remotePolicy();
-    const refusal = remoteProjectRefusal(rt.principal, null, policy);
+    const refusal = remoteProjectRefusal(rt.principal, null, policy, { host: rt.host });
     if (refusal && !policy?.configured) {
       await rt.audit('projects_list', 'denied', refusal.error);
       return result(refusal);
@@ -54,7 +54,7 @@ export function registerCatalogTools(server, getRuntime, deps = {}) {
     const ownerDiscovery = rt.catalogDiscoveryEnabled === true && policy?.configured === true &&
       typeof policy.owner_sub === 'string' && rt.principal.id === `oidc:${policy.owner_sub}`;
     const projects = listed.projects.filter(p =>
-      !remoteProjectRefusal(rt.principal, p.name, policy) || (ownerDiscovery && p.metadata_only === true));
+      !remoteProjectRefusal(rt.principal, p.name, policy, { host: rt.host }) || (ownerDiscovery && p.metadata_only === true));
     return result({ ...listed, total: projects.length, count: projects.length, projects });
   });
 }

@@ -844,13 +844,13 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (max === undefined) return fail('invalid_input', 'limit');
       let projects;
       if (args.project !== undefined) {
-        const refusal = remoteProjectRefusal(principal, args.project, remotePolicy);
+        const refusal = remoteProjectRefusal(principal, args.project, remotePolicy, { host });
         if (refusal) return refusal;
         const project = await resolve(args.project);
         if (!project.ok) return project;
         projects = [project.project];
       } else {
-        if (remote && !remotePolicy.configured) return remoteProjectRefusal(principal, null, remotePolicy);
+        if (remote && !remotePolicy.configured) return remoteProjectRefusal(principal, null, remotePolicy, { host });
         try { projects = (await listProjectRepos()).slice(0, TASKS_SCAN.projects); } catch { return fail('catalog_unavailable'); }
         // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09).
         if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
@@ -1439,7 +1439,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   async function guarded(op, method, args, meta) {
     if (remote && REMOTE_PROJECT_OPS.has(op)) {
       const project = await projectOf(op, args);
-      const refusal = project === null ? null : remoteProjectRefusal(principal, project, remotePolicy);
+      const refusal = project === null ? null : remoteProjectRefusal(principal, project, remotePolicy, { host });
       if (refusal) return { result: refusal };
     }
     let warning = null;

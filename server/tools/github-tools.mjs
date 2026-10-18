@@ -20,7 +20,7 @@ import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
 import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
 import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
-import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, sessionBindingDecision }
+import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, scopeOwner, sessionBindingDecision }
   from '../../bridge/write-gate.mjs';
 
 export const GITHUB_TOOLS = Object.freeze(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
@@ -87,7 +87,8 @@ export function registerGithubTools(server, getRuntime, options = {}) {
       }
       if (isRemotePrincipal(rt.principal) && !(await remoteRepoAllowed(github, resolved.repo))) {
         await rt.audit(op, 'denied', 'project_not_allowed');
-        return result(fail('project_not_allowed'));
+        return result(fail('project_not_allowed',
+          `repository ${resolved.repo.full} is not the origin of any project in ${scopeOwner(rt.host)} remote project allowlist`));
       }
       return result(await run(github, resolved.repo, args));
     } catch {
@@ -253,7 +254,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   }
   if (local.error) return local.error;
   const { workspace, worktree, claim } = local;
-  const notAllowed = remoteProjectRefusal(rt.principal, worktree.project_id, remotePolicy);
+  const notAllowed = remoteProjectRefusal(rt.principal, worktree.project_id, remotePolicy, { host: rt.host });
   if (notAllowed) return notAllowed;
   const binding = sessionBindingDecision(workspace.client_session, meta?.client_session, remotePolicy?.session_binding,
     { remote: isRemotePrincipal(rt.principal) });
