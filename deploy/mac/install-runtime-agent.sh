@@ -39,6 +39,20 @@ umask 077
 die() { echo "install-runtime-agent: $*" >&2; exit 1; }
 say() { echo "{\"step\":\"$1\"${2:+,$2}}"; }
 
+# launchctl bootout returns before the service is gone; bootstrapping it again too early fails
+# with "Bootstrap failed: 5: Input/output error" and leaves the agent unloaded (seen 2026-10-18).
+# So: wait until it is unloaded, then bootstrap, with one retry.
+reload_agent() {
+  /bin/launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  local waited=0
+  while /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 && [ "$waited" -lt 20 ]; do
+    /bin/sleep 0.5; waited=$((waited + 1))
+  done
+  /bin/launchctl bootstrap "$DOMAIN" "$TARGET" 2>/dev/null \
+    || { /bin/sleep 2; /bin/launchctl bootstrap "$DOMAIN" "$TARGET"; } \
+    || die "launchctl bootstrap failed; the agent is unloaded: rerun this command, or $0 --rollback"
+}
+
 INSTALL=0; ROLLBACK=0; FROM_REGISTRY=0
 OWNER_SUB=""; GOV_REF=""; BRIDGE_REF=""; GOV_SRC="https://github.com/memolabs-dev/.github.git"
 REPOS=()
@@ -70,8 +84,7 @@ DOMAIN="gui/$(/usr/bin/id -u)"
 if [ "$ROLLBACK" = 1 ]; then
   [ -f "$PROBE_BACKUP" ] || die "no probe plist kept at $PROBE_BACKUP"
   /bin/cp -f "$PROBE_BACKUP" "$TARGET"
-  /bin/launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-  /bin/launchctl bootstrap "$DOMAIN" "$TARGET"
+  reload_agent
   say rollback "\"label\":\"$LABEL\",\"restored\":\"$PROBE_BACKUP\""
   exit 0
 fi
@@ -176,8 +189,7 @@ if [ -f "$TARGET" ] && [ ! -f "$PROBE_BACKUP" ]; then /bin/cp -p "$TARGET" "$PRO
 /bin/mv -f "$TARGET.tmp" "$TARGET"
 LOG="$HOME/Library/Logs/memo-bridge/stderr.log"
 START_LINES="$( [ -f "$LOG" ] && /usr/bin/wc -l < "$LOG" | /usr/bin/tr -d ' ' || echo 0)"
-/bin/launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-/bin/launchctl bootstrap "$DOMAIN" "$TARGET"
+reload_agent
 /bin/launchctl kickstart -k "$DOMAIN/$LABEL"
 tries=0
 while [ "$tries" -lt 30 ]; do
