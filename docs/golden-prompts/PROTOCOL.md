@@ -6,7 +6,7 @@ demandes de bout en bout vont jusqu'à la PR seules. Méthode reprise du guide O
 metadata » (https://developers.openai.com/apps-sdk/guides/optimize-metadata) : prompts directs,
 indirects et négatifs, puis précision et rappel.
 
-Le jeu est dans `prompts.json` (38 prompts : 13 directs, 12 indirects, 4 chaînes, 9 négatifs).
+Le jeu est dans `prompts.json` (38 prompts : 14 directs, 12 indirects, 4 chaînes, 8 négatifs).
 `node scripts/golden-prompts.mjs --check` vérifie que chaque outil attendu est bien servi à
 ChatGPT ; la CI le fait aussi (`tests/tool-metadata.test.mjs`).
 

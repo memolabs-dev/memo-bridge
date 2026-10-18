@@ -33,6 +33,10 @@ export const OWNER_SUB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 export const REPO_RE = /^memolabs-dev\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 export const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 export const MAX_REPOS = 50;
+// The memo-labs-automation App (lab-infra memo_runner_github_app_id and _installation_id): with
+// --github-app the runtime may use it for project_create only (owner console D-A2-2); the key
+// itself is the app-key credential the installer copies, never in the plist.
+export const GITHUB_APP = Object.freeze({ id: '5298579', installation: '170927025', purposes: 'repo_create,repo_admin' });
 const ORIGIN_RE = /[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?\s*$/;
 
 export function runtimeLayout(home) {
@@ -120,7 +124,7 @@ export function renderRemotePolicy({ ownerSub, projects }) {
 
 const xml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-export function renderPlist({ home, node, release, governance, ownerSub, extraPath = [] }) {
+export function renderPlist({ home, node, release, governance, ownerSub, extraPath = [], githubApp = false }) {
   const L = runtimeLayout(home);
   for (const p of [node, release, governance, ...extraPath]) {
     if (typeof p !== 'string' || !isAbsolute(p) || p.includes('~')) throw new Error('plist_path_not_absolute');
@@ -139,6 +143,8 @@ export function renderPlist({ home, node, release, governance, ownerSub, extraPa
     MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE: L.privatePolicy,
     MEMO_BRIDGE_GOVERNANCE_ROOT: governance,
     MEMOLABS_ROOT: L.registryRoot,
+    ...(githubApp ? { MEMO_BRIDGE_GITHUB_APP_ID: GITHUB_APP.id, MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID: GITHUB_APP.installation,
+      MEMO_BRIDGE_GITHUB_APP_PURPOSES: GITHUB_APP.purposes } : {}),
     HOME: home,
     PATH: path
   };
@@ -176,7 +182,7 @@ function writeAtomic(path, text, mode) {
   renameSync(tmp, path);
 }
 
-export async function configure({ home, ownerSub, release, governance, node, out, fromRegistry, repos, extraPath = [],
+export async function configure({ home, ownerSub, release, governance, node, out, fromRegistry, repos, extraPath = [], githubApp = false,
   origin = path => gitOrigin(path), visibility = repo => githubVisibility(repo) }) {
   const L = runtimeLayout(home);
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) return { ok: false, error: 'owner_sub_invalid' };
@@ -189,13 +195,13 @@ export async function configure({ home, ownerSub, release, governance, node, out
   writeAtomic(L.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
   chmodSync(L.policyDir, 0o700);
   const staged = join(out, `${LABEL}.plist`);
-  writeAtomic(staged, renderPlist({ home, node, release, governance, ownerSub, extraPath }), 0o644);
+  writeAtomic(staged, renderPlist({ home, node, release, governance, ownerSub, extraPath, githubApp }), 0o644);
   return { ok: true, enrolled: enrolled.projects, skipped: enrolled.skipped, private_policy: L.privatePolicy,
-    remote_policy: L.remotePolicy, plist: staged };
+    remote_policy: L.remotePolicy, plist: staged, github_app: githubApp };
 }
 
 function parseArgs(argv) {
-  const opts = { repos: [], extraPath: [], fromRegistry: false };
+  const opts = { repos: [], extraPath: [], fromRegistry: false, githubApp: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => { if (i + 1 >= argv.length) throw new Error(`${a} needs a value`); return argv[++i]; };
@@ -208,6 +214,7 @@ function parseArgs(argv) {
     else if (a === '--repo') opts.repos.push(value());
     else if (a === '--path') opts.extraPath.push(value());
     else if (a === '--from-registry') opts.fromRegistry = true;
+    else if (a === '--github-app') opts.githubApp = true;
     else throw new Error(`unknown argument ${a}`);
   }
   return opts;

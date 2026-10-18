@@ -10,6 +10,9 @@
 // checks its own registry, Git origin, remote policy and owner-private enrollment, and refuses
 // on its own. A Mac that is offline, or connected in probe mode, answers host_offline.
 //
+// project_create always goes to the Mac runtime: PROJECTS.md, the source of truth of the
+// projects, lives there (owner console spec section 09, D-A2-1); an offline Mac answers host_offline.
+//
 // Implicit workspaces (server/tools/implicit-workspace.mjs) are resolved by the runtime that
 // receives the call, so a workspace tool called without workspace_id must reach the right host
 // first: the Mac when this conversation already has a Mac workspace on the hinted project, or
@@ -107,6 +110,8 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
       destination=placement.host;
       envelope={...envelope,args:{...args,host:placement.host}};
     } else if (op === 'workspace_open' && args.host === 'mac') destination='mac';
+    // project_create runs where the registry lives (owner console D-A2-1), whatever the host argument.
+    else if (op === 'project_create') destination='mac';
     else {
       for (const id of ids) {
         const binding=routes.get(id);

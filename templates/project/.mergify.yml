@@ -1,0 +1,28 @@
+# Memo Labs autoloop merge policy: memolabs-dev/memo-bridge docs/MERGIFY_FLEET_ADOPTION.md.
+# A green PR from a trusted author lands without a human. Sensitive paths wait for the owner;
+# the "Mergify Merge Queue" check on the PR names the condition that blocks it.
+shared:
+  land_conditions: &land_conditions
+    - base = main
+    - -draft
+    - -from-fork
+    - or:
+        - author = memo-labs-automation[bot]
+        - author = guillaume-flambard
+    - label != hold-merge
+    - label != needs-human-review
+    - "-files ~= ^(\\.github/|\\.mergify\\.yml$|CODEOWNERS$|AGENTS\\.md$|\\.env)"
+    - "check-success = @github-actions/check"
+
+merge_queue:
+  max_parallel_checks: 1
+
+merge_protections_settings:
+  auto_merge_conditions: *land_conditions
+
+queue_rules:
+  - name: memo-labs-autoloop
+    batch_size: 1
+    merge_method: squash
+    queue_conditions: *land_conditions
+    merge_conditions: *land_conditions

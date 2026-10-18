@@ -64,7 +64,8 @@ Read stage (28 tools; `delegation_status` since #47): `projects_list`, `workspac
 
 Write stage adds 21 (`workspace_delegate`, `delegation_join`, `delegation_report`, `delegation_end` since #47): `workspace_open`, `workspace_close`, `task_claim`, `task_renew`,
 `task_release`, `task_complete`, `task_checkpoint`, `batch_create`, `task_next`, `worktree_create`, `worktree_write_file`,
-`worktree_commit`, `worktree_push`, `jobs_submit`, `job_cancel`, `github_create_pr`, `memory_save`.
+`worktree_commit`, `worktree_push`, `jobs_submit`, `job_cancel`, `github_create_pr`, `memory_save`, and `project_create`
+(owner console T-A2: served by the Mac runtime only, owner only; `.agent/project/owner-console/spec.md` section 09).
 
 Never remote: `observe_*`, `host_resources`, `worktree_remove`, `list_hosts`, `host_status`,
 `bridge_info`, `project_info`, `project_git_status`, `projects_audit`. There is no merge tool on

@@ -124,7 +124,7 @@ owner are gate changes.
 | T-M1 | P1 | TODO | M1 | T-D1 | adopt Mergify on transferred repositories that have CI (template + canaries) |
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
-| T-A2 | P0 | IN_REVIEW (design: section 09) | A2 | T-A1 | `project_create` on the Mac runtime: App purposes repo_create/repo_admin, template repository `memolabs-dev/project-template` (owner publishes), registry writer under the `proj` lock, Mac clone, readiness and owner steps |
+| T-A2 | P0 | IN_REVIEW (design: section 09; code and offline tests E-12; runtime step R-A2 below) | A2 | T-A1 | `project_create` on the Mac runtime: App purposes repo_create/repo_admin, template repository `memolabs-dev/project-template` (owner publishes), registry writer under the `proj` lock, Mac clone, readiness and owner steps |
 | T-A3 | P1 | TODO | A1, A2 | T-A2 | close the gaps G-1 (Mac self-enrollment of created repositories, T-A3c) and G-2 (ORG_REPO pre-filter T-A3a, VPS registration without lab-infra hand edits T-A3b), section 09 |
 | T-H1 | P0 | DONE end to end (E-11): ChatGPT, Mac workspace, claim, Mac worktree, passing sandboxed test job, PR merged by Mergify on a private repository. Follow-up: dependency install phase for Mac jobs (Node, Go projects need it) | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
@@ -276,6 +276,16 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   deployed #175. Gap left: the Mac executor has no dependency install phase (the VPS one has,
   network on, scripts off), so Node projects without `node_modules` and Go projects with modules
   fail offline in the sandbox (horslot, E-09).
+- E-12 (T-A2, 2026-10-18, offline): `project_create` implemented (memo-bridge PR feat/project-create).
+  `tests/project-create.test.mjs` 10/10 (owner only, Mac only, name validation, refused
+  combinations, idempotence, refusal paths, registry writer under its lock, no DELETE),
+  `tests/project-template.test.mjs` 2/2, `tests/github-app.test.mjs` 17/17 (purposes
+  repo_create and repo_admin, App only, purpose gate), `tests/runtime-mac-install.test.mjs` 4/4
+  (`--app-key`, plist App variables, key removed without the flag), router test (always the
+  Mac). Full suite 817 tests: 816 pass, 0 fail, 1 skipped; `test:deploy` 124 OK; build and smoke ok (67 tools).
+  `remote:toolsize` write 51 451 bytes (budget 53 289), operator 92 722 (budget 96 129).
+  R-6 regression: `coordinator.test.mjs` 31/31 with governance 8a7f7ba, its literal parsed (18).
+  Not run against GitHub: the template repository is not published and nothing was deployed.
 
 ## 09. Design: `project_create` (T-A2, REQ-A2)
 
@@ -409,3 +419,26 @@ second call returns the same project, no second generate call), refusal paths (`
 `project_create_mac_only`), registry row inserted once and in order under the lock, never a
 DELETE request, App token purposes and the purpose gate. `tests/project-template.test.mjs`:
 template files and their agreement with memo-bridge's workflow and the fleet policy.
+
+### Runtime step R-A2 (what the owner does, in this order, after the T-A2 PR merges)
+
+1. Publish the template once, from a memo-bridge checkout at the merged commit, under his own
+   `gh` login (it needs the `workflow` scope): `node scripts/project-template.mjs publish`, read
+   the plan, then `node scripts/project-template.mjs publish --execute`. Check:
+   `gh api repos/memolabs-dev/project-template --jq .is_template` answers `true`.
+2. VPS deploy (his go): lab-infra PR pinning `memo_bridge_version` to the merged commit (the hub
+   lists `project_create` and routes it to the Mac). No governance pin change, so R-6 is the
+   regression check only: `coordinator.test.mjs` with `MEMO_BRIDGE_GOVERNANCE_ROOT` on 8a7f7ba.
+   Back up the store and the hub state as in E-08; no store migration in T-A2.
+3. Mac runtime at the same commit, with the App key:
+   `deploy/mac/install-runtime-agent.sh --owner-sub <sub> --governance-ref <pinned governance>
+   --from-registry --app-key "$HOME/.config/memolabs/secrets/github-app/memo-labs-automation.private-key.pem" --install`.
+4. ChatGPT, Memo Bridge connector, Refresh. "Crée un projet privé <name>" -> `project_create`
+   (expected: `repo_created`, `cloned`, `registry_row_added`, `owner_steps: enroll_on_mac`).
+5. Enrollment (G-1): the `enroll_on_mac` command it returns, in a terminal or through
+   `operator_run` on the Mac with his approval. The agent restarts with the project enrolled.
+6. Same conversation or a new one: "crée la tâche : <one small change>" -> `batch_create`, then a
+   worker chat ("travaille sur l'issue 1 de <name>") -> claim, Mac worktree, `jobs_submit test`,
+   PR -> Mergify merges it (`gh pr view 1 -R memolabs-dev/<name> --json mergedBy`).
+7. `project_create` again with the same name: `existing: true`, same `local_path`, no second
+   repository (`gh repo list memolabs-dev | grep <name>` one line). AC-A2 passes on 6 and 7.

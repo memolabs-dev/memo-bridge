@@ -15,9 +15,10 @@
     ],
     "in_progress": [
       "T-H1 (zero-friction-mac-routing spec; #148 merged)",
-      "T-Z2 and T-Z3 (PR feat/intent-metadata)"
+      "T-Z2 and T-Z3 (PR feat/intent-metadata)",
+      "T-A2 (PR feat/project-create open; runtime step R-A2 waits for the owner)"
     ],
-    "next": "owner checks from ChatGPT (AC-A1); then T-A2 project_create (needs App Administration write, U-1); later teach memo-bridge ORG_REPO and drop the compatibility literal; deploy memo-bridge main with the owner's go (VPS at 93e3bed), then the owner runs the golden prompt protocol (AC-Z3)",
+    "next": "T-A2 runtime step R-A2 (spec section 09): owner publishes memolabs-dev/project-template, deploys memo-bridge on the VPS and the Mac runtime with --app-key, then AC-A2 from ChatGPT; then T-A3 (gaps G-1, G-2)",
     "blocked": []
   },
   "acceptance": {
@@ -26,7 +27,7 @@
     "pending": [
       "AC-T1",
       "AC-M1",
-      "AC-A2",
+      "AC-A2 (offline tests pass, E-12; runtime step R-A2 pending)",
       "AC-H1",
       "AC-Z2 (CI on the metadata PR)",
       "AC-Z3 (owner run after deploy)"

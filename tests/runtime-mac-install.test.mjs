@@ -81,6 +81,13 @@ test('plist: runtime mode with every variable the runtime and the ledger read, n
     MEMO_BRIDGE_GOVERNANCE_ROOT: `${L.base}/governance/def`, MEMOLABS_ROOT: '/Users/owner/memolabs', HOME: home,
     PATH: '/opt/node/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' });
   assert.match(text, /runtime-releases\/abc\/bridge\/agent-cli\.mjs/);
+  // --github-app (owner console D-A2-2): the App ids and the purpose gate, never the key.
+  const withApp = plistEnv(renderPlist({ home, node: '/opt/node/bin/node', release: `${L.base}/runtime-releases/abc`,
+    governance: `${L.base}/governance/def`, ownerSub: SUB, githubApp: true }));
+  assert.equal(withApp.MEMO_BRIDGE_GITHUB_APP_ID, '5298579');
+  assert.equal(withApp.MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID, '170927025');
+  assert.equal(withApp.MEMO_BRIDGE_GITHUB_APP_PURPOSES, 'repo_create,repo_admin');
+  assert.equal(Object.keys(withApp).length, Object.keys(env).length + 3);
   assert.throws(() => renderPlist({ home, node: 'node', release: '/r', governance: '/g', ownerSub: SUB }), /not_absolute/);
 });
 
@@ -174,4 +181,22 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
     assert.equal(plistEnv(staged).MEMO_BRIDGE_GOVERNANCE_ROOT, out.steps.governance.root);
     assert.ok(!staged.includes('gho_fixture'));
     assert.equal(existsSync(join(home, 'Library/LaunchAgents/dev.memolabs.memo-bridge-agent.plist')), false, 'launchd untouched');
+    assert.equal(plistEnv(staged).MEMO_BRIDGE_GITHUB_APP_ID, undefined);
+
+    // --app-key (owner console D-A2-2): the key becomes the 0600 app-key credential, the plist gets
+    // the App ids and the purpose gate; a later run without it removes the key again.
+    const pemLine = kind => `-----${kind} RSA ${'PRIVATE'} KEY-----`;
+    writeFileSync(p('app.pem'), `${pemLine('BEGIN')}\nfixture\n${pemLine('END')}\n`);
+    const withKey = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry',
+      '--app-key', p('app.pem')]);
+    assert.equal(withKey.status, 0, withKey.stderr + withKey.stdout);
+    assert.equal(mode(join(L.credentials, 'app-key')), 0o600);
+    assert.ok(!withKey.stdout.includes('fixture'), 'the key is never printed');
+    const appPlist = plistEnv(readFileSync(join(L.base, 'launchd', 'dev.memolabs.memo-bridge-agent.plist'), 'utf8'));
+    assert.equal(appPlist.MEMO_BRIDGE_GITHUB_APP_PURPOSES, 'repo_create,repo_admin');
+    assert.notEqual(run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry',
+      '--app-key', 'relative.pem']).status, 0);
+    const again = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry']);
+    assert.equal(again.status, 0, again.stderr + again.stdout);
+    assert.equal(existsSync(join(L.credentials, 'app-key')), false);
   });

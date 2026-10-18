@@ -77,8 +77,10 @@ async function fakeGitHub(t, { clock, respond } = {}) {
         const token = statelessToken();
         issued.push(token);
         return send(201, { token, expires_at: new Date(clock() + 3600_000).toISOString(),
-          permissions: { ...parsed.permissions, metadata: 'read' }, repository_selection: 'selected',
-          repositories: parsed.repositories.map(name => ({ name, full_name: `memolabs-dev/${name}` })) });
+          permissions: { ...parsed.permissions, metadata: 'read' },
+          ...(parsed.repositories ? { repository_selection: 'selected',
+            repositories: parsed.repositories.map(name => ({ name, full_name: `memolabs-dev/${name}` })) }
+            : { repository_selection: 'all' }) });
       }
       return send(404, { message: 'Not Found' });
     });
@@ -185,6 +187,38 @@ test('mint: identity checked once, then one repository and the minimal permissio
     assert.ok(r.claims.exp - r.claims.iat <= 600);
     assert.equal(r.apiVersion, '2022-11-28');
   }
+});
+
+test('project_create purposes: repo_create for the organization, repo_admin for one repository, App only, purpose gate', async t => {
+  const f = await appProvider(t);
+  const created = await f.provider.token('repo_create', 'memolabs-dev/ignored');
+  const admin = await f.provider.token('repo_admin', 'memolabs-dev/new-thing');
+  assert.equal(created.source, 'app');
+  assert.equal(admin.source, 'app');
+  assert.deepEqual(f.api.posts().map(r => r.body), [
+    { permissions: { administration: 'write', contents: 'read' } },
+    { repositories: ['new-thing'], permissions: { administration: 'write' } }]);
+  // An organization token answered for selected repositories is refused.
+  const narrowed = await appProvider(t, { respond: body => (body.repositories ? null : { data: { token: statelessToken(),
+    expires_at: new Date(Date.parse('2026-10-14T11:00:00Z')).toISOString(), repository_selection: 'selected',
+    permissions: { administration: 'write', contents: 'read' }, repositories: [{ name: 'x' }] } }) });
+  assert.equal((await narrowed.provider.token('repo_create')).error, 'app_token_scope_mismatch');
+  // Without the App: never the ambient login, never a PAT.
+  const pats = await credentials(t, { [LEDGER_CREDENTIAL]: pat(), [PUSH_CREDENTIAL]: pat() });
+  const noApp = createGitHubCredentials({ env: { PATH: process.env.PATH, CREDENTIALS_DIRECTORY: pats } });
+  assert.equal((await noApp.token('repo_create')).error, 'app_key_missing');
+  assert.equal((await createGitHubCredentials({ env: { PATH: process.env.PATH } }).token('repo_admin', 'memolabs-dev/x')).error, 'app_key_missing');
+  // The Mac's gate: only the listed purposes use the App; push keeps the PAT, ledger too.
+  const gated = await appProvider(t, { files: { [PUSH_CREDENTIAL]: pat(), [LEDGER_CREDENTIAL]: pat() },
+    env: { MEMO_BRIDGE_GITHUB_APP_PURPOSES: 'repo_create,repo_admin' } });
+  assert.equal((await gated.provider.token('push', 'memolabs-dev/cuesheet')).source, 'pat');
+  assert.equal((await gated.provider.token('ledger')).source, 'pat');
+  assert.equal((await gated.provider.token('repo_create')).source, 'app');
+  assert.equal(gated.api.posts().length, 1);
+  const only = await appProvider(t, { env: { MEMO_BRIDGE_GITHUB_APP_PURPOSES: 'push' } });
+  assert.equal((await only.provider.token('repo_create')).error, 'app_purpose_disabled');
+  const bad = await appProvider(t, { env: { MEMO_BRIDGE_GITHUB_APP_PURPOSES: 'push,everything' } });
+  assert.equal((await bad.provider.token('push', 'memolabs-dev/cuesheet')).error, 'app_config_invalid');
 });
 
 test('cache: reused until 5 minutes before expiry, then refreshed; concurrent requests mint once', async t => {
