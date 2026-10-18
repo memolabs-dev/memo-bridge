@@ -11,6 +11,10 @@ ChatGPT ── workspace_open(project) ──> hub remote surface (VPS, remote.j
                        with source_host mac (known only from the Mac catalog snapshot) goes to
                        the Mac, anything else to the VPS, as before
              host mac: Mac
+           ── task_claim / task_next / worktree_create ... with no workspace_id (implicit
+              workspaces, #169) ──> same router: the Mac when this conversation already has a
+              Mac workspace on the hinted project (args.project, else the Issue's repository),
+              or when that project is registered on the Mac only
         ──> hub sendAgent('mac') ──> Mac agent in runtime mode (launchd, owner's account)
              Mac remote policy  ~/.local/share/memo-bridge/owner-policy/remote.json
                                 (owner sub, enrolled project names, writes, enforce, routing)
@@ -33,7 +37,8 @@ policy, owner-private file, ledger, claim, worktree and sandboxed jobs.
 
 | ID | What | Where | Evidence |
 |---|---|---|---|
-| T-R1 | host inference for `workspace_open` without host; probe-only Mac answers `host_offline` with a reason | `bridge/workspace-host-router.mjs`, `bridge/remote-surface.mjs` | `tests/workspace-host-router.test.mjs` (9 tests) |
+| T-R1 | host inference for `workspace_open` without host; probe-only Mac answers `host_offline` with a reason | `bridge/workspace-host-router.mjs`, `bridge/remote-surface.mjs` | `tests/workspace-host-router.test.mjs` |
+| T-R4 | implicit workspace calls (#169) placed on the Mac for Mac-only projects; the workspace the Mac opens is bound to the owner and the conversation | `bridge/workspace-host-router.mjs` | same file, 12 tests |
 | T-R2 | installer: full pinned bundle (`git archive` + `pnpm install --prod`), pinned governance scripts, `push-gh`, multi-repo enrollment from the registry checked against GitHub, Mac remote policy, every variable the runtime and the ledger read in the plist, `--rollback` | `deploy/mac/install-runtime-agent.sh`, `deploy/mac/runtime-mac.mjs` | `tests/runtime-mac-install.test.mjs` (real dry run on macOS) |
 | T-R3 | installer bug from #148: the token check `{20,2048}` is refused by macOS `/bin/bash` 3.2 (RE_DUP_MAX 255), so the old script always died there | same | same test |
 | T-G1 | governance: `private_owner_allowlist.allowed()` read `Path.home()`, which the ledger child sets to its private gh directory, so every private repository was refused | memolabs-dev/.github#63 | its unit test; R-6 check below |
@@ -85,9 +90,10 @@ Precondition: one enrolled private repository has Mergify adopted (none has yet;
 clinical-data-knowledge-foundation already have CI), and an Issue there labelled `agent:ready`
 and exactly one `priority:*`.
 
-1. `workspace_open(project="emargo")` with no host: answer `workspace.host = "mac"`,
-   `placement.reason = "project_registered_on_mac_only"`.
-2. `task_claim(issue="memolabs-dev/emargo#N")`: lease taken (the ledger accepts the private repo).
+1. Zero ceremony: `task_claim(issue="memolabs-dev/emargo#N")` with no workspace: lease taken
+   on the Mac, `implicit_workspace.opened = true` (the ledger accepts the private repo).
+2. Explicit variant in a second conversation: `workspace_open(project="emargo")` with no host
+   answers `workspace.host = "mac"`, `placement.reason = "project_registered_on_mac_only"`.
 3. `worktree_create`: a worktree under `~/memolabs/workspace/worktrees/emargo/` on the Mac.
 4. `worktree_write_file`, `jobs_submit test`, `job_results`: the sandboxed job ran on the Mac.
 5. `worktree_commit`, `worktree_push`, `github_create_pr`, `task_complete`: PR merged by Mergify.
@@ -103,4 +109,4 @@ Record the answers (ids, SHAs, PR link) in `evidence.md`; do not close #114 befo
 | R-M1 | The pin bump carries every memo-bridge commit since 93e3bed (42 on 2026-10-18) | lab-infra PR lists them; R-6 run on the candidate; deploy only on the owner's go |
 | R-M2 | Owner's gh token used for ledger and pushes on the Mac | 0600 files under a 0700 dir, never in env or plist; the App replaces it once configured on the Mac |
 | R-M3 | Discovery snapshot stale or wrong | it only places the workspace; the Mac authorizes again and refuses what it does not serve |
-| R-M4 | Implicit workspaces (other session) bypass the router | they must call `workspace_open` through the same router; flagged in the shared notes |
+| R-M4 | Two enrolled projects are registered under a name that is not their repository's (calendar-prototype is acadomia-calendrier, merge-gate is github-merge-gate) | an implicit call hinted only by the Issue goes to the VPS and is refused there; name the project (`project`) or open the workspace first |

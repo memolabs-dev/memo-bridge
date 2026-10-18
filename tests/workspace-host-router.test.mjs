@@ -139,3 +139,61 @@ test('explicit host=mac on a probe-only Mac answers host_offline with the reason
   assert.match(out.detail, /probe mode/);
   assert.deepEqual(hosts.calls, [['mac','workspace_open','mac']]);
 });
+
+// Implicit workspaces (#169): a workspace tool called without workspace_id is resolved by the runtime
+// that receives it, so the router must send it to the host where its project lives.
+test('implicit task_claim on a Mac-only Issue goes to the Mac, and its workspace is bound to this conversation', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'mac-host-implicit-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const calls = [];
+  const requestAgent = async (host, op, envelope) => {
+    calls.push([host, op]);
+    if (host === 'vps' && op === 'projects_list') return macOnlyListing(envelope.args.search);
+    if (host === 'mac' && op === 'task_claim')
+      return { ok:true, claim_id:'c1', implicit_workspace:{ workspace_id:'ws_implicitAB1234', project:'emargo', opened:true } };
+    return { ok:true };
+  };
+  const route = createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent });
+  const session = 'a'.repeat(32);
+  const claimed = await route.call('vps','task_claim',{ args:{ issue:'memolabs-dev/emargo#4' }, principal, clientSession:session });
+  assert.equal(claimed.ok, true);
+  assert.deepEqual(calls, [['vps','projects_list'], ['mac','task_claim']]);
+  assert.equal(route.bindingsCount(), 1);
+  // Same conversation, same project, no id: straight to the Mac, no listing needed.
+  calls.length = 0;
+  await route.call('vps','worktree_create',{ args:{ issue:'memolabs-dev/emargo#4' }, principal, clientSession:session });
+  assert.deepEqual(calls, [['mac','worktree_create']]);
+  // The bound workspace id follows the Mac after a restart, and never for another principal.
+  const again = createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent });
+  calls.length = 0;
+  await again.call('vps','workspace_status',{ args:{ workspace_id:'ws_implicitAB1234' }, principal });
+  assert.deepEqual(calls, [['mac','workspace_status']]);
+  assert.equal((await again.call('vps','workspace_status',{ args:{ workspace_id:'ws_implicitAB1234' }, principal:guest })).error,
+    'workspace_other_principal');
+});
+test('implicit calls stay on the VPS for VPS projects, without a hint, and with an explicit workspace_id', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'mac-host-implicit-vps-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const calls = [];
+  const requestAgent = async (host, op, envelope) => {
+    calls.push([host, op]);
+    if (op === 'projects_list') return { ok:true, projects:[{ name:envelope.args.search, available:true }] };
+    return { ok:true };
+  };
+  const route = createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent });
+  await route.call('vps','task_claim',{ args:{ issue:'memolabs-dev/cuesheet#2' }, principal });
+  await route.call('vps','task_next',{ args:{}, principal });
+  await route.call('vps','task_renew',{ args:{ workspace_id:'ws_unknownAB1234', issue:'memolabs-dev/emargo#4' }, principal });
+  assert.deepEqual(calls, [['vps','projects_list'], ['vps','task_claim'], ['vps','task_next'], ['vps','task_renew']]);
+  assert.equal(route.bindingsCount(), 0);
+});
+test('implicit call for a Mac-only project with the Mac offline: host_offline, no binding', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'mac-host-implicit-off-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const hosts = fakeHosts({ listing: macOnlyListing, mac:'offline' });
+  const route = createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent:hosts.requestAgent });
+  const out = await route.call('vps','task_next',{ args:{ project:'emargo' }, principal });
+  assert.equal(out.error, 'host_offline');
+  assert.equal(hosts.calls.filter(([host, op]) => host === 'vps' && op === 'task_next').length, 0);
+  assert.equal(route.bindingsCount(), 0);
+});
