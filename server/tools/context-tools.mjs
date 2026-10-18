@@ -43,10 +43,10 @@ export function registerContextTools(server, getRuntime, deps = {}) {
     }
     // Metadata-only Mac snapshot entries never grant repository access.
     if (isRemotePrincipal(rt.principal)) {
-      const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy());
+      const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy(), { host: rt.host });
       if (refusal) {
         await rt.audit('project_context', 'denied', 'project_not_allowed');
-        return respond(fail('project_not_allowed'));
+        return respond(refusal);
       }
     }
     let project;

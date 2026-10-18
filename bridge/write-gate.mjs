@@ -106,12 +106,46 @@ export function remotePolicyFromEnv(env = process.env, { readFile = path => read
   return policy;
 }
 
+// The tolerant side of a project reference. An argument may arrive as `drop`, `Drop` or
+// `memolabs-dev/drop` (lab-infra writes owner/repo, the catalog uses the bare name, a model may
+// send either): they name the same project, so the gate accepts the spelling the caller used and
+// the catalog still decides whether the project exists (unknown_project). Policy entries stay
+// strict (projectName above): remote.json is configuration, not input.
+export function projectRef(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const repo = REPO_RE.exec(trimmed);
+  const name = (repo ? repo[1] : trimmed).toLowerCase();
+  return PROJECT_RE.test(name) ? name : null;
+}
+
+// A refusal must name WHICH condition blocked and, when the answering side knows it, which
+// runtime answered: the hub, the VPS runner and the Mac runtime all produce the same codes, and
+// a bare `project_not_allowed` left the owner unable to tell them apart (2026-10-18: the Mac
+// refused an allowlisted-on-the-VPS project without naming itself).
+const HOST_LABEL = Object.freeze({ mac: 'Mac', vps: 'VPS' });
+export const runtimeLabel = host => (typeof host === 'string' && HOST_LABEL[host]) || null;
+// "the Mac runtime's" / "the VPS runtime's" / "the": the subject of a refusal sentence.
+export const scopeOwner = host => {
+  const label = runtimeLabel(host);
+  return label ? `the ${label} runtime's` : 'the';
+};
+
 // null when `principal` may work on `project`, else a refusal. Local and Phase 4 hub principals
-// are not limited here (their own catalog is the scope).
-export function remoteProjectRefusal(principal, project, policy = UNCONFIGURED_POLICY) {
+// are not limited here (their own catalog is the scope). `host` names the runtime that answers;
+// it is used in the detail only and never changes the decision.
+export function remoteProjectRefusal(principal, project, policy = UNCONFIGURED_POLICY, { host = null } = {}) {
   if (!isRemotePrincipal(principal)) return null;
-  if (!policy?.configured) return fail('project_not_allowed', 'no remote project allowlist is configured');
-  return typeof project === 'string' && policy.projects.includes(project) ? null : fail('project_not_allowed');
+  const label = runtimeLabel(host);
+  if (!policy?.configured) {
+    return fail('project_not_allowed',
+      `no remote project allowlist is configured${label ? ` on the ${label} runtime` : ''}`);
+  }
+  const name = projectRef(project);
+  if (name === null) return fail('project_not_allowed', 'the project argument is not a project name');
+  if (policy.projects.includes(name)) return null;
+  return fail('project_not_allowed',
+    `project "${name}" is not in ${scopeOwner(host)} remote project allowlist (${policy.projects.length} allowed)`);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -743,7 +743,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const { workspace } = ws;
       const asChild = await read(repo => callerChild(repo, rt.principal.id, { workspace, session: requestMeta(ctx.meta).client_session }));
       if (asChild) return parentOnly('worktree_create');
-      const notAllowed = remoteProjectRefusal(rt.principal, workspace.project_id, remotePolicy);
+      const notAllowed = remoteProjectRefusal(rt.principal, workspace.project_id, remotePolicy, { host: rt.host });
       if (notAllowed) return notAllowed;
       const bound = sessionCheck(workspace, ctx);
       if (bound.error) return bound.error;

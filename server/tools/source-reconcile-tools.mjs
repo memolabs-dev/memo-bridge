@@ -43,10 +43,10 @@ export function registerSourceReconcileTools(server, getRuntime, deps = {}) {
     if (!PROJECT.test(args.project ?? '') || (args.limit !== undefined &&
       (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 30))) return result(fail('invalid_input'));
     if (isRemotePrincipal(rt.principal)) {
-      const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy());
+      const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy(), { host: rt.host });
       if (refusal) {
         await rt.audit('source_reconcile', 'denied', 'project_not_allowed');
-        return result(fail('project_not_allowed'));
+        return result(refusal);
       }
     }
     try {
