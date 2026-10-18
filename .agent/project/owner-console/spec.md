@@ -81,13 +81,13 @@ owner are gate changes.
 
 | ID | P | Status | Req | Depends | What |
 |---|---|---|---|---|---|
-| T-D1 | P0 | IN_PROGRESS | M1 | - | narrow the sensitive set (D-1): 4 PRs open, owner merges once |
+| T-D1 | P0 | DONE | M1 | - | narrow the sensitive set (D-1): memo-bridge#165, cuesheet#85, problem-intelligence-engine#35, uni-protocol#38 merged; memo-bridge#156 (`deploy/` only) then merged by Mergify |
 | T-T1 | P0 | DONE | T1 | - | lot 1: 26 repositories transferred, Mac remotes updated (E-01) |
 | T-T2 | P1 | TODO | T1 | - | lot 2: VPS-image repositories, one at a time: transfer, CI image name, lab-infra stack image, autodeploy check |
 | T-T3 | P1 | TODO | T1 | T-T2 | lot 3: lab-infra |
 | T-M1 | P1 | TODO | M1 | T-D1 | adopt Mergify on transferred repositories that have CI (template + canaries) |
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
-| T-A1 | P0 | TODO | A1 | - | design and implement the single org rule in memo-bridge, issue_preflight.py and the lab-infra remote.json rendering (gate files: owner merges once) |
+| T-A1 | P0 | DONE for public repos (E-02, E-03) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
 | T-H1 | P0 | IN_PROGRESS (other spec) | H1 | - | zero-friction Mac routing (#110, #114, #147, PR #148 held) |
 
@@ -119,3 +119,14 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   odoo-safety-parts, podintel, reprisette, stasis, trufflo, valve, vulnforge, world-kernel.
   `gh api orgs/memolabs-dev/installations`: mergify `all`, memo-labs-automation `all`.
   `git ls-remote` and `git fetch` work on the new URLs.
+- E-02 (T-A1, 2026-10-18 00:41 Paris): .github#61 and lab-infra#241 merged (by the agent, on the
+  owner's explicit request in chat), `make deploy-memo-operator` from a clean checkout at 91539f6
+  after regenerating the stale catalog snapshot (`scripts/export-project-catalog.mjs`, 71
+  projects): ok=102 changed=10 failed=0. On the VPS: 17 clones under /var/lib/memo-runner/repos,
+  17 registry rows, 17 `remote.json` projects, hub and runner active, no warning in the journal.
+  Simulation with the deployed modules and live files: 17 of 17 projects allowed and available
+  for the owner's ChatGPT principal. Not yet checked from a real ChatGPT conversation.
+- E-03 (T-A1, 2026-10-18 08:5x Paris): lab-infra#242 merged on request, `make deploy-memo-bridge`
+  at 5216df2: ok=69 changed=1 failed=0; governance checkout at 836e39b, clean. Preflight at
+  836e39b with GitHub reachable: stasis, world-kernel, memo-bridge in scope; emargo refused
+  (private, not enrolled on the host); guillaume-flambard/lab-infra refused (outside the org).
