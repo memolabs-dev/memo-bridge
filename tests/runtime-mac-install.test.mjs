@@ -39,8 +39,14 @@ test('enrollment: only registered Mac checkouts that GitHub reports private and 
     { name: 'twin', reason: 'origin_already_enrolled' }]);
   const one = await enroll({ projects: registry, explicit: ['memolabs-dev/emargo'], ...deps });
   assert.deepEqual(one.projects, [{ name: 'emargo', repo: 'memolabs-dev/emargo' }]);
-  // A repository with no registered Mac checkout, a public one, or another owner's is refused.
-  for (const repo of ['memolabs-dev/not-here', 'memolabs-dev/cuesheet', 'memolabs-dev/old']) {
+  // Public repos are never auto-enrolled. One can opt in explicitly after GitHub attestation.
+  const publicOne = await enroll({ projects: registry, explicit: ['memolabs-dev/cuesheet'], ...deps });
+  assert.equal(publicOne.ok, true);
+  assert.deepEqual(publicOne.projects, []);
+  assert.deepEqual(publicOne.publicProjects, [{ name: 'cuesheet', repo: 'memolabs-dev/cuesheet' }]);
+  assert.deepEqual(all.publicProjects, [], 'registry discovery never grants public repo execution');
+  // No checkout, an archived or unverified repository, or another owner's origin is refused.
+  for (const repo of ['memolabs-dev/not-here', 'memolabs-dev/old', 'memolabs-dev/ghost']) {
     assert.equal((await enroll({ projects: registry, explicit: [repo], ...deps })).error, 'repo_not_enrolled', repo);
   }
   assert.equal((await enroll({ projects: registry, explicit: ['someone/perso'], ...deps })).error, 'invalid_repo');
@@ -59,6 +65,9 @@ test('policy files are the ones the coordinator, the remote policy and the ledge
   assert.equal(remote.remote_writes, 'enabled');
   assert.equal(remote.session_binding, 'enforce');
   assert.deepEqual(remote.projects, ['emargo']);
+  const mixed = parseRemotePolicy(JSON.parse(renderRemotePolicy({ ownerSub: SUB, projects,
+    publicProjects: [{ name: 'cuesheet', repo: 'memolabs-dev/cuesheet' }] })));
+  assert.deepEqual(mixed.projects, ['emargo', 'cuesheet']);
   const priv = parseOwnerPrivatePolicy(JSON.parse(renderPrivatePolicy({ ownerSub: SUB, projects })), { expectedOwnerSub: SUB });
   assert.deepEqual(priv, { ok: true, repos: ['memolabs-dev/emargo'] });
   assert.throws(() => renderRemotePolicy({ ownerSub: 'not-a-uuid', projects }), /owner_sub_invalid/);
@@ -151,11 +160,24 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
   { skip: process.platform !== 'darwin' && 'the installer runs on macOS only', timeout: 180_000 }, async t => {
     const { home, p, govRef } = macHome(t);
     const L = runtimeLayout(home);
-    const refused = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'),
+    const publicOnly = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'),
       '--repo', 'memolabs-dev/open-app']);
-    assert.notEqual(refused.status, 0, 'a public repository is not an owner enrollment');
-    assert.equal(refused.steps.configure?.error, 'repo_not_enrolled', refused.stdout + refused.stderr);
+    assert.equal(publicOnly.status, 0, publicOnly.stderr + publicOnly.stdout);
+    assert.deepEqual(publicOnly.steps.configure.enrolled, []);
+    assert.deepEqual(publicOnly.steps.configure.public_enrolled,
+      [{ name: 'open-app', repo: 'memolabs-dev/open-app' }]);
+    const publicPolicy = parseRemotePolicy(JSON.parse(readFileSync(L.remotePolicy, 'utf8')));
+    assert.deepEqual(publicPolicy.projects, ['open-app']);
+    const emptyPrivate = parseOwnerPrivatePolicy(JSON.parse(readFileSync(L.privatePolicy, 'utf8')),
+      { expectedOwnerSub: SUB });
+    assert.deepEqual(emptyPrivate, { ok: true, repos: [] });
     assert.equal(existsSync(join(home, 'Library/LaunchAgents/dev.memolabs.memo-bridge-agent.plist')), false);
+    const refused = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'),
+      '--repo', 'memolabs-dev/not-here']);
+    assert.notEqual(refused.status, 0);
+    assert.equal(refused.steps.configure?.error, 'repo_not_enrolled');
+    assert.deepEqual(parseRemotePolicy(JSON.parse(readFileSync(L.remotePolicy, 'utf8'))).projects, ['open-app'],
+      'a refused enrollment must not overwrite the previous policy');
 
     const out = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry']);
     assert.equal(out.status, 0, out.stderr + out.stdout);
@@ -171,6 +193,16 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
     assert.equal(mode(L.remotePolicy), 0o600);
     const remote = parseRemotePolicy(JSON.parse(readFileSync(L.remotePolicy, 'utf8')));
     assert.deepEqual(remote.projects, ['secret-app']);
+    const combined = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'),
+      '--from-registry', '--repo', 'memolabs-dev/open-app']);
+    assert.equal(combined.status, 0, combined.stderr + combined.stdout);
+    assert.deepEqual(combined.steps.configure.enrolled, [{ name: 'secret-app', repo: 'memolabs-dev/secret-app' }]);
+    assert.deepEqual(combined.steps.configure.public_enrolled, [{ name: 'open-app', repo: 'memolabs-dev/open-app' }]);
+    assert.deepEqual(parseRemotePolicy(JSON.parse(readFileSync(L.remotePolicy, 'utf8'))).projects,
+      ['secret-app', 'open-app']);
+    assert.deepEqual(parseOwnerPrivatePolicy(JSON.parse(readFileSync(L.privatePolicy, 'utf8')),
+      { expectedOwnerSub: SUB }), { ok: true, repos: ['memolabs-dev/secret-app'] },
+    'public projects must never enter the private repository governance allowlist');
     // The coordinator's own loader accepts the file for the owner only.
     const loaded = await loadOwnerPrivatePolicy({ file: L.privatePolicy, principal: { id: `oidc:${SUB}` }, remotePolicy: remote,
       host: 'mac', home });

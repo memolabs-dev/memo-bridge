@@ -6,16 +6,16 @@
 //
 // configure does three things, all owner-local:
 //   1. enrollment: the private memolabs-dev repositories this Mac may serve to ChatGPT. Each one
-//      must be a project registered in ~/memolabs/PROJECTS.md whose Mac checkout has that GitHub
-//      origin, and GitHub must answer private and not archived. --repo names one explicitly;
-//      --from-registry takes every registered project that passes. A discovery snapshot, a VPS
-//      file or a request never adds one.
+//      must be registered in ~/memolabs/PROJECTS.md, with a verified GitHub origin and not archived.
+//      --from-registry enrolls only private repos; --repo explicitly opts in one verified public
+//      or private repo. A discovery snapshot, VPS file or remote request never enrolls anything.
 //   2. the two policy files the runtime reads (0600, ~/.local/share/memo-bridge/owner-policy/):
 //        private-repos.json  memolabs.owner-private-repos.v1, read by the coordinator
 //                            (server/coordinator/owner-private-repos.mjs) and by the governance
 //                            ledger (memolabs-dev/.github scripts/private_owner_allowlist.py)
 //        remote.json         the Mac runtime's remote policy (bridge/write-gate.mjs
-//                            parseRemotePolicy): the owner sub, the enrolled project names,
+//                            parseRemotePolicy): the owner sub, private and explicitly
+//                            opted-in public project names,
 //                            remote writes, enforce session binding, mac_runtime_routing
 //   3. the launchd plist of dev.memolabs.memo-bridge-agent in runtime mode, staged in --out.
 // Nothing here talks to the VPS: no corpus, path or credential leaves the Mac.
@@ -85,6 +85,7 @@ export async function enroll({ projects, explicit = [], fromRegistry = false, or
   for (const repo of explicit) if (!REPO_RE.test(repo)) return { ok: false, error: 'invalid_repo', detail: repo };
   const wanted = new Set(explicit.map(r => r.toLowerCase()));
   const chosen = new Map();
+  const publicChosen = new Map();
   const skipped = [];
   for (const p of projects) {
     if (p.kind !== 'repo' || !p.available || !p.path) continue;
@@ -92,20 +93,29 @@ export async function enroll({ projects, explicit = [], fromRegistry = false, or
     if (!repo || !REPO_RE.test(repo)) continue;
     if (!fromRegistry && !wanted.has(repo.toLowerCase())) continue;
     if (!PROJECT_RE.test(p.name)) { skipped.push({ name: p.name, reason: 'project_name_invalid' }); continue; }
-    if (chosen.has(repo.toLowerCase())) { skipped.push({ name: p.name, reason: 'origin_already_enrolled' }); continue; }
+    if (chosen.has(repo.toLowerCase()) || publicChosen.has(repo.toLowerCase())) {
+      skipped.push({ name: p.name, reason: 'origin_already_enrolled' }); continue;
+    }
     const seen = await visibility(repo);
     if (!seen) { skipped.push({ name: p.name, reason: 'github_unverified' }); continue; }
     if (seen.archived) { skipped.push({ name: p.name, reason: 'archived' }); continue; }
-    if (!seen.private) continue; // public repositories need no owner enrollment
+    if (!seen.private) {
+      // Public repositories need an explicit --repo opt-in; never granted by --from-registry.
+      if (wanted.has(repo.toLowerCase())) publicChosen.set(repo.toLowerCase(), { name: p.name, repo });
+      continue;
+    }
     chosen.set(repo.toLowerCase(), { name: p.name, repo });
   }
   // An explicit --repo must be a registered Mac checkout of a private, live repository.
   for (const repo of wanted) {
-    if (!chosen.has(repo)) return { ok: false, error: 'repo_not_enrolled', detail: repo, skipped };
+    if (!chosen.has(repo) && !publicChosen.has(repo))
+      return { ok: false, error: 'repo_not_enrolled', detail: repo, skipped };
   }
-  if (chosen.size > MAX_REPOS) return { ok: false, error: 'too_many_repos', detail: String(chosen.size) };
-  const list = [...chosen.values()].sort((a, b) => a.name.localeCompare(b.name));
-  return { ok: true, projects: list, skipped };
+  if (chosen.size + publicChosen.size > MAX_REPOS)
+    return { ok: false, error: 'too_many_repos', detail: String(chosen.size + publicChosen.size) };
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  return { ok: true, projects: [...chosen.values()].sort(byName),
+    publicProjects: [...publicChosen.values()].sort(byName), skipped };
 }
 
 export function renderPrivatePolicy({ ownerSub, projects }) {
@@ -113,11 +123,11 @@ export function renderPrivatePolicy({ ownerSub, projects }) {
   return `${JSON.stringify({ schema: PRIVATE_SCHEMA, owner_sub: ownerSub, repos: projects.map(p => p.repo) })}\n`;
 }
 
-export function renderRemotePolicy({ ownerSub, projects }) {
+export function renderRemotePolicy({ ownerSub, projects, publicProjects = [] }) {
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) throw new Error('owner_sub_invalid');
   return `${JSON.stringify({
     version: 1, managed_by: 'memo-bridge deploy/mac/install-runtime-agent.sh',
-    oidc: { owner_sub: ownerSub }, projects: projects.map(p => p.name),
+    oidc: { owner_sub: ownerSub }, projects: [...projects, ...publicProjects].map(p => p.name),
     remote_writes: 'enabled', session_binding: 'enforce', mac_runtime_routing: 'enabled'
   }, null, 2)}\n`;
 }
@@ -192,11 +202,12 @@ export async function configure({ home, ownerSub, release, governance, node, out
   const enrolled = await enroll({ projects: registry.projects, explicit: repos, fromRegistry, origin, visibility });
   if (!enrolled.ok) return enrolled;
   writeAtomic(L.privatePolicy, renderPrivatePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
-  writeAtomic(L.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
+  writeAtomic(L.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects }), 0o600);
   chmodSync(L.policyDir, 0o700);
   const staged = join(out, `${LABEL}.plist`);
   writeAtomic(staged, renderPlist({ home, node, release, governance, ownerSub, extraPath, githubApp }), 0o644);
-  return { ok: true, enrolled: enrolled.projects, skipped: enrolled.skipped, private_policy: L.privatePolicy,
+  return { ok: true, enrolled: enrolled.projects, public_enrolled: enrolled.publicProjects,
+    skipped: enrolled.skipped, private_policy: L.privatePolicy,
     remote_policy: L.remotePolicy, plist: staged, github_app: githubApp };
 }
 
