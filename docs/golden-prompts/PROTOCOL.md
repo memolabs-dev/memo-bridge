@@ -6,7 +6,7 @@ demandes de bout en bout vont jusqu'à la PR seules. Méthode reprise du guide O
 metadata » (https://developers.openai.com/apps-sdk/guides/optimize-metadata) : prompts directs,
 indirects et négatifs, puis précision et rappel.
 
-Le jeu est dans `prompts.json` (38 prompts : 14 directs, 12 indirects, 4 chaînes, 8 négatifs).
+Le jeu est dans `prompts.json` (41 prompts : 16 directs, 13 indirects, 4 chaînes, 8 négatifs).
 `node scripts/golden-prompts.mjs --check` vérifie que chaque outil attendu est bien servi à
 ChatGPT ; la CI le fait aussi (`tests/tool-metadata.test.mjs`).
 
@@ -22,7 +22,7 @@ ChatGPT ; la CI le fait aussi (`tests/tool-metadata.test.mjs`).
    doc ; Mergify peut les fusionner.
 4. D06 : choisir une unité systemd déclarée et sans risque (`operator_policy` les liste), jamais
    memo-bridge, traefik ni pocket-id, puisque la conversation passe par eux. D09 : créer
-   `~/Desktop/golden.txt`.
+   `~/Desktop/golden.txt`. D15 : créer `~/Desktop/golden-notes.txt` avec une ligne de texte.
 5. Copier `results.template.json` en `results-AAAA-MM-JJ.json`.
 
 ## Pendant le passage
