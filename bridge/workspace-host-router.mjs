@@ -22,9 +22,12 @@ const ID = /^(?:ws|wt|job)_[A-Za-z0-9_-]{8,60}$/;
 const PROJECT = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const SESSION = /^[A-Za-z0-9_-]{8,64}$/;
 const ISSUE = /^[A-Za-z0-9-]{1,39}\/([A-Za-z0-9._-]{1,100})#[1-9][0-9]{0,7}$/;
-const IMPLICIT = new Set(IMPLICIT_WORKSPACE_TOOLS);
 const MAX_ROUTES = 2000;
 const BY_PROJECT = new Set(['batch_create', 'batch_status', 'tasks_list']);
+// Calls that name no workspace but a project or an Issue: placed like an implicit workspace call.
+// task_status reads the lease of an Issue: on the VPS a private repository is refused
+// (project_not_allowed), so it must go where the project lives (seen 2026-10-18, CDKF#14).
+const HINTED = new Set([...IMPLICIT_WORKSPACE_TOOLS, ...BY_PROJECT, 'task_status']);
 const fail = (error, detail) => ({ ok:false, error, ...(detail ? { detail } : {}) });
 const PROBE_ONLY = 'the Mac agent is connected in probe mode: its runtime is not installed (deploy/mac/install-runtime-agent.sh)';
 
@@ -112,7 +115,7 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
         if (destination !== host && destination !== binding.host) return fail('host_mismatch');
         destination=binding.host;
       }
-      if (destination === host && IMPLICIT.has(op) && args.workspace_id === undefined && ids.length === 0)
+      if (destination === host && HINTED.has(op) && args.workspace_id === undefined && ids.length === 0)
         destination=await implicitDestination(host,args,envelope);
       // batch_create has no workspace_id. Bind a project only AFTER Mac
       // successfully opened a workspace for this same authenticated owner.
