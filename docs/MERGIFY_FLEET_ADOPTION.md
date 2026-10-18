@@ -100,7 +100,8 @@ Checked on 2026-10-17 with the calls of step 2.
 | memolabs-dev/uni-protocol | public | `UNI required checks` | `auto-merge.yml` (native auto-merge, no sensitive-path rule), active | adoption PR adds the template and deletes the workflow |
 | memolabs-dev/drop | public | `test`, `test-windows`, `test-macos` | ruleset `merge_queue` rule, merge commits only | NOT ADOPTED: needs the owner to drop the `merge_queue` rule or exempt Mergify, and to change CONTRIBUTING ("The maintainer reviews and merges", security review on protocol, relay, node, runner, capabilities, requester-mcp). Extra sensitive paths then: `apps/desktop/src-tauri/tauri.conf.json`, `*.entitlements`, `apps/desktop/updater.pub`; `merge_method: merge` |
 | memolabs-dev/lab-hub | public | `build` | none | NOTHING TO ADOPT: publish target of the private site, one commit, no pull request ever |
-| private memolabs-dev repos | private | - | emargo `auto-merge.yml` | BLOCKED on U-02 (Mergify Free on private repos, emargo canary) |
+| memolabs-dev/memo-founder-skills | private | `check (22)`, `check (24)` | none | ADOPTED 2026-10-18: #11 (merged by hand, gate file), positive canary #13 merged by `mergify[bot]` (owner-console E-11). Clears U-02: Mergify Free covers private repositories up to 5 users |
+| other private memolabs-dev repos | private | - | emargo `auto-merge.yml` | not adopted yet: same template, one PR each (merged by hand, gate file) |
 | guillaume-flambard/* | mostly private | - | lab-infra `private-green-merge` | BLOCKED on U-01 (Mergify not installed on the personal account) |
 
 ## Annexe : le document du 16 octobre 2026, conservé tel quel

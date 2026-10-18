@@ -125,7 +125,7 @@ owner are gate changes.
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
-| T-H1 | P0 | AC-H1 PASSED live (E-09); #175 deployed (E-10); open: a Mac test job that passes (dependencies the sandbox can reach) and a Mergify-merged PR on a private repository | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
+| T-H1 | P0 | DONE end to end (E-11): ChatGPT, Mac workspace, claim, Mac worktree, passing sandboxed test job, PR merged by Mergify on a private repository. Follow-up: dependency install phase for Mac jobs (Node, Go projects need it) | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
 | T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
 | T-Z3 | P1 | READY, owner run pending | Z3 | T-Z2 | golden prompt set and owner protocol (same PR); the owner runs it after the next deploy, which needs his go: the VPS runs 93e3bed, 40+ commits behind main |
@@ -259,3 +259,18 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   with routing on, allowlist 18, 17/17 projects allowed and available. From ChatGPT, `task_status`
   on CDKF#14 with no workspace: hub journal `outcome: ok` (was `project_not_allowed` from the VPS
   in E-09). Rollback: revert lab-infra#246 and redeploy (no database step).
+- E-11 (T-H1, 2026-10-18 11:55 to 12:04 Paris): the whole loop on a private repository.
+  memolabs-dev/memo-founder-skills (private, zero dependencies, `node --test`) adopted the fleet
+  Mergify policy: memo-founder-skills#11 (template, checks `check (22)` and `check (24)`,
+  sensitive-paths workflow) merged by the agent on the owner's explicit authorization in chat,
+  6e15f58. Mergify Free covers private repositories up to 5 users (https://mergify.com/pricing),
+  which clears U-02. From ChatGPT, one message: `batch_create` memo-founder-skills#12, claim on
+  the Mac, worktree `agent-12-2gys1440`, README line, `jobs_submit test` on the Mac in the
+  sandbox (`job_tt3GppVWQnbKHbT0`, succeeded, exit 0), commit 5a9fdfd, push, PR
+  memo-founder-skills#13 (README only, CI check (22) and (24) green). Mergify queued it on its own
+  (12:01:30 Paris) and merged it via the merge queue at 12:03:41 (`mergedBy`
+  app/mergify, squash 4dae04a); #12 closed as completed. Before that, `task_status` on CDKF#14 from
+  ChatGPT returned the lease (`state: released`, worker `mb.mac.ws_Bl8BU71Ki2Z_zlEV`) through the
+  deployed #175. Gap left: the Mac executor has no dependency install phase (the VPS one has,
+  network on, scripts off), so Node projects without `node_modules` and Go projects with modules
+  fail offline in the sandbox (horslot, E-09).
