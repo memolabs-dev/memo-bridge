@@ -81,13 +81,13 @@ owner are gate changes.
 
 | ID | P | Status | Req | Depends | What |
 |---|---|---|---|---|---|
-| T-D1 | P0 | IN_PROGRESS | M1 | - | narrow the sensitive set (D-1): 4 PRs open, owner merges once |
+| T-D1 | P0 | DONE | M1 | - | narrow the sensitive set (D-1): memo-bridge#165, cuesheet#85, problem-intelligence-engine#35, uni-protocol#38 merged; memo-bridge#156 (`deploy/` only) then merged by Mergify |
 | T-T1 | P0 | DONE | T1 | - | lot 1: 26 repositories transferred, Mac remotes updated (E-01) |
 | T-T2 | P1 | TODO | T1 | - | lot 2: VPS-image repositories, one at a time: transfer, CI image name, lab-infra stack image, autodeploy check |
 | T-T3 | P1 | TODO | T1 | T-T2 | lot 3: lab-infra |
 | T-M1 | P1 | TODO | M1 | T-D1 | adopt Mergify on transferred repositories that have CI (template + canaries) |
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
-| T-A1 | P0 | TODO | A1 | - | design and implement the single org rule in memo-bridge, issue_preflight.py and the lab-infra remote.json rendering (gate files: owner merges once) |
+| T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
 | T-H1 | P0 | IN_PROGRESS (other spec) | H1 | - | zero-friction Mac routing (#110, #114, #147, PR #148 held) |
 
@@ -100,6 +100,7 @@ owner are gate changes.
 | R-3 | `project_create` makes repositories by mistake | idempotent on name, owner principal only, audit journal, delete stays manual |
 | R-4 | Open PRs get absorbed by a wider policy | before each policy change, list newly eligible open PRs and hold them (done for #148, #132) |
 | R-5 | Shared `PROJECTS.md` written concurrently | one writer path under a lock, never a hand edit |
+| R-6 | A governance change breaks a consumer that reads it as text | before pinning a governance commit, run memo-bridge `coordinator.test.mjs` with `MEMO_BRIDGE_GOVERNANCE_ROOT` on it and parse it with the deployed module (E-04) |
 
 ## 06. Unknowns
 - U-1: GitHub App permission for repository creation in the org (Administration: write) is not
@@ -119,3 +120,33 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   odoo-safety-parts, podintel, reprisette, stasis, trufflo, valve, vulnforge, world-kernel.
   `gh api orgs/memolabs-dev/installations`: mergify `all`, memo-labs-automation `all`.
   `git ls-remote` and `git fetch` work on the new URLs.
+- E-02 (T-A1, 2026-10-18 00:41 Paris): .github#61 and lab-infra#241 merged (by the agent, on the
+  owner's explicit request in chat), `make deploy-memo-operator` from a clean checkout at 91539f6
+  after regenerating the stale catalog snapshot (`scripts/export-project-catalog.mjs`, 71
+  projects): ok=102 changed=10 failed=0. On the VPS: 17 clones under /var/lib/memo-runner/repos,
+  17 registry rows, 17 `remote.json` projects, hub and runner active, no warning in the journal.
+  Simulation with the deployed modules and live files: 17 of 17 projects allowed and available
+  for the owner's ChatGPT principal. Not yet checked from a real ChatGPT conversation.
+- E-03 (T-A1, 2026-10-18 08:5x Paris): lab-infra#242 merged on request, `make deploy-memo-bridge`
+  at 5216df2: ok=69 changed=1 failed=0; governance checkout at 836e39b, clean. Preflight at
+  836e39b with GitHub reachable: stasis, world-kernel, memo-bridge in scope; emargo refused
+  (private, not enrolled on the host); guillaume-flambard/lab-infra refused (outside the org).
+  Superseded by E-04: that pin broke the deployed coordinator and was rolled back.
+- E-04 (incident, 2026-10-18): the deployed coordinator (memo-bridge 93e3bed) reads the ledger
+  pre-filter as text: the `PUBLIC_ALLOWLIST = frozenset({...})` literal of issue_preflight.py
+  (`parsePublicAllowlist`). .github#61 had removed it. From the lab-infra#242 deploy (~08:53
+  Paris) `readPublicAllowlist` on the VPS returned `ledger_unavailable`, so every claim would have
+  been refused. Detected by memo-bridge CI on #167 (its job checks out .github main), confirmed on
+  the VPS with the deployed module, rolled back by lab-infra#243 (pin `7709984`, deployed ~09:09,
+  `readPublicAllowlist` ok, 7 repos). Journals: no `ledger_unavailable` and no claim in the window.
+  Fix: memolabs-dev/.github#62 restores the literal as a compatibility list (18 public repos) and
+  the "allowlist" word that issue-lease.mjs maps; memo-bridge coordinator tests 31/31 on it, 29/31
+  on 836e39b. Next: merge #62, re-pin, redeploy; later teach memo-bridge `ORG_REPO` and drop the
+  literal. Lesson recorded as R-6.
+- E-05 (T-A1, 2026-10-18 09:4x Paris): memolabs-dev/.github#62 merged (8a7f7ba). Before pinning,
+  on 8a7f7ba: memo-bridge `coordinator.test.mjs` 31/31 with `MEMO_BRIDGE_GOVERNANCE_ROOT` on it, and
+  the deployed VPS parser reads 18 repositories (R-6). lab-infra#244 (pin 8a7f7ba) merged after its
+  CI was green, `make deploy-memo-bridge` at a61c83b: ok=69 changed=1 failed=0. On the VPS:
+  governance at 8a7f7ba and clean; `readPublicAllowlist` ok with 18 repositories, all 17
+  `remote.json` projects in it; hub and runner active, no warning; no `ledger_unavailable` since
+  08:45. A real ChatGPT conversation is still the last check (AC-A1).
