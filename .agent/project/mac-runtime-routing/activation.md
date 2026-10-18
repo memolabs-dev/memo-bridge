@@ -44,6 +44,7 @@ policy, owner-private file, ledger, claim, worktree and sandboxed jobs.
 | T-R3 | installer bug from #148: the token check `{20,2048}` is refused by macOS `/bin/bash` 3.2 (RE_DUP_MAX 255), so the old script always died there | same | same test |
 | T-G1 | governance: `private_owner_allowlist.allowed()` read `Path.home()`, which the ledger child sets to its private gh directory, so every private repository was refused | memolabs-dev/.github#63 | its unit test; R-6 check below |
 | T-L1 | hub: `memo_bridge_mac_runtime_routing: true` and a `memo_bridge_version` that carries #117, #146, #148 and T-R1 | lab-infra PR (held for the owner) | lab-infra tests; R-6 check |
+| T-R5 | repository-scoped GitHub reads (`github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`) placed by the local registry answer: a repository the receiving host does not register is asked of the Mac, so a private repository answers its real data instead of `repo_not_registered` | `bridge/workspace-host-router.mjs` | same test file, 4 cases; owner-console E-13 |
 
 Before this change the installer also left the Mac runtime unusable even when run: its plist did
 not set `MEMO_BRIDGE_REMOTE_CONFIG`, `MEMO_BRIDGE_OWNER_SUB` or
@@ -110,4 +111,33 @@ Record the answers (ids, SHAs, PR link) in `evidence.md`; do not close #114 befo
 | R-M1 | The pin bump carries every memo-bridge commit since 93e3bed (42 on 2026-10-18) | lab-infra PR lists them; R-6 run on the candidate; deploy only on the owner's go |
 | R-M2 | Owner's gh token used for ledger and pushes on the Mac | 0600 files under a 0700 dir, never in env or plist; the App replaces it once configured on the Mac |
 | R-M3 | Discovery snapshot stale or wrong | it only places the workspace; the Mac authorizes again and refuses what it does not serve |
-| R-M4 | Two enrolled projects are registered under a name that is not their repository's (calendar-prototype is acadomia-calendrier, merge-gate is github-merge-gate) | an implicit call hinted only by the Issue goes to the VPS and is refused there; name the project (`project`) or open the workspace first |
+| R-M4 | Two enrolled projects are registered under a name that is not their repository's (calendar-prototype is acadomia-calendrier, merge-gate is github-merge-gate) | an implicit call hinted only by the Issue goes to the VPS and is refused there; name the project (`project`) or open the workspace first. The repository-scoped reads no longer depend on the name: they do not guess a project at all, they follow the local registry answer (T-R5) |
+
+## 6. Repository-scoped reads (T-R5)
+
+`github_issues`, `github_pull_requests`, `github_workflows` and `github_checks` take one argument,
+`repo` (`server/tools/github-tools.mjs`), and `github.resolveRepo` consults the registry of the host
+that received the call. On the VPS that registry holds the public pilot checkouts only, so a private
+repository answered `repo_not_registered` from ChatGPT even though the workspace, the worktree, the
+job and now the pull request all worked on the Mac (owner-console E-11). `github_create_pr` never had
+the problem: it carries a `worktree_id`, so the router already followed the Mac route of its
+workspace.
+
+Placement cannot come from the arguments, and it cannot come from the discovery snapshot either:
+`server/catalog-snapshot.mjs` whitelists metadata and deliberately exports no git origin, so there is
+no repository to project map on the VPS side, and adding one would put private origins on the VPS,
+which the CDKF rule refuses. The rule uses the one exact signal that exists instead: **the local
+registry answer**. When the receiving host answers `repo_not_registered`, the router asks the Mac, and
+only then. The Mac re-runs its own `resolveRepo`, `remoteRepoAllowed` against the owner policy and the
+owner enrolment, so nothing is granted by placement.
+
+What is deliberately *not* done:
+
+- no retry on a policy refusal (`project_not_allowed`, `forbidden`): the local answer is the real one;
+- no retry when the Mac is offline or probe-only: the local refusal stands, as before;
+- no retry for a malformed `repo`, for another tool, or when the opt-in is off;
+- the retry is journaled (`repo_scoped_read_routed_to_mac`), so the pair of a local
+  `repo_not_registered` and a Mac success reads as one decision, not as a bypass;
+- when the Mac answers a refusal of its own, that refusal replaces the local one, because it is the
+  more informative answer (the repository exists on the Mac but the policy or the enrolment refuses
+  it).

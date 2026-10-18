@@ -58,7 +58,10 @@ owner are gate changes.
 - REQ-A1: one rule replaces the three allowlists: a repository is workable from ChatGPT when it
   is a non-archived repository of `memolabs-dev`, registered in `PROJECTS.md`, and checked out on
   the host the request names. Private repositories are workable on the host that holds them; no
-  private source is copied to the other host.
+  private source is copied to the other host. It also covers the repository-scoped GitHub reads
+  (`github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`): they name only a
+  repository, so they are placed by the local registry answer, and a repository the receiving host
+  does not register is asked of the host that holds the checkouts (T-A1b).
 - REQ-A2: the owner can create a project from ChatGPT: `project_create(name, template?, host,
   visibility)` creates `memolabs-dev/<name>` (from a template with CI and the fleet Mergify
   files), adds the `PROJECTS.md` row on the Mac under the registry lock, clones it on the chosen
@@ -95,6 +98,10 @@ owner are gate changes.
   and labelled (same evidence as autoloop E-09/E-13).
 - AC-A1: from ChatGPT, `workspace_open` on a transferred repository that is in none of today's
   three lists succeeds, and on an archived or non-`memolabs-dev` repository it is refused.
+- AC-A1b: from ChatGPT, `github_issues`, `github_pull_requests`, `github_workflows` and
+  `github_checks` on a private Mac-only repository answer its real data instead of
+  `repo_not_registered`; on a repository of a VPS project they stay on the VPS; a repository the
+  receiving host does not register and the Mac is offline still answers `repo_not_registered`.
 - AC-A2: from ChatGPT, `project_create` then `batch_create` then a worker chat ends with a green
   PR merged by Mergify; a second `project_create` with the same name returns the same project.
 - AC-H1: from ChatGPT, `workspace_open(project, host=mac)` returns `host=mac` and a Mac worktree.
@@ -124,6 +131,7 @@ owner are gate changes.
 | T-M1 | P1 | TODO | M1 | T-D1 | adopt Mergify on transferred repositories that have CI (template + canaries) |
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
+| T-A1b | P0 | IN_REVIEW (code and offline tests E-13; deploy pending) | A1 | T-A1 | repository-scoped GitHub reads (`github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`) reach the Mac when the receiving host does not register the repository; before, they answered `repo_not_registered` on a private repository (seen after E-11) |
 | T-A2 | P0 | IN_REVIEW (design: section 09; code and offline tests E-12; runtime step R-A2 below) | A2 | T-A1 | `project_create` on the Mac runtime: App purposes repo_create/repo_admin, template repository `memolabs-dev/project-template` (owner publishes), registry writer under the `proj` lock, Mac clone, readiness and owner steps |
 | T-A3 | P1 | TODO | A1, A2 | T-A2 | close the gaps G-1 (Mac self-enrollment of created repositories, T-A3c) and G-2 (ORG_REPO pre-filter T-A3a, VPS registration without lab-infra hand edits T-A3b), section 09 |
 | T-H1 | P0 | DONE end to end (E-11): ChatGPT, Mac workspace, claim, Mac worktree, passing sandboxed test job, PR merged by Mergify on a private repository. Follow-up: dependency install phase for Mac jobs (Node, Go projects need it) | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
@@ -286,6 +294,20 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   `remote:toolsize` write 51 451 bytes (budget 53 289), operator 92 722 (budget 96 129).
   R-6 regression: `coordinator.test.mjs` 31/31 with governance 8a7f7ba, its literal parsed (18).
   Not run against GitHub: the template repository is not published and nothing was deployed.
+- E-13 (T-A1b, 2026-10-18, offline): the four repository-scoped reads take only `repo`
+  (`server/tools/github-tools.mjs`) and `resolveRepo` consults the registry of the host that
+  received the call, so on the VPS a private repository answered `repo_not_registered` from ChatGPT
+  (seen after E-11). `bridge/workspace-host-router.mjs` now places them on the local registry
+  answer: `repo_not_registered` from the receiving host and only that sends the read to the Mac,
+  which re-runs `resolveRepo`, `remoteRepoAllowed` against the owner policy and the owner enrolment.
+  No repository to project map is built: `server/catalog-snapshot.mjs` deliberately exports no git
+  origin, and exporting one would put private origins on the VPS. A policy refusal is never
+  retried, `github_create_pr` is untouched, a Mac that is offline or probe-only leaves the local
+  refusal standing, and the retry is journaled `repo_scoped_read_routed_to_mac`. Four cases added to
+  `tests/workspace-host-router.test.mjs` (18/18); full suite 821 tests, 820 pass, 0 fail, 1 skipped;
+  `test:deploy` 124 ok; build ok; smoke 67 tools with `roundTrip` and `multiHost`; `coordinator.test.mjs`
+  31/31 with `MEMO_BRIDGE_GOVERNANCE_ROOT` on the pinned 8a7f7ba (R-6); `remote:toolsize` unchanged
+  (read 22 967, write 51 451, operator 92 722). Not deployed; the VPS still runs fb463c3.
 
 ## 09. Design: `project_create` (T-A2, REQ-A2)
 
