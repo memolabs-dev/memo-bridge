@@ -15,7 +15,7 @@ let sharedHosts;
 // deps.hosts lets tests inject a host service with stubbed probes.
 export function registerHostTools(server, getRuntime, deps = {}) {
   const hosts = () => deps.hosts ?? (sharedHosts ??= createHostService());
-  const input = z.object({ host: z.enum(HOST_IDS).describe('mac or vps.') });
+  const input = z.object({ host: z.enum(HOST_IDS).describe('"mac" or "vps".') });
 
   // Authorization first; a refusal is journaled and nothing else runs.
   const guarded = (op, fn) => async (args = {}) => {
@@ -29,13 +29,13 @@ export function registerHostTools(server, getRuntime, deps = {}) {
   };
 
   server.registerTool('host_capabilities', {
-    description: 'What a machine can run: OS and architecture, versions of node, python3, git, gh (plus whether gh is authenticated, as a boolean), Swift/Xcode presence on macOS, Docker presence, which job recipe kinds (test/build/lint per toolchain) it is equipped for, and its declared roles. The machine running Memo Bridge is observed (cached 5 minutes); the other one reports declared roles plus host_status reachability only. Read-only.',
+    description: 'Use this when the owner asks what a machine can build or run («le VPS peut builder du Swift ?»): OS, node, python3, git, gh, Xcode, Docker, which test/build/lint recipes it supports, declared roles. Read-only.',
     inputSchema: input,
     annotations: readonly
   }, guarded('host_capabilities', async (rt, { host }) => hosts().capabilities(host, { localHost: rt.host })));
 
   server.registerTool('host_resources', {
-    description: 'How busy a machine is: load averages, CPU count, free/total memory, free disk of the private state directory and of the projects volume, running and queued runner jobs from the local store, and the job concurrency limit. For the remote machine only the host_status figures are reported. The VPS follows a production-first rule. Read-only.',
+    description: 'Use this when the owner asks how busy a machine is before heavy work: load, CPU, memory, free disk, running and queued jobs. The VPS serves production first. Read-only.',
     inputSchema: input,
     annotations: readonly
   }, guarded('host_resources', async (rt, { host }) => {

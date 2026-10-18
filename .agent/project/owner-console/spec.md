@@ -105,9 +105,11 @@ owner are gate changes.
   first calls share one workspace; under `enforce` the binding still refuses another conversation.
   Live: in ChatGPT, "travaille sur l'issue N de <projet>" reaches a PR with no `workspace_open`
   call in the transcript.
-- AC-Z2: every remote tool description starts with "Use this when", has a "Do not use" sentence
-  and describes every parameter; hints checked by the registry self-check; `remote:toolsize`
-  write stage at or below the 53 289 bytes measured on 2026-10-18 before the change.
+- AC-Z2: every remote tool description (runtime and operator) starts with "Use this", names the
+  sibling tool to use instead where the two could be confused, and every parameter is described
+  (tests/tool-metadata.test.mjs); hints checked by the registry self-check; `remote:toolsize` at
+  or below the bytes measured on 2026-10-18 before the change, for the read, write and operator
+  stages (`scripts/remote-toolsize-budget.json`, enforced by the same test).
 - AC-Z3: the owner ran the golden set after the deploy and recorded precision and recall per
   category in `docs/golden-prompts/RESULTS.md`; the target is in that file.
 
@@ -124,9 +126,9 @@ owner are gate changes.
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
 | T-H1 | P0 | IN_PROGRESS (other spec) | H1 | - | zero-friction Mac routing (#110, #114, #147, PR #148 held) |
-| T-Z1 | P0 | IN_REVIEW | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (PR feat/implicit-workspace) |
-| T-Z2 | P1 | TODO | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured |
-| T-Z3 | P1 | TODO | Z3 | T-Z2 | golden prompt set and owner protocol; owner run after the next deploy (deploy needs the owner's go: the VPS is 41+ commits behind main) |
+| T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
+| T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
+| T-Z3 | P1 | READY, owner run pending | Z3 | T-Z2 | golden prompt set and owner protocol (same PR); the owner runs it after the next deploy, which needs his go: the VPS runs 93e3bed, 40+ commits behind main |
 
 ## 05. Risks
 
@@ -189,3 +191,19 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   governance at 8a7f7ba and clean; `readPublicAllowlist` ok with 18 repositories, all 17
   `remote.json` projects in it; hub and runner active, no warning; no `ledger_unavailable` since
   08:45. A real ChatGPT conversation is still the last check (AC-A1).
+- E-06 (T-Z1, 2026-10-18 10:00 Paris): memo-bridge#169 merged by Mergify (9dd71f6) after CI
+  test (22) and test (24) green. Offline: 11 tests in tests/implicit-workspace.test.mjs through the
+  runtime tool handlers (open on first task_claim, reuse by claim, worktree, Issue, project; refusal
+  for another conversation, no session hint, non-opening tools, Issues outside the allowed
+  projects; one workspace for parallel first calls; enforce binding). The Mac routing session
+  (memo-bridge#171, merged right after) routes implicit calls to the Mac runtime for Mac-only
+  projects (`bridge/workspace-host-router.mjs` implicitDestination). Not yet deployed, not yet
+  seen from a real ChatGPT conversation (AC-Z1 live half).
+- E-07 (T-Z2, T-Z3, 2026-10-18): `pnpm run remote:toolsize` before (f1a066e) and after: read
+  22 978 to 22 967 bytes, write 53 289 to 50 057, write with operator tools 96 129 to 91 328;
+  remote server instructions 6 631 to 3 931 bytes. Every remote tool description starts with
+  "Use this" and every parameter is described (tests/tool-metadata.test.mjs). openWorldHint set
+  false on delegation_join, delegation_report and delegation_end (store only, no ledger call).
+  Golden set: 38 prompts (13 direct, 12 indirect, 4 chains, 9 negative), `node
+  scripts/golden-prompts.mjs --check` ok; protocol in docs/golden-prompts/PROTOCOL.md. The owner
+  run (AC-Z3) waits for the deploy.

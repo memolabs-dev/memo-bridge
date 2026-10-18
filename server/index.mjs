@@ -22,6 +22,7 @@ import { CONTEXT_TOOLS, registerContextTools } from './tools/context-tools.mjs';
 import { SOURCE_RECONCILE_TOOLS, registerSourceReconcileTools } from './tools/source-reconcile-tools.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
 import { withImplicitWorkspace } from './tools/implicit-workspace.mjs';
+import { PROJECTS_LIST_DEFINITION } from './tools/catalog-tools.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 import { DELEGATION_INSTRUCTIONS, LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
 
@@ -126,8 +127,7 @@ server.registerTool('bridge_info', {
 
 
 server.registerTool('projects_list', {
-  description: 'List/search registered Memo Labs projects from canonical PROJECTS.md. Read-only.',
-  inputSchema: z.object({ search: z.string().max(80).optional(), status: z.string().max(40).optional() }),
+  ...PROJECTS_LIST_DEFINITION,
   annotations: readonly
 }, async (args) => result(await listProjects(args)));
 
