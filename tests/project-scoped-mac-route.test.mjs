@@ -21,5 +21,6 @@ test('Mac-owned project batch creation follows an authenticated Mac workspace ac
   router=createWorkspaceHostRouter({enabled:true,stateDir:dir,requestAgent});
   assert.equal((await router.call('vps','batch_create',{args:{project:'clinical-data-knowledge-foundation'},principal:owner})).ok,true);
   assert.equal((await router.call('vps','batch_create',{args:{project:'clinical-data-knowledge-foundation'},principal:stranger})).error,'project_not_allowed');
-  assert.deepEqual(calls.map(x=>x[0]),['mac','mac','vps']);
+  // projects_list lookups (placement of calls without a workspace) are not the calls themselves.
+  assert.deepEqual(calls.filter(x=>x[1]!=='projects_list').map(x=>x[0]),['mac','mac','vps']);
 });

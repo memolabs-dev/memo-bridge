@@ -197,3 +197,24 @@ test('implicit call for a Mac-only project with the Mac offline: host_offline, n
   assert.equal(hosts.calls.filter(([host, op]) => host === 'vps' && op === 'task_next').length, 0);
   assert.equal(route.bindingsCount(), 0);
 });
+test('task_status, tasks_list and batch_create without a workspace follow a Mac-only project (CDKF#14 refusal, 2026-10-18)', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'mac-host-hinted-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const calls = [];
+  const requestAgent = async (host, op, envelope) => {
+    calls.push([host, op]);
+    if (host === 'vps' && op === 'projects_list')
+      return envelope.args.search === 'cuesheet' ? { ok:true, projects:[{ name:'cuesheet', available:true }] } : macOnlyListing(envelope.args.search);
+    return { ok:true };
+  };
+  const route = createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent });
+  await route.call('vps','task_status',{ args:{ issue:'memolabs-dev/clinical-data-knowledge-foundation#14' }, principal });
+  await route.call('vps','tasks_list',{ args:{ project:'emargo' }, principal });
+  await route.call('vps','batch_create',{ args:{ project:'emargo', tasks:[] }, principal });
+  await route.call('vps','task_status',{ args:{ issue:'memolabs-dev/cuesheet#2' }, principal });
+  assert.deepEqual(calls, [
+    ['vps','projects_list'], ['mac','task_status'],
+    ['vps','projects_list'], ['mac','tasks_list'],
+    ['vps','projects_list'], ['mac','batch_create'],
+    ['vps','projects_list'], ['vps','task_status']]);
+});
