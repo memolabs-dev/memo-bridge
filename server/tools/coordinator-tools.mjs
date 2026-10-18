@@ -172,7 +172,7 @@ export function registerCoordinatorTools(server, getService) {
   }, call('batchCreate'));
 
   server.registerTool('task_next', {
-    description: 'Use this when the owner asks for work without naming an Issue («prends la prochaine tâche», «avance sur le backlog de cuesheet») or pastes a batch sentence: claims the highest-priority free task (p0 first, then oldest) of a project, a batch or every allowed project, and returns its brief and steps. Already holding one: returns it. done: true when nothing is left.',
+    description: 'Use this when the owner asks for work without naming an Issue («prends la prochaine tâche», «avance sur le backlog de cuesheet») or pastes a batch sentence: claims the highest-priority free task (p0 first, then oldest) of a project, a batch or every allowed project, and returns its brief and steps. Already holding one: returns it. A task whose change a merged pull request already carried still carries agent:ready and comes with merged_references: read the Issue before working it. done: true when nothing is left.',
     inputSchema: z.object({ workspace_id: workspaceId, batch: batchId.optional(),
       project: z.string().max(80).optional().describe('Without batch: only this project, e.g. "cuesheet".'),
       ttl_seconds: ttl, client_request_id: clientRequestId }),

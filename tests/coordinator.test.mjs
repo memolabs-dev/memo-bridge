@@ -795,3 +795,34 @@ test('task_claim gives back the lease of the task it leaves behind', async t => 
   assert.deepEqual(again.released, [SECOND]);
   assert.deepEqual(await held(workspace), [SECOND]);
 });
+
+// A027, #196: an Issue whose change a merged pull request already carried stays open with
+// agent:ready, because the label is never retired by a merge. The rank cannot see it, so
+// task_next says so on the task instead of proposing silent work.
+test('task_next flags a task whose change a merged pull request already carried', async t => {
+  const stateDir = await tempStateDir(t);
+  const credentials = { token: async () => ({ token: `ghs_${'x'.repeat(30)}`, source: 'app' }) };
+  const scratchDir = join(stateDir, 'gh-pr');
+  const seen = [];
+  const item = ghItem('memolabs-dev/drop', 11, READY('p1'));
+  const searchIssues = async query => {
+    seen.push(query);
+    if (/is:pr/.test(query)) {
+      return { ok: true, total_count: 1, incomplete: false,
+        items: [{ ...item, number: 232, pull_request: {}, html_url: 'https://github.com/guillaume-flambard/lab-infra/pull/232' }] };
+    }
+    return { ok: true, total_count: 1, incomplete: false, items: [item] };
+  };
+  const { store, coordinator } = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: { searchIssues, credentials, scratchDir } });
+  t.after(() => store.close());
+
+  const opened = await coordinator.workspaceOpen({ project: 'drop', client_type: 'chatgpt' });
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const next = await coordinator.taskNext({ workspace_id: opened.workspace.workspace_id });
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(next.task.issue, 'memolabs-dev/drop#11');
+  // The doubt travels with the task the agent is about to work, never silently dropped.
+  assert.deepEqual(next.task.merged_references,
+    [{ number: 232, url: 'https://github.com/guillaume-flambard/lab-infra/pull/232' }]);
+  assert.ok(seen.some(q => q.includes('is:pr')), 'the reference check runs');
+});

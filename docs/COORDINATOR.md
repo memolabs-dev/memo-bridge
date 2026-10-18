@@ -66,7 +66,11 @@ A session that lost its context (compaction, crash, new conversation) calls `wor
   allowed projects (remote: `remote.json` `projects`; local: every catalog repository), p0 first,
   then oldest, claimed through `task_claim`'s path. A workspace with no live claim and no active
   worktree moves to the task's project (`workspace_retarget` in the journal). Every answer carries
-  `brief` (task, project, other conversations on the project, rules).
+  `brief` (task, project, other conversations on the project, rules). An Issue whose change a
+  merged pull request already carried still carries `agent:ready`, and no rank can see it: the
+  answer adds `merged_references` (merged pull requests naming the Issue) to the task, so the
+  agent reads the Issue before working it. A failed check leaves the field out and never drops the
+  task.
 - `session_binding: "enforce"`: see `docs/REMOTE_CHATGPT.md`.
 
 ## Delegation (child chats under a parent's task)
