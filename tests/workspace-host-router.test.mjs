@@ -238,3 +238,82 @@ test('project_create goes to the Mac when routing is on, and to the runtime it w
   await legacy.call('vps', 'project_create', { args: { name: 'relay-v2' }, principal });
   assert.deepEqual(off, ['vps']);
 });
+
+// Repository-scoped GitHub reads (owner console REQ-A1): `repo` is their only key, the discovery
+// snapshot exports no git origin, so placement follows the local registry answer. A repository the
+// receiving host does not register is asked of the Mac, which holds the owner's private checkouts
+// and re-checks its own registry, policy and enrolment. A policy refusal is never retried.
+function repoReadHosts({ vps, mac = { ok: true } } = {}) {
+  const calls = [];
+  const audit = [];
+  const requestAgent = async (host, op) => {
+    calls.push([host, op]);
+    if (host === 'vps') return vps;
+    if (mac === 'offline') return { ok: false, error: 'host_offline' };
+    if (mac === 'probe') return { ok: false, error: 'unsupported_op' };
+    return mac;
+  };
+  return { calls, audit, requestAgent };
+}
+async function repoReadRouter(t, hosts, enabled = true) {
+  const dir = await mkdtemp(join(tmpdir(), 'mac-host-repo-read-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  return createWorkspaceHostRouter({ enabled, stateDir: dir, requestAgent: hosts.requestAgent,
+    audit: event => hosts.audit.push(event) });
+}
+test('a repo-scoped read the local host does not register is answered by the Mac, and journaled', async t => {
+  const hosts = repoReadHosts({ vps: { ok: false, error: 'repo_not_registered' },
+    mac: { ok: true, repo: 'memolabs-dev/memo-founder-skills', pull_requests: [] } });
+  const route = await repoReadRouter(t, hosts);
+  const out = await route.call('vps', 'github_pull_requests', { args: { repo: 'memolabs-dev/memo-founder-skills' }, principal });
+  assert.equal(out.ok, true);
+  assert.equal(out.repo, 'memolabs-dev/memo-founder-skills');
+  assert.deepEqual(hosts.calls, [['vps', 'github_pull_requests'], ['mac', 'github_pull_requests']]);
+  assert.deepEqual(hosts.audit, [{ event: 'repo_scoped_read_routed_to_mac', op: 'github_pull_requests',
+    repo: 'memolabs-dev/memo-founder-skills', principal: 'oidc:owner123', outcome: 'ok' }]);
+  assert.equal(route.bindingsCount(), 0);
+});
+test('the Mac policy decides: its refusal replaces the local repo_not_registered', async t => {
+  const hosts = repoReadHosts({ vps: { ok: false, error: 'repo_not_registered' },
+    mac: { ok: false, error: 'project_not_allowed' } });
+  const route = await repoReadRouter(t, hosts);
+  const out = await route.call('vps', 'github_issues', { args: { repo: 'memolabs-dev/emargo' }, principal });
+  assert.deepEqual(out, { ok: false, error: 'project_not_allowed' });
+  assert.deepEqual(hosts.calls, [['vps', 'github_issues'], ['mac', 'github_issues']]);
+  assert.equal(hosts.audit.at(-1).outcome, 'project_not_allowed');
+});
+test('no repo-scoped retry on a policy refusal, a registered repo, another tool or without the opt-in', async t => {
+  for (const vps of [{ ok: false, error: 'project_not_allowed' }, { ok: false, error: 'forbidden' }, { ok: true, count: 0 }]) {
+    const hosts = repoReadHosts({ vps, mac: { ok: true } });
+    const route = await repoReadRouter(t, hosts);
+    const out = await route.call('vps', 'github_checks', { args: { repo: 'memolabs-dev/cuesheet' }, principal });
+    assert.equal(out.ok, vps.ok);
+    assert.deepEqual(hosts.calls, [['vps', 'github_checks']]);
+    assert.deepEqual(hosts.audit, []);
+  }
+  // github_create_pr is not in the set: it carries a worktree_id and follows its workspace route.
+  const cr = repoReadHosts({ vps: { ok: false, error: 'repo_not_registered' }, mac: { ok: true } });
+  await (await repoReadRouter(t, cr)).call('vps', 'github_create_pr', { args: { repo: 'memolabs-dev/emargo' }, principal });
+  assert.deepEqual(cr.calls, [['vps', 'github_create_pr']]);
+  // Without the opt-in the VPS answers exactly as before.
+  const off = repoReadHosts({ vps: { ok: false, error: 'repo_not_registered' }, mac: { ok: true } });
+  const out = await (await repoReadRouter(t, off, false)).call('vps', 'github_issues', { args: { repo: 'memolabs-dev/emargo' }, principal });
+  assert.deepEqual(out, { ok: false, error: 'repo_not_registered' });
+  assert.deepEqual(off.calls, [['vps', 'github_issues']]);
+  assert.deepEqual(off.audit, []);
+});
+test('a Mac that cannot answer leaves the local refusal standing, and a malformed repo is never sent', async t => {
+  for (const mac of ['offline', 'probe']) {
+    const hosts = repoReadHosts({ vps: { ok: false, error: 'repo_not_registered' }, mac });
+    const out = await (await repoReadRouter(t, hosts)).call('vps', 'github_workflows', { args: { repo: 'memolabs-dev/emargo' }, principal });
+    assert.deepEqual(out, { ok: false, error: 'repo_not_registered' });
+    assert.deepEqual(hosts.audit, []);
+  }
+  const bad = repoReadHosts({ vps: { ok: false, error: 'repo_not_registered' }, mac: { ok: true } });
+  const route = await repoReadRouter(t, bad);
+  await route.call('vps', 'github_issues', { args: { repo: 'emargo' }, principal });
+  await route.call('vps', 'github_issues', { args: {}, principal });
+  await route.call('vps', 'github_issues', { args: { repo: 'memolabs-dev/emargo/extra' }, principal });
+  assert.deepEqual(bad.calls, [['vps', 'github_issues'], ['vps', 'github_issues'], ['vps', 'github_issues']]);
+  assert.deepEqual(bad.audit, []);
+});
