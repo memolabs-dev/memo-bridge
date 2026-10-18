@@ -61,13 +61,22 @@ export function checkRun(args, policy, { baseEnv = SAFE_ENV } = {}) {
   return { ok: true, argv: [...argv], env, timeoutS, background };
 }
 
-// The working directory: inside the read roots, a directory, not a default-branch checkout.
-export async function checkCwd(policy, raw, { denylist, projects }) {
+// The working directory: inside the read roots, a directory, and for a write-capable command
+// not a default-branch checkout (D11).
+//
+// D11 protects tracked code from being edited outside the worktree flow. A read-only command
+// cannot edit it, and it has already passed the read roots and the secret denylist above; the
+// same classification already dispenses it from owner approval at the hub, so it is not sent
+// to the heavy flow for an inspection either (2026-10-18: `git status` in a checkout on main
+// answered `use_dev_flow`, while the owner console's golden prompt D13 expects it to run).
+// `readOnly` is passed by the caller, never guessed here: a script is never read-only.
+export async function checkCwd(policy, raw, { denylist, projects, readOnly = false }) {
   if (raw === undefined) return { ok: true, path: '/' };
   const at = await resolveOperatorPath(policy, raw, { access: 'r', denylist, projects });
   if (!at.ok) return at;
   const info = await lstat(at.path);
   if (!info.isDirectory()) return fail('not_a_directory');
+  if (readOnly) return { ok: true, path: at.path };
   const guard = await repositoryGuard(at.path, { projects });
   if (guard) return fail(guard.error, guard.project ? { project: guard.project, branch: guard.branch } : {});
   return { ok: true, path: at.path };
@@ -127,9 +136,9 @@ export function createOperatorExecTools(policy, { run = runArgv, jobs, projects 
       if (args.as_root === true) return fail('root_unavailable_on_host');
       let checked = checkRun(args, policy, { baseEnv });
       if (!checked.ok) return checked;
-      const cwd = await checkCwd(policy, args.cwd, { denylist, projects });
-      if (!cwd.ok) return cwd;
       const ro = readOnlyCommand(checked.argv);
+      const cwd = await checkCwd(policy, args.cwd, { denylist, projects, readOnly: ro !== null });
+      if (!cwd.ok) return cwd;
       if (ro) {
         const refused = await readOnlyPaths(policy, ro.paths, cwd.path, { denylist, projects });
         if (refused) return refused;
