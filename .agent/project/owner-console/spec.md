@@ -316,10 +316,54 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   and #180 with it; the pinned release has the four bridge files the roles preflight
   (`operator-root-cli.mjs`, `hub-state.mjs`, `public-listener.mjs`, `remote-config.mjs`) and
   `./scripts/tests.sh` is green (116 verts, 0 rouges) before the push. The PR is open without the
-  `safe-automerge` label, which is what lab-infra's `private_merge_gate.py` requires to merge any
-  PR, so nothing is deployed until the owner adds it: merging is the deploy (the VPS `autodeploy`
-  pulls every two minutes). Rollback is the previous pin, `fb463c3`. AC-A1b closes with one
+  `safe-automerge` label, and on this PR that label would change nothing: `ansible/` is a protected
+  path there, so the gate skips it and only a human merges it (measured in E-15, which also corrects
+  what a merge would do). Rollback is the previous pin, `fb463c3`. AC-A1b closes with one
   `github_pull_requests` call from ChatGPT on a private repository, once this pin runs.
+
+- E-15 (T-A1b and T-A2, 2026-10-18 15:05 to 15:25 Paris, on the owner's go, the three steps of
+  R-A2, before the VPS deploy):
+  - lab-infra#249 (branch `chore/memo-bridge-pin-181`, commit f4a4f24) pins `memo_bridge_version` at
+    2909e4c in one file and carries #179 and #180 with it. CI is green (`tests`: `hors-ligne` and
+    `ansible-dry-run` on disposable infrastructure; GitGuardian). Correction of E-14: merging that PR
+    is NOT the deploy, and `autodeploy` does not apply the pin. `/usr/local/bin/autodeploy` only
+    restarts docker stacks under /opt/stacks whose images start with our GHCR or local-registry
+    prefixes; the memo-bridge pin reaches the VPS only through `make deploy-memo-operator`. And no
+    bot can merge that PR at all: `ansible/` is a protected path in this repository's own
+    `scripts/private_merge_gate.py` (`PROTECTED`) and in `memolabs-dev/.github` `scripts/land.py`
+    (`^ansible/`), where the contract says those changes stay merged by a human; the `safe-automerge`
+    label is inert on it, and every earlier pin PR (#240 to #246) was in fact merged by
+    `guillaume-flambard` himself. Pre-deploy dry runs, from a detached worktree at f4a4f24:
+    `ansible-playbook --check --diff --tags memo-bridge,memo-operator` ok=100 changed=2 failed=0
+    (the `bridge` and `server` app dirs, then the two units), and the full `make check` ok=671
+    changed=13 failed=0, the other 11 being drift outside this pin. Store and hub state backed up
+    before anything: `coordinator.sqlite.pre-2909e4c` (online `.backup`, user_version 8, integrity
+    ok, 0600) and `/root/memo-bridge-hub-state.pre-2909e4c.tgz`.
+  - `memolabs-dev/project-template` published, from 2909e4c with the owner's `gh` login
+    (`node scripts/project-template.mjs publish --execute`): public, `is_template: true`,
+    `delete_branch_on_merge: true`, 8 files including the two workflows, first commit a6da972.
+    `check` was green before (8 files, `sensitive-paths.yml` byte-identical to memo-bridge's, one
+    required check named `check`).
+  - Mac runtime switched to 2909e4c with the App key, 15:23:39 to 15:24:29 (50 s, no launchd race):
+    `deploy/mac/install-runtime-agent.sh --owner-sub b31f467f-... --governance-ref 8a7f7ba
+    --from-registry --app-key <the App key path> --install`, 23 private projects re-enrolled,
+    `runtime_ready` with 58 ops, executor local, process running from
+    `runtime-releases/2909e4c...`, the probe plist kept as `.probe` for `--rollback`. The hub
+    accepted the hello with `ignored: 1`: the VPS still runs fb463c3, which does not know
+    `project_create`, and unknown agent ops are ignored (`bridge/hub.mjs`). The other conversation
+    that was working on CDKF through the Mac was not broken: its `task_release` (15:24:35) and
+    `workspace_close` (15:24:41) answered ok, and the hub journal has no error since 15:23.
+  - Wart found, behaviour unchanged: `runtime_ready` now reports
+    `github_auth: {app: configured, ledger: app, push: app}` because `startupCheck` names the App as
+    the source for ledger and push as soon as the App key is configured, without consulting
+    `MEMO_BRIDGE_GITHUB_APP_PURPOSES` (`server/integrations/github-app.mjs`). The call path itself
+    still refuses the App for those purposes and falls back to the owner's `gh` token, which is what
+    D-A2-2 wants (before the switch: `app_token_failed purpose ledger code app_config_invalid`, then
+    `app_token_fallback credential ledger-gh`). Candidate T-A3d: make that report honour the
+    purposes gate, so the log stops claiming `app` for a purpose that will fall back.
+  - Still to do after this entry: the owner merges lab-infra#249 (protected path, human only), then
+    `make deploy-memo-operator` from a clean worktree at the merged commit, then AC-A1b from ChatGPT
+    (`github_pull_requests` on a private repository) and R-A2 steps 4 to 7 for AC-A2.
 
 ## 09. Design: `project_create` (T-A2, REQ-A2)
 
