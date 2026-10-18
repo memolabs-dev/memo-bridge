@@ -125,7 +125,7 @@ owner are gate changes.
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
-| T-H1 | P0 | IN_PROGRESS (other spec) | H1 | - | zero-friction Mac routing (#110, #114, #147, PR #148 held) |
+| T-H1 | P0 | DEPLOYED on the VPS (E-08); Mac agent install and AC-H1 pending | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
 | T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
 | T-Z3 | P1 | READY, owner run pending | Z3 | T-Z2 | golden prompt set and owner protocol (same PR); the owner runs it after the next deploy, which needs his go: the VPS runs 93e3bed, 40+ commits behind main |
@@ -207,3 +207,23 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   Golden set: 38 prompts (13 direct, 12 indirect, 4 chains, 9 negative), `node
   scripts/golden-prompts.mjs --check` ok; protocol in docs/golden-prompts/PROTOCOL.md. The owner
   run (AC-Z3) waits for the deploy.
+- E-08 (T-H1, 2026-10-18 10:44 to 10:50 Paris): on the owner's go in chat, memolabs-dev/.github#63
+  merged (ff63ce8: the ledger reads the owner's home from the account, not `$HOME`) and
+  lab-infra#245 merged (4904ae7: `memo_bridge_mac_runtime_routing: true`, `memo_bridge_version`
+  9125909 = memo-bridge main with #171, #169, #172; governance pin unchanged at 8a7f7ba, since #63
+  only matters on a macOS runtime). R-6 before merging: memo-bridge 9125909
+  `coordinator.test.mjs` 31/31 on 8a7f7ba and on #63's head; `parsePublicAllowlist` of 9125909
+  and of the deployed 93e3bed read 18 repositories from both. Before the deploy: online backup of
+  the coordinator store (`coordinator.sqlite.pre-9125909`, user_version 7, integrity ok, 0600)
+  and of the hub state (`/root/memo-bridge-hub-state.pre-9125909.tgz`); a scoped dry run
+  (ok=102 changed=6 failed=0). `make deploy-memo-operator` from a clean detached worktree of
+  4904ae7: ok=103 changed=7 failed=0. On the VPS: hub and runner restarted 10:49 and active, no
+  warning or error in their journals, store migrated to user_version 8, `remote.json` with the
+  17 projects and `mac_runtime_routing: enabled`, `readPublicAllowlist` ok with 18, the 17
+  projects registered, available, in the allowlist and allowed for the owner principal (deployed
+  modules, live files), 0 `ledger_unavailable` since 08:45, governance 8a7f7ba clean, the Mac
+  probe agent connected. Operator agents not restarted: operator, agent and protocol code are
+  identical between 93e3bed and 9125909. Rollback: revert lab-infra#245, stop the runner,
+  `PRAGMA user_version = 7` on the store (the v8 tables are additive), redeploy from the revert
+  commit. Still open: the Mac runtime agent install (owner) and AC-H1 from a real ChatGPT
+  conversation.
