@@ -9,13 +9,13 @@
   "todos": {
     "done": [
       "T-T1",
-      "T-D1",
-      "T-A1 (public)"
+      "T-D1"
     ],
     "in_progress": [
+      "T-A1 (ledger fix memolabs-dev/.github#62, then re-pin and redeploy)",
       "T-H1 (zero-friction-mac-routing spec; #148 merged)"
     ],
-    "next": "owner checks from ChatGPT; then T-A2 project_create (needs App Administration write, U-1)",
+    "next": "merge .github#62, re-pin governance in lab-infra, deploy memo-bridge, then a real ChatGPT check",
     "blocked": []
   },
   "acceptance": {
@@ -34,5 +34,8 @@
   "held_prs": [
     "memo-bridge#132 (Source Engine poller)"
   ],
-  "ready_for_manual_acceptance": false
+  "ready_for_manual_acceptance": false,
+  "incidents": [
+    "E-04 2026-10-18 ledger_unavailable on the VPS for ~16 min, rolled back, no claim affected"
+  ]
 }
