@@ -77,6 +77,25 @@ receives (operator tools excluded): at a8f5a60 on 2026-10-15, 28 tools in 20 527
 stage. Rerun the script for the current figures. No ChatGPT limit is
 documented; the TODO-P5-33 window checks that every tool shows after Refresh.
 
+## Zero ceremony: the conversation's workspace (owner console REQ-Z1)
+
+The owner never has to say "Memo Bridge", "workspace", "claim" or "worktree". A tool that needs a
+workspace and is called without `workspace_id` (`task_claim`, `task_next`, `task_renew`,
+`task_release`, `task_complete`, `task_checkpoint`, `workspace_status`, `workspace_recover`,
+`workspace_close`, `worktree_create`, `jobs_submit`, `github_create_pr`, the delegation tools) runs
+in the conversation's own workspace, the way operator tools already did (D-R14):
+
+- only a workspace of the owner bound to this conversation (`openai/session` hash) is ever chosen:
+  the one holding the `claim_id`, owning the `worktree_id`, holding a claim on the `issue`, on the
+  project named or implied by the Issue's repository, else the most recent one;
+- only `task_claim` and `task_next` open one when the conversation has none, through
+  `workspace_open` with all its guards; the journal records `workspace_open` and
+  `workspace_auto_open`;
+- the result carries `implicit_workspace {workspace_id, project, opened}`;
+- otherwise the answer is `workspace_required` with one `next_step`, and nothing is opened.
+
+`workspace_open` still works and an explicit `workspace_id` is checked exactly as before.
+
 ## Conductor workflow: one chat splits, N chats work (TODO-P5-50 to 52)
 
 ChatGPT cannot open conversations by itself (driving ChatGPT programmatically is against the

@@ -64,6 +64,28 @@ owner are gate changes.
   files), adds the `PROJECTS.md` row on the Mac under the registry lock, clones it on the chosen
   host, and returns a workspace ready for `batch_create`. Idempotent on `name`.
 - REQ-H1: `workspace_open(project, host=mac|vps)` executes on that host (zero-friction spec).
+- REQ-Z1 (zero ceremony, owner 2026-10-18 09:45: "je devrais même pas avoir besoin de citer Memo
+  Bridge ou de parler de workspace"): a tool that needs a workspace and gets no `workspace_id` runs
+  in the conversation's own workspace, as the operator tools already do. Chosen server-side
+  (`server/tools/implicit-workspace.mjs`, coordinator `conversationWorkspace`), only among this
+  principal's active workspaces bound to this conversation's session hash: the one holding
+  `claim_id`, owning `worktree_id`, holding a claim on `issue`, on the hinted project (`project`,
+  or the project whose origin is the Issue's repository), else the most recent. Only `task_claim`
+  and `task_next` may open one, through `workspace_open` with every guard (authorization, project
+  allowlist, session binding, delegation scope), journaled `workspace_auto_open`. No session hint,
+  another conversation's workspace, or an Issue outside the allowed projects: `workspace_required`
+  with one `next_step`, nothing opened. An explicit `workspace_id` is passed through unchanged.
+  `workspace_open` stays available, no longer a required first call.
+- REQ-Z2: intent-first tool metadata (OpenAI Apps SDK, "Optimize metadata",
+  https://developers.openai.com/apps-sdk/guides/optimize-metadata): each remote tool description
+  starts with "Use this when..." in the owner's words (French and English), says when not to use
+  it, documents every parameter with an example, and states `readOnlyHint`, `destructiveHint`,
+  `openWorldHint` truthfully. The server instructions keep only what the model needs to choose and
+  chain tools; the server, not the text, enforces the rules. The remote `tools/list` size is
+  measured (`pnpm run remote:toolsize`) before and after, and does not grow.
+- REQ-Z3: a golden prompt set in French (direct, indirect, negative, end-to-end chains) with the
+  expected tool for each, stored in the repository, and a manual protocol the owner runs in
+  ChatGPT after a deploy to record precision and recall.
 
 ## 03. Acceptance criteria
 
@@ -76,6 +98,18 @@ owner are gate changes.
 - AC-A2: from ChatGPT, `project_create` then `batch_create` then a worker chat ends with a green
   PR merged by Mergify; a second `project_create` with the same name returns the same project.
 - AC-H1: from ChatGPT, `workspace_open(project, host=mac)` returns `host=mac` and a Mac worktree.
+- AC-Z1: offline (tests/implicit-workspace.test.mjs, through the runtime tool handlers): a
+  `task_claim` without `workspace_id` opens one workspace bound to the conversation and claims;
+  later calls reuse it; another conversation, a call without session hint, a non-opening tool and
+  an Issue outside the allowed projects open nothing and answer `workspace_required`; parallel
+  first calls share one workspace; under `enforce` the binding still refuses another conversation.
+  Live: in ChatGPT, "travaille sur l'issue N de <projet>" reaches a PR with no `workspace_open`
+  call in the transcript.
+- AC-Z2: every remote tool description starts with "Use this when", has a "Do not use" sentence
+  and describes every parameter; hints checked by the registry self-check; `remote:toolsize`
+  write stage at or below the 53 289 bytes measured on 2026-10-18 before the change.
+- AC-Z3: the owner ran the golden set after the deploy and recorded precision and recall per
+  category in `docs/golden-prompts/RESULTS.md`; the target is in that file.
 
 ## 04. Work graph
 
@@ -90,6 +124,9 @@ owner are gate changes.
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
 | T-H1 | P0 | IN_PROGRESS (other spec) | H1 | - | zero-friction Mac routing (#110, #114, #147, PR #148 held) |
+| T-Z1 | P0 | IN_REVIEW | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (PR feat/implicit-workspace) |
+| T-Z2 | P1 | TODO | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured |
+| T-Z3 | P1 | TODO | Z3 | T-Z2 | golden prompt set and owner protocol; owner run after the next deploy (deploy needs the owner's go: the VPS is 41+ commits behind main) |
 
 ## 05. Risks
 
@@ -100,6 +137,8 @@ owner are gate changes.
 | R-3 | `project_create` makes repositories by mistake | idempotent on name, owner principal only, audit journal, delete stays manual |
 | R-4 | Open PRs get absorbed by a wider policy | before each policy change, list newly eligible open PRs and hold them (done for #148, #132) |
 | R-5 | Shared `PROJECTS.md` written concurrently | one writer path under a lock, never a hand edit |
+| R-7 | The implicit workspace widens who can act on a workspace | only workspaces bound to the caller's own session hash are chosen; opening goes through `workspace_open` and its guards; explicit ids keep every check; no session hint, nothing chosen (AC-Z1) |
+| R-8 | Shorter instructions make the model skip a needed step | the server refuses with one `next_step`; golden set measures it (AC-Z3) |
 | R-6 | A governance change breaks a consumer that reads it as text | before pinning a governance commit, run memo-bridge `coordinator.test.mjs` with `MEMO_BRIDGE_GOVERNANCE_ROOT` on it and parse it with the deployed module (E-04) |
 
 ## 06. Unknowns

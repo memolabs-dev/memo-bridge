@@ -21,6 +21,7 @@ import { SOURCE_TOOLS, registerSourceTools } from './tools/source-tools.mjs';
 import { CONTEXT_TOOLS, registerContextTools } from './tools/context-tools.mjs';
 import { SOURCE_RECONCILE_TOOLS, registerSourceReconcileTools } from './tools/source-reconcile-tools.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
+import { withImplicitWorkspace } from './tools/implicit-workspace.mjs';
 import { agentsObserve, focusStatus, guardianReport, liveState } from './observers.mjs';
 import { DELEGATION_INSTRUCTIONS, LEARNING_INSTRUCTIONS, MEMORY_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS } from './instructions.mjs';
 
@@ -175,7 +176,7 @@ server.registerTool('observe_focus', {
 // Phase 2 and 3 modules. Each one calls getRuntime() lazily, so the read-only tools above keep
 // working when the private state directory is unavailable.
 // Their calls are counted for the learning review (#38, server/tools/learning-hook.mjs).
-const counted = withLearning(server, getRuntime);
+const counted = withLearning(withImplicitWorkspace(server, getRuntime), getRuntime);
 registerCoordinatorTools(counted, getRuntime);
 registerWorktreeTools(counted, getRuntime);
 registerJobTools(counted, getRuntime);

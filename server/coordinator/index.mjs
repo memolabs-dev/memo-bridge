@@ -1539,5 +1539,74 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   api.learningTick = async (info = {}, rawMeta = null) => {
     try { return await learning.tick(info ?? {}, requestMeta(rawMeta)); } catch { return null; }
   };
+
+  // Owner console REQ-Z1 (zero ceremony): the workspace a tool call means when it names none,
+  // called by server/tools/implicit-workspace.mjs before the tool runs. Not a tool: it decides
+  // nothing the tool would not check again, it only fills workspace_id. Only a workspace of this
+  // principal bound to this conversation (session hash) is ever chosen, in this order: the one
+  // holding claim_id, the one owning worktree_id, the conversation's workspace holding a claim on
+  // the issue, the one on the hinted project (project, or the project whose GitHub origin is the
+  // issue's repository), the most recent one when there is no hint. With open: true (task_claim,
+  // task_next) and none found, one is opened on the hinted project through api.workspaceOpen, so
+  // every workspace_open guard applies (authorization, project allowlist, session binding,
+  // delegation) and the opening is journaled. Without a session hint nothing is chosen.
+  const opening = new Map(); // `${session}|${project}` -> pending open, so parallel calls share one
+  async function projectOfIssue(issue) {
+    let projects;
+    try { projects = await listProjectRepos(); } catch { return null; }
+    if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
+    for (const p of projects) {
+      const origin = await projectRemote(p);
+      if (origin && origin.toLowerCase() === issue.repo.toLowerCase()) return p.name;
+    }
+    return null;
+  }
+  api.conversationWorkspace = async (raw = {}, rawMeta = null) => {
+    const args = raw ?? {};
+    const meta = requestMeta(rawMeta);
+    const session = meta.client_session;
+    const required = next => ({ ok: false, error: 'workspace_required', next_step: next });
+    if (!session) return required('call workspace_open {"project":"<name from projects_list>"}, then repeat this call with its workspace_id');
+    try {
+      const issue = parseIssueRef(args.issue);
+      const found = await read(repo => {
+        const mine = w => w && w.status === 'active' && ownsWorkspace(principal, w) && w.client_session === session;
+        const claim = typeof args.claim_id === 'string' && CLAIM_RE.test(args.claim_id) ? repo.getClaim(args.claim_id) : null;
+        const byClaim = claim ? repo.getWorkspace(claim.workspace_id) : null;
+        if (mine(byClaim)) return { workspace: byClaim, source: 'claim' };
+        const worktree = typeof args.worktree_id === 'string' ? repo.getWorktree(args.worktree_id) : null;
+        const byWorktree = worktree ? repo.getWorkspace(worktree.workspace_id) : null;
+        if (mine(byWorktree)) return { workspace: byWorktree, source: 'worktree' };
+        const ours = repo.listWorkspaces({ principal: principal.id, status: 'active', limit: MAX_LIST }).filter(mine);
+        const holding = issue ? ours.find(w => repo.claimsOf(w.id, 'claimed').some(c => c.issue_ref === issue.ref)) : null;
+        return holding ? { workspace: holding, source: 'claim' } : { ours };
+      });
+      if (found.workspace) return { ok: true, workspace_id: found.workspace.id, project: found.workspace.project_id, opened: false, source: found.source };
+      const project = typeof args.project === 'string' && args.project ? args.project : issue ? await projectOfIssue(issue) : null;
+      const match = project ? found.ours.find(w => w.project_id === project) : found.ours[0];
+      if (match) return { ok: true, workspace_id: match.id, project: match.project_id, opened: false, source: 'conversation' };
+      if (args.open !== true) return required(project
+        ? `nothing open on ${project} in this conversation yet: claim its task first (task_claim with the Issue, or task_next)`
+        : 'nothing open in this conversation yet: name the project or the Issue (task_claim, task_next with project)');
+      // task_next without a project takes the next task of any allowed project and moves its
+      // workspace there: open it on the first allowed project.
+      const target = project ?? (args.any_project === true && remotePolicy.configured ? remotePolicy.projects[0] ?? null : null);
+      if (!target) return required(issue ? `the Issue ${issue.ref} belongs to no project you may work on` : 'name the project (projects_list)');
+      const key = `${session}|${target}`;
+      if (!opening.has(key)) {
+        const pending = api.workspaceOpen({ project: target, client_label: 'auto',
+          host: remote ? (remotePolicy?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST) : host }, rawMeta)
+          .finally(() => opening.delete(key));
+        opening.set(key, pending);
+      }
+      const opened = await opening.get(key);
+      if (!opened?.ok) return opened ?? fail('store_unavailable');
+      await note('workspace_auto_open', 'ok', null, { workspace_id: opened.workspace.workspace_id }, meta);
+      return { ok: true, workspace_id: opened.workspace.workspace_id, project: opened.workspace.project, opened: true, source: 'opened',
+        ...(opened.memory_snapshot ? { memory_snapshot: opened.memory_snapshot } : {}) };
+    } catch {
+      return fail('store_unavailable');
+    }
+  };
   return Object.freeze(api);
 }
