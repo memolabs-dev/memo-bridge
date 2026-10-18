@@ -6,7 +6,8 @@
 // scripts (package.json scripts, Makefile targets, test suites…) on the owner's machine.
 // Whoever can write files in the worktree (worktree_write_file) and submit a job can therefore
 // run code there. That code is bounded by the job sandbox (sandbox.mjs: worktree writes only,
-// loopback network only, no private data or credentials), and jobs_submit requires the
+// loopback network only, no private data or credentials; the dependency install before it has
+// HTTPS but cannot read the owner's home), and jobs_submit requires the
 // runner:execute capability, an owned active workspace and a live claim on the worktree's
 // Issue. With MEMO_BRIDGE_JOB_SANDBOX=off a job is owner-equivalent.
 import { closeSync, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
@@ -141,4 +142,40 @@ export function detectInstall(worktreePath) {
   } catch { manager = null; }
   const pnpm = manager === 'pnpm' || lockfiles.includes('pnpm-lock.yaml');
   return pnpm ? { manager: 'pnpm', argv: INSTALL_ARGV.pnpm } : { manager: 'npm', argv: INSTALL_ARGV.npm };
+}
+
+// Dependency install on the Mac (local executor, phase 1 of a job, job-runner.mjs): the VPS
+// list unchanged, plus Go's module download. Never a shell; the runner runs a shape only when
+// it is in this list.
+export const LOCAL_INSTALL_ARGV = Object.freeze({
+  ...INSTALL_ARGV,
+  go: Object.freeze(['go', 'mod', 'download'])
+});
+
+// Go: `go mod download` (no arguments: the modules needed to build and test the main module's
+// packages, `go help mod download`) when go.mod is a regular file in the worktree. A `vendor`
+// entry means the module builds from its vendored copy, so there is nothing to download.
+export function detectGoInstall(worktreePath) {
+  if (!regularFile(worktreePath, 'go.mod')) return { skip: 'no_go_mod' };
+  if (entryExists(worktreePath, 'vendor')) return { skip: 'vendored' };
+  return { manager: 'go', argv: LOCAL_INSTALL_ARGV.go };
+}
+
+// What the local install phase does for a recipe: Go's download when the recipe runs `go`,
+// the VPS decision (detectInstall) otherwise.
+export function detectLocalInstall(worktreePath, recipeArgv) {
+  return recipeArgv?.[0] === 'go' ? detectGoInstall(worktreePath) : detectInstall(worktreePath);
+}
+
+const sameArgv = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((t, i) => t === b[i]);
+
+// The install plan the runner executes: { manager, argv } (a copy of a pinned shape),
+// { skip: reason }, or { error: 'install_not_allowed' } when detection produced an argv outside
+// LOCAL_INSTALL_ARGV. `detect` is replaceable for tests.
+export function planLocalInstall(worktreePath, recipeArgv, { detect = detectLocalInstall } = {}) {
+  let plan;
+  try { plan = detect(worktreePath, recipeArgv); } catch { return { skip: 'install_not_detected' }; }
+  if (!plan?.argv) return { skip: typeof plan?.skip === 'string' ? plan.skip : 'nothing_to_install' };
+  if (!Object.values(LOCAL_INSTALL_ARGV).some(shape => sameArgv(shape, plan.argv))) return { error: 'install_not_allowed' };
+  return { manager: plan.manager, argv: [...plan.argv] };
 }

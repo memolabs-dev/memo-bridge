@@ -14,6 +14,16 @@
 // - the environment is an allow-list; HOME and TMPDIR point at the per-job folder, and Git runs
 //   without the owner's global or system configuration (no credential helper, no identity).
 //
+// A job may first run a dependency install (job-runner.mjs, recipes.mjs planLocalInstall), in a
+// second profile, 'install', that differs from the recipe's only in two places:
+// - network: outbound to port 443 only (package registries are HTTPS), DNS through
+//   mDNSResponder, never loopback;
+// - reads: nothing under the owner's home except the worktree, the job folder and the toolchain
+//   roots derived from PATH (toolRoots); the denylist above still applies on top. The install
+//   has the network and may run repository-controlled code (.pnpmfile.cjs is not a script, so
+//   --ignore-scripts does not stop it), so it must not see what the recipe may read offline.
+// Writes, services, signals, the state directory and the .git link are as for the recipe.
+//
 // The profile text depends only on how many paths it names; every path is passed with -D, so
 // no path is ever spliced into the profile.
 //
@@ -22,9 +32,13 @@
 // refused there unless that switch is set.
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { platform, userInfo } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+export const SANDBOX_PHASES = Object.freeze(['recipe', 'install']);
+// getaddrinfo talks to mDNSResponder through this socket (/var/run is a link to /private/var/run);
+// without it the install phase resolves nothing (checked with sandbox-exec on macOS 27).
+export const MDNS_SOCKET = '/private/var/run/mDNSResponder';
 
 // Folders and files under the owner's home that a job never reads.
 export const HOME_DENY_READ = Object.freeze([
@@ -74,8 +88,28 @@ export function worktreeCommonDir(worktree) {
   }
 }
 
+// Folders under the owner's home the install phase may read: for each PATH folder under home,
+// its parent when that parent is at least two levels below home (~/.nvm/versions/node/v24/bin
+// gives ~/.nvm/versions/node/v24, ~/Library/pnpm/bin gives ~/Library/pnpm), otherwise the
+// folder itself (~/.local/bin stays ~/.local/bin, never ~/.local; ~/bin stays ~/bin). Folders
+// outside home need nothing: only home is closed. Real paths, sorted, without duplicates.
+export function toolRoots(pathVar, home) {
+  const h = real(home);
+  const under = p => p.startsWith(`${h}/`);
+  const roots = new Set();
+  for (const entry of String(pathVar ?? '').split(':')) {
+    if (!isAbsolute(entry)) continue;
+    const dir = real(entry);
+    if (!under(dir)) continue;
+    const parent = dirname(dir);
+    roots.add(under(parent) && relative(h, parent).split(sep).length >= 2 ? parent : dir);
+  }
+  return [...roots].sort();
+}
+
 // Paths of the sandbox for one job. All of them are real paths (Seatbelt matches resolved paths).
-export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home = userInfo().homedir }) {
+// `path` (the job's PATH) only matters to the install phase (toolRoots).
+export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home = userInfo().homedir, path = '' }) {
   const wt = real(worktree);
   const common = worktreeCommonDir(wt);
   const denyRead = new Set();
@@ -93,6 +127,8 @@ export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home =
     jobTmp: real(jobTmp),
     gitCommon: common,
     stateDir: real(stateDir),
+    home: real(home),
+    toolRoots: toolRoots(path, home),
     // A denied folder that contains the worktree is fine: the worktree is allowed again after it.
     denyRead: [...denyRead].filter(p => p !== '/' && p !== wt).sort()
   };
@@ -100,16 +136,51 @@ export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home =
 
 // Seatbelt rules are matched last-rule-wins: broad denials first, then the exceptions, then the
 // denials no exception may override (the state directory, the .git link).
-export function sandboxProfile({ denyReadCount, gitCommon }) {
+//
+// phase 'recipe' (the default) is the profile every job ran before the install phase existed,
+// unchanged. phase 'install' (see the header) needs the HOME and MDNS_SOCKET parameters and
+// toolRootCount TOOL_ROOT_<i> parameters.
+export function sandboxProfile({ denyReadCount, gitCommon, phase = 'recipe', toolRootCount = 0 }) {
+  if (!SANDBOX_PHASES.includes(phase)) throw new Error('sandbox_phase_invalid');
+  const install = phase === 'install';
   const denyRead = Array.from({ length: denyReadCount }, (_, i) => `(subpath (param "DENY_READ_${i}"))`).join(' ');
-  return [
-    '(version 1)',
-    '(allow default)',
+  const tools = Array.from({ length: install ? toolRootCount : 0 }, (_, i) => `(subpath (param "TOOL_ROOT_${i}"))`).join(' ');
+  const network = install ? [
+    // Network: HTTPS to remote hosts (package registries), DNS through mDNSResponder, never
+    // loopback (the owner's local services). Seatbelt filters hosts only as * or localhost.
+    '(deny network-outbound)',
+    '(allow network-outbound (remote ip "*:443"))',
+    '(deny network-outbound (remote ip "localhost:*"))',
+    '(allow network-outbound (remote unix-socket (subpath (param "WORKTREE"))) (remote unix-socket (subpath (param "JOB_TMP"))) ' +
+      '(remote unix-socket (literal (param "MDNS_SOCKET"))))'
+  ] : [
     // Network: loopback only. No remote IP, no DNS, no Unix socket outside the job's folders.
     '(deny network-outbound)',
     '(allow network-outbound (remote ip "localhost:*"))',
     '(allow network-outbound (remote unix-socket (subpath (param "WORKTREE"))) (remote unix-socket (subpath (param "JOB_TMP"))))',
-    '(deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.mDNSResponder"))',
+    '(deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.mDNSResponder"))'
+  ];
+  const reads = install ? [
+    // Reads: nothing under the owner's home, except the toolchains on PATH; then the private
+    // data denylist, which no tool root re-opens; then the worktree and the job folder. The
+    // repository's Git data is not needed to install and stays closed.
+    '(deny file-read-data file-read-xattr (subpath (param "HOME")))',
+    ...(tools ? [`(allow file-read-data file-read-xattr ${tools})`] : []),
+    ...(denyReadCount ? [`(deny file-read-data file-read-xattr ${denyRead})`] : []),
+    '(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP")))'
+  ] : [
+    // Reads: no private data, except the worktree, the job folder and the repository's Git data.
+    // Only contents, listings and extended attributes are denied: metadata (lstat) stays
+    // allowed, because toolchains resolve real paths through these folders (the worktree lives
+    // under the worktrees root, itself under ~/memolabs).
+    ...(denyReadCount ? [`(deny file-read-data file-read-xattr ${denyRead})`] : []),
+    // (Same operations as the denial: Seatbelt does not let a wildcard allow override them.)
+    `(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP"))${gitCommon ? ' (subpath (param "GIT_COMMON"))' : ''})`
+  ];
+  return [
+    '(version 1)',
+    '(allow default)',
+    ...network,
     // Nothing started outside the sandbox: no launchd job, no Launch Services, no Apple Events.
     '(deny job-creation)',
     // Signals only inside the sandbox: a job can stop its own children, never the owner's other
@@ -126,13 +197,7 @@ export function sandboxProfile({ denyReadCount, gitCommon }) {
     '(deny file-write*)',
     '(allow file-write* (subpath (param "WORKTREE")) (subpath (param "JOB_TMP")) (literal "/dev/null") (literal "/dev/zero") ' +
       '(literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))',
-    // Reads: no private data, except the worktree, the job folder and the repository's Git data.
-    // Only contents, listings and extended attributes are denied: metadata (lstat) stays
-    // allowed, because toolchains resolve real paths through these folders (the worktree lives
-    // under the worktrees root, itself under ~/memolabs).
-    ...(denyReadCount ? [`(deny file-read-data file-read-xattr ${denyRead})`] : []),
-    // (Same operations as the denial: Seatbelt does not let a wildcard allow override them.)
-    `(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP"))${gitCommon ? ' (subpath (param "GIT_COMMON"))' : ''})`,
+    ...reads,
     // Never: the state directory (store, journal, logs), and the worktree's .git link, which
     // decides which repository and configuration the server's own Git commands use.
     '(deny file-read-data file-read-xattr file-write* (subpath (param "STATE_DIR")))',
@@ -141,13 +206,23 @@ export function sandboxProfile({ denyReadCount, gitCommon }) {
   ].join('\n');
 }
 
-// [command, args] that runs `argv` inside the sandbox.
-export function sandboxCommand(argv, paths) {
+// [command, args] that runs `argv` inside the sandbox of `phase` ('recipe' or 'install').
+export function sandboxCommand(argv, paths, { phase = 'recipe' } = {}) {
+  if (!SANDBOX_PHASES.includes(phase)) throw new Error('sandbox_phase_invalid');
+  const install = phase === 'install';
+  // The install closes the owner's home: it needs a real one, never the root.
+  if (install && (!isAbsolute(paths.home ?? '') || paths.home === '/')) throw new Error('sandbox_home_invalid');
   const params = ['-D', `WORKTREE=${paths.worktree}`, '-D', `WORKTREE_GIT=${paths.worktreeGit}`, '-D', `JOB_TMP=${paths.jobTmp}`,
     '-D', `STATE_DIR=${paths.stateDir}`];
-  if (paths.gitCommon) params.push('-D', `GIT_COMMON=${paths.gitCommon}`);
+  if (paths.gitCommon && !install) params.push('-D', `GIT_COMMON=${paths.gitCommon}`);
   paths.denyRead.forEach((path, i) => params.push('-D', `DENY_READ_${i}=${path}`));
-  const profile = sandboxProfile({ denyReadCount: paths.denyRead.length, gitCommon: Boolean(paths.gitCommon) });
+  const tools = install ? paths.toolRoots ?? [] : [];
+  if (install) {
+    params.push('-D', `HOME=${paths.home}`, '-D', `MDNS_SOCKET=${MDNS_SOCKET}`);
+    tools.forEach((path, i) => params.push('-D', `TOOL_ROOT_${i}=${path}`));
+  }
+  const profile = sandboxProfile({ denyReadCount: paths.denyRead.length, gitCommon: Boolean(paths.gitCommon) && !install, phase,
+    toolRootCount: tools.length });
   return [SANDBOX_EXEC, ['-p', profile, ...params, ...argv]];
 }
 
@@ -161,4 +236,37 @@ export function jobEnvironment(base, { jobId, home, tmp }) {
     CI: '1', NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
     npm_config_update_notifier: 'false', MEMO_BRIDGE_JOB_ID: jobId
   });
+}
+
+// Go's module proxy for the install phase. No `direct` fallback: no version control tool runs
+// during an install, and a module the proxy does not serve fails. GOSUMDB stays Go's default.
+export const GO_INSTALL_PROXY = 'https://proxy.golang.org';
+
+// The environment of each phase of a local job: jobEnvironment, plus where corepack, pnpm, npm
+// and Go keep their files, all in the job's own cache folder (deleted with the job, never
+// shared). The same variables as the VPS (job-unit.mjs phaseEnvironment), plus Go's. The
+// install writes the caches with the network; the recipe reads the same corepack folder and
+// module cache with downloads turned off. GOTOOLCHAIN=local: never fetch and run another Go.
+// -modcacherw: Go leaves the module cache writable, so the job folder can be deleted.
+// XDG_RUNTIME_DIR: pnpm 12.8.2 and later keep their store operation locks there when it is a
+// folder only the user can write to (the caller creates it 0700), otherwise in a fixed
+// /tmp/pnpm-store-operation-locks-<uid> the sandbox does not let them write (pnpm CHANGELOG,
+// 12.8.2, #16390; seen as ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK in the install profile).
+export const RUNTIME_DIR_NAME = 'xdg-runtime';
+export function localPhaseEnvironment(phase, base, { jobId, home, tmp, cache }) {
+  if (!SANDBOX_PHASES.includes(phase)) throw new Error('sandbox_phase_invalid');
+  const env = Object.assign(jobEnvironment(base, { jobId, home, tmp }), {
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', COREPACK_ENABLE_AUTO_PIN: '0', COREPACK_HOME: join(cache, 'corepack'),
+    XDG_RUNTIME_DIR: join(cache, RUNTIME_DIR_NAME),
+    GOMODCACHE: join(cache, 'gomod'), GOFLAGS: '-modcacherw', GOTOOLCHAIN: 'local'
+  });
+  if (phase === 'install') {
+    return Object.assign(env, {
+      XDG_CACHE_HOME: join(cache, 'xdg-cache'), XDG_DATA_HOME: join(cache, 'xdg-data'), XDG_STATE_HOME: join(cache, 'xdg-state'),
+      pnpm_config_store_dir: join(cache, 'pnpm-store'), npm_config_cache: join(cache, 'npm'),
+      npm_config_audit: 'false', npm_config_fund: 'false',
+      GOPROXY: GO_INSTALL_PROXY
+    });
+  }
+  return Object.assign(env, { COREPACK_ENABLE_NETWORK: '0', GOPROXY: 'off' });
 }
