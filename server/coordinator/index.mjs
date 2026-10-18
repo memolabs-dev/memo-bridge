@@ -577,6 +577,19 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     }
   }
 
+  // An Issue whose change a merged pull request already carried keeps its `agent:ready` label:
+  // nothing in the rank can see it, so task_next says it on the task instead of proposing silent
+  // work (A027, #196). A failed or odd check removes the signal, never the task.
+  async function mergedReferencesFor(ref) {
+    try {
+      const found = await search(`"${ref}" is:pr is:merged`, [ref.split('#')[0]]);
+      if (!found?.ok) return [];
+      return (found.items ?? []).filter(i => i?.pull_request).slice(0, 3)
+        .map(i => ({ number: Number(i.number) || 0, url: cleanText(i.html_url ?? '', 300) }))
+        .filter(p => p.number > 0 && p.url);
+    } catch { return []; }
+  }
+
   // The batch repository of a project: its GitHub origin, which must be in the ledger
   // allowlist (else no task of the batch could ever be claimed).
   async function batchRepo(projectName) {
@@ -691,12 +704,14 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       finally { dropClaiming(task.issue); }
       if (claim.ok) {
         const parsed = parseTaskBody(task.body);
+        const mergedReferences = await mergedReferencesFor(task.issue);
         return { ok: true, done: false,
           task: { issue: task.issue, title: task.title, url: task.url, priority: task.priority, project: task.project,
             scope: sanitizeMultiline(parsed.scope, 4000), acceptance: sanitizeMultiline(parsed.acceptance, 4000),
             ...(parsed.scope || parsed.acceptance ? {} : { body: sanitizeMultiline(task.body, 4000) }),
             workspace_id: current.id, claim_id: claim.claim_id, fence: claim.fence, expires_at: claim.expires_at,
-            instructions: workerInstructions({ workspaceId: current.id, issue: task.issue, expiresAt: claim.expires_at }) },
+            instructions: workerInstructions({ workspaceId: current.id, issue: task.issue, expiresAt: claim.expires_at }),
+            ...(mergedReferences.length ? { merged_references: mergedReferences } : {}) },
           ...(moved ? { project_changed: moved } : {}), ...(skipped.length ? { skipped } : {}),
           brief: await briefFor(current, task, meta) };
       }
