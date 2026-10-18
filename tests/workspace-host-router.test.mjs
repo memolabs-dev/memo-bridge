@@ -218,3 +218,23 @@ test('task_status, tasks_list and batch_create without a workspace follow a Mac-
     ['vps','projects_list'], ['mac','batch_create'],
     ['vps','projects_list'], ['vps','task_status']]);
 });
+
+// Owner console T-A2 (D-A2-1): project_create always runs on the Mac runtime, whatever host it names.
+test('project_create goes to the Mac when routing is on, and to the runtime it was sent to otherwise', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'mac-host-project-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const calls = [];
+  const requestAgent = async (host, op, envelope) => { calls.push([host, op, envelope.args.host]); return { ok: true, project: 'relay-v2' }; };
+  const route = createWorkspaceHostRouter({ enabled: true, stateDir: dir, requestAgent });
+  assert.equal((await route.call('vps', 'project_create', { args: { name: 'relay-v2', host: 'vps', visibility: 'public' }, principal })).ok, true);
+  assert.equal((await route.call('vps', 'project_create', { args: { name: 'relay-v2' }, principal })).ok, true);
+  assert.deepEqual(calls.map(c => c[0]), ['mac', 'mac']);
+  assert.equal(calls[0][2], 'vps', 'the host argument reaches the Mac unchanged');
+  assert.equal(route.bindingsCount(), 0);
+  const probe = createWorkspaceHostRouter({ enabled: true, stateDir: dir, requestAgent: async () => ({ ok: false, error: 'unsupported_op' }) });
+  assert.equal((await probe.call('vps', 'project_create', { args: { name: 'relay-v2' }, principal })).error, 'host_offline');
+  const off = [];
+  const legacy = createWorkspaceHostRouter({ requestAgent: async host => { off.push(host); return { ok: true }; } });
+  await legacy.call('vps', 'project_create', { args: { name: 'relay-v2' }, principal });
+  assert.deepEqual(off, ['vps']);
+});

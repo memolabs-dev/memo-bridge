@@ -6,7 +6,7 @@
 #
 # Usage, from a trusted memo-bridge checkout with `pnpm install` done:
 #   deploy/mac/install-runtime-agent.sh --owner-sub <uuid> --governance-ref <sha> \
-#       (--from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>]            stage
+#       (--from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>] [--app-key <pem>]   stage
 #   ... same arguments ... --install                         stage, then load it in launchd
 #   deploy/mac/install-runtime-agent.sh --rollback          restore the probe agent's plist
 #
@@ -18,6 +18,10 @@
 #   --repo            enroll one such repository (repeatable)
 #   --bridge-ref      the memo-bridge commit to run (default: HEAD of this checkout); 40 hex
 #   --governance-src  where to clone the governance repository from (default GitHub)
+#   --app-key         the memo-labs-automation App private key (lab-infra memo_runner_github_app_key_path),
+#                     copied as the app-key credential so project_create can create repositories;
+#                     the plist then limits the App to that (MEMO_BRIDGE_GITHUB_APP_PURPOSES): ledger,
+#                     pushes and pull requests keep the gh token. Without it no app-key is kept.
 #
 # What it writes (without --install nothing else, and launchd is not called):
 #   ~/.local/share/memo-bridge/runtime-releases/<bridge-ref>/   the runtime bundle (bridge/,
@@ -54,7 +58,7 @@ reload_agent() {
 }
 
 INSTALL=0; ROLLBACK=0; FROM_REGISTRY=0
-OWNER_SUB=""; GOV_REF=""; BRIDGE_REF=""; GOV_SRC="https://github.com/memolabs-dev/.github.git"
+OWNER_SUB=""; GOV_REF=""; BRIDGE_REF=""; APP_KEY=""; GOV_SRC="https://github.com/memolabs-dev/.github.git"
 REPOS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -66,7 +70,8 @@ while [ "$#" -gt 0 ]; do
     --governance-src) [ "$#" -ge 2 ] || die "--governance-src needs a value"; GOV_SRC="$2"; shift ;;
     --bridge-ref) [ "$#" -ge 2 ] || die "--bridge-ref needs a value"; BRIDGE_REF="$2"; shift ;;
     --repo) [ "$#" -ge 2 ] || die "--repo needs a value"; REPOS+=("$2"); shift ;;
-    -h|--help) /usr/bin/sed -n '2,37p' "$0"; exit 0 ;;
+    --app-key) [ "$#" -ge 2 ] || die "--app-key needs a value"; APP_KEY="$2"; shift ;;
+    -h|--help) /usr/bin/sed -n '2,39p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -92,6 +97,11 @@ fi
 [[ "$OWNER_SUB" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "--owner-sub must be the owner's Pocket ID user id"
 [[ "$GOV_REF" =~ ^[0-9a-f]{40}$ ]] || die "--governance-ref must be a 40-hex memolabs-dev/.github commit"
 [ "$FROM_REGISTRY" = 1 ] || [ "${#REPOS[@]}" -gt 0 ] || die "pass --from-registry or at least one --repo"
+if [ -n "$APP_KEY" ]; then
+  case "$APP_KEY" in /*) ;; *) die "--app-key must be an absolute path" ;; esac
+  [ -f "$APP_KEY" ] && [ ! -L "$APP_KEY" ] || die "--app-key is not a regular file"
+  /usr/bin/grep -q 'PRIVATE KEY-----' "$APP_KEY" || die "--app-key is not a PEM private key"
+fi
 
 REPO="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 [ -n "$BRIDGE_REF" ] || BRIDGE_REF="$(/usr/bin/git -C "$REPO" rev-parse HEAD)"
@@ -167,12 +177,21 @@ for name in ledger-gh push-gh; do
   /bin/mv -f "$CREDS/$name.tmp" "$CREDS/$name"
 done
 TOKEN=""
-say credentials "\"dir\":\"$CREDS\",\"files\":[\"agent-key\",\"ledger-gh\",\"push-gh\"]"
+if [ -n "$APP_KEY" ]; then
+  /usr/bin/install -m 0600 "$APP_KEY" "$CREDS/app-key.tmp"
+  /bin/mv -f "$CREDS/app-key.tmp" "$CREDS/app-key"
+  say credentials "\"dir\":\"$CREDS\",\"files\":[\"agent-key\",\"ledger-gh\",\"push-gh\",\"app-key\"]"
+else
+  # A key without the plist's App settings would make every App purpose fail: never keep one.
+  /bin/rm -f "$CREDS/app-key"
+  say credentials "\"dir\":\"$CREDS\",\"files\":[\"agent-key\",\"ledger-gh\",\"push-gh\"]"
+fi
 
 # 4. Enrollment, the two policy files and the staged plist.
 ARGS=(configure --home "$HOME" --owner-sub "$OWNER_SUB" --release "$RELEASE" --governance "$GOVERNANCE"
   --node "$NODE" --out "$STAGING" --path "$(/usr/bin/dirname "$GH")")
 [ "$FROM_REGISTRY" = 1 ] && ARGS+=(--from-registry)
+[ -n "$APP_KEY" ] && ARGS+=(--github-app)
 for r in "${REPOS[@]+"${REPOS[@]}"}"; do ARGS+=(--repo "$r"); done
 "$NODE" "$REPO/deploy/mac/runtime-mac.mjs" "${ARGS[@]}" || die "configure refused (see the JSON line above)"
 /usr/bin/plutil -lint "$STAGING/$LABEL.plist" >/dev/null || die "staged plist is invalid"

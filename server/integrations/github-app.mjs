@@ -8,6 +8,11 @@
 //                                          the runner's own gh environment)
 //   read          a registered repository  actions, contents, issues, pull_requests: read (no PAT)
 //   issues        a registered repository  issues:write, for batch labels and Issues (no PAT)
+//   repo_create   the organization         administration:write, contents:read, for project_create:
+//                                          generate a repository from the template (no PAT). Minted
+//                                          without a `repositories` list: the repository does not
+//                                          exist yet, so it cannot be named there.
+//   repo_admin    the new repository       administration:write, its settings (no PAT)
 // Without the App, read and issues answer 'ambient' like pull_request: the runner keeps its own
 // gh environment, which on the VPS has no login, so those calls fail as github_auth_required.
 //
@@ -17,6 +22,10 @@
 //   MEMO_BRIDGE_GITHUB_APP_CLIENT_ID        optional; GitHub recommends the client id as `iss`
 //   MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID  numeric installation id on the organization
 //   MEMO_BRIDGE_GITHUB_APP_OWNER            organization of the installation (default memolabs-dev)
+//   MEMO_BRIDGE_GITHUB_APP_PURPOSES         optional, comma list: only these purposes use the App,
+//                                           the others behave as without it (the Mac sets
+//                                           repo_create,repo_admin so its ledger, pushes and pull
+//                                           requests keep the owner's gh token, owner console D-A2-2)
 //
 // Sources (read 2026-10-14):
 // - JWT: https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app
@@ -54,15 +63,30 @@ export const TOKEN_PURPOSES = Object.freeze({
   push: Object.freeze({ permissions: Object.freeze({ contents: 'write' }), pat: PUSH_CREDENTIAL }),
   pull_request: Object.freeze({ permissions: Object.freeze({ contents: 'write', pull_requests: 'write' }), pat: null }),
   read: Object.freeze({ permissions: Object.freeze({ actions: 'read', contents: 'read', issues: 'read', pull_requests: 'read' }), pat: null }),
-  issues: Object.freeze({ permissions: Object.freeze({ issues: 'write' }), pat: null })
+  issues: Object.freeze({ permissions: Object.freeze({ issues: 'write' }), pat: null }),
+  repo_create: Object.freeze({ permissions: Object.freeze({ administration: 'write', contents: 'read' }), pat: null, org: true }),
+  repo_admin: Object.freeze({ permissions: Object.freeze({ administration: 'write' }), pat: null })
 });
+// Purposes that never fall back to the runtime's ambient gh login: without the App they fail.
+const APP_ONLY = new Set(['repo_create', 'repo_admin']);
 
 export const APP_ENV = Object.freeze({
   id: 'MEMO_BRIDGE_GITHUB_APP_ID',
   clientId: 'MEMO_BRIDGE_GITHUB_APP_CLIENT_ID',
   installationId: 'MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID',
-  owner: 'MEMO_BRIDGE_GITHUB_APP_OWNER'
+  owner: 'MEMO_BRIDGE_GITHUB_APP_OWNER',
+  purposes: 'MEMO_BRIDGE_GITHUB_APP_PURPOSES'
 });
+
+// The purposes allowed to use the App: all of them when the variable is unset, else the listed
+// known purposes. An unknown name makes the list invalid (app_config_invalid), never wider.
+export function appPurposesFromEnv(env) {
+  const raw = env?.[APP_ENV.purposes];
+  if (raw === undefined || raw === '') return { purposes: null };
+  const names = String(raw).split(',').map(s => s.trim()).filter(Boolean);
+  if (!names.length || names.some(n => !Object.hasOwn(TOKEN_PURPOSES, n))) return { error: 'app_config_invalid' };
+  return { purposes: new Set(names) };
+}
 
 const ID_RE = /^[1-9][0-9]{0,11}$/;
 const CLIENT_ID_RE = /^[A-Za-z0-9.]{8,64}$/;
@@ -135,6 +159,7 @@ async function appRequest(fetchImpl, apiUrl, method, path, jwt, body, timeoutMs)
 // Check an access_tokens answer against the request: a well-formed token, an expiry at least
 // REFRESH_MARGIN_MS away, every requested permission granted at the requested level and no
 // other write or admin permission, and (when GitHub lists them) exactly the one repository.
+// repoName null is an organization token (repo_create): GitHub must then answer `all`.
 export function checkTokenResponse(data, { repoName, permissions, nowMs }) {
   if (!data || typeof data !== 'object' || typeof data.token !== 'string' || !TOKEN_RE.test(data.token)) {
     return { error: 'app_token_invalid_response' };
@@ -147,7 +172,9 @@ export function checkTokenResponse(data, { repoName, permissions, nowMs }) {
   for (const [name, level] of Object.entries(granted)) {
     if (!(name in permissions) && level !== 'read') return { error: 'app_token_scope_mismatch' };
   }
-  if (data.repositories !== undefined) {
+  if (repoName === null) {
+    if (data.repository_selection !== undefined && data.repository_selection !== 'all') return { error: 'app_token_scope_mismatch' };
+  } else if (data.repositories !== undefined) {
     const repos = Array.isArray(data.repositories) ? data.repositories : [];
     if (repos.length !== 1 || String(repos[0]?.name ?? '').toLowerCase() !== repoName.toLowerCase()) {
       return { error: 'app_token_scope_mismatch' };
@@ -194,24 +221,27 @@ export function createGitHubCredentials({ env = process.env, fetchImpl = globalT
       }
       identity = { appId: settings.appId };
     }
-    const repoName = repo.split('/')[1];
+    const repoName = repo === null ? null : repo.split('/')[1];
     const answer = await appRequest(fetchImpl, apiUrl, 'POST', `/app/installations/${settings.installationId}/access_tokens`, jwt,
-      { repositories: [repoName], permissions }, timeoutMs);
+      repoName === null ? { permissions } : { repositories: [repoName], permissions }, timeoutMs);
     if (answer.error) return answer;
     return checkTokenResponse(answer.data, { repoName, permissions, nowMs: now() });
   }
 
-  async function appToken(state, repo, permissions) {
-    const match = REPO_RE.exec(repo ?? '');
-    if (!match || match[2] === '.' || match[2] === '..') return { error: 'app_repo_invalid' };
-    if (match[1].toLowerCase() !== state.settings.owner.toLowerCase()) return { error: 'app_repo_not_allowed' };
+  // repo null: a token for the whole installation (repo_create only).
+  async function appToken(state, repo, permissions, org = false) {
+    if (!org) {
+      const match = REPO_RE.exec(repo ?? '');
+      if (!match || match[2] === '.' || match[2] === '..') return { error: 'app_repo_invalid' };
+      if (match[1].toLowerCase() !== state.settings.owner.toLowerCase()) return { error: 'app_repo_not_allowed' };
+    }
     const perms = sortedPermissions(permissions);
-    const key = `${repo.toLowerCase()}\0${JSON.stringify(perms)}`;
+    const key = `${org ? `org:${state.settings.owner.toLowerCase()}` : repo.toLowerCase()}\0${JSON.stringify(perms)}`;
     const cached = cache.get(key);
     if (cached && cached.expiresAt - now() > REFRESH_MARGIN_MS) return { token: cached.token };
     if (inflight.has(key)) return inflight.get(key);
     const pending = (async () => {
-      const minted = await mint(state.settings, state.path, repo, perms);
+      const minted = await mint(state.settings, state.path, org ? null : repo, perms);
       if (minted.error) return minted;
       emit('app_token_minted', { repo, permissions: Object.keys(perms).join(','), expires_in_s: Math.round((minted.expiresAt - now()) / 1000) });
       for (const [k, v] of cache) if (v.expiresAt - now() <= REFRESH_MARGIN_MS) cache.delete(k);
@@ -231,20 +261,29 @@ export function createGitHubCredentials({ env = process.env, fetchImpl = globalT
     async token(purpose, repo) {
       const spec = TOKEN_PURPOSES[purpose];
       if (!spec) return { error: 'purpose_invalid', credential: APP_KEY_CREDENTIAL };
-      const state = await appState();
-      if (state.mode === 'ambient') return { source: 'ambient' };
-      const target = spec.repo ?? repo;
+      let state = await appState();
+      if (state.mode === 'ambient') return APP_ONLY.has(purpose) ? { error: 'app_key_missing', credential: APP_KEY_CREDENTIAL } : { source: 'ambient' };
+      const allowed = appPurposesFromEnv(env);
+      if (state.mode === 'app' && !state.error && allowed.error) state = { mode: 'app', error: allowed.error };
+      else if (state.mode === 'app' && allowed.purposes && !allowed.purposes.has(purpose)) {
+        if (APP_ONLY.has(purpose)) return { error: 'app_purpose_disabled', credential: APP_KEY_CREDENTIAL };
+        state = { mode: 'pat' };
+      }
+      const target = spec.org ? null : (spec.repo ?? repo);
       let appError = null;
       if (state.mode === 'app') {
         if (state.error) appError = state.error;
         else {
-          const got = await appToken(state, target, spec.permissions);
+          const got = await appToken(state, target, spec.permissions, spec.org === true);
           if (got.token) return { token: got.token, source: 'app' };
           appError = got.error;
         }
         emit('app_token_failed', { purpose, repo: target ?? null, code: appError });
       }
-      if (!spec.pat) return appError ? { error: appError, credential: APP_KEY_CREDENTIAL } : { source: 'ambient' };
+      if (!spec.pat) {
+        if (appError) return { error: appError, credential: APP_KEY_CREDENTIAL };
+        return APP_ONLY.has(purpose) ? { error: 'app_key_missing', credential: APP_KEY_CREDENTIAL } : { source: 'ambient' };
+      }
       const file = credentialPath(env, spec.pat);
       const read = file ? await readTokenFile(file) : { error: 'credential_missing' };
       if (!read.error) {

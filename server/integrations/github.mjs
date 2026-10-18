@@ -100,7 +100,7 @@ export function runGit(cwd, args, { timeoutMs = 20_000 } = {}) {
 
 // Map a failed gh call to a short code. gh prints "gh: <message> (HTTP <status>)" on stderr
 // and the GitHub error document on stdout.
-function ghFailure(out) {
+export function ghFailure(out) {
   if (out.spawnFailed) return fail('github_unavailable', 'cannot start gh');
   if (out.timedOut) return fail('github_unavailable', 'timeout');
   if (out.overflow) return fail('response_too_large');

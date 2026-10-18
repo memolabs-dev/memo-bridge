@@ -30,7 +30,8 @@ export const TOOL_MODULES = Object.freeze([
   ['./tools/memory-tools.mjs', 'registerMemoryTools'],
   ['./tools/source-tools.mjs', 'registerSourceTools'],
   ['./tools/context-tools.mjs', 'registerContextTools'],
-  ['./tools/source-reconcile-tools.mjs', 'registerSourceReconcileTools']
+  ['./tools/source-reconcile-tools.mjs', 'registerSourceReconcileTools'],
+  ['./tools/project-tools.mjs', 'registerProjectTools']
 ].map(Object.freeze));
 
 // The public ChatGPT surface (spec §1 non-goals, D5). Excluded on purpose:
@@ -57,7 +58,7 @@ export const REMOTE_TOOLS_WRITE = Object.freeze([
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push',
   'jobs_submit', 'job_cancel',
   'github_create_pr', 'source_reconcile',
-  'memory_save'
+  'memory_save', 'project_create'
 ]);
 export const REMOTE_TOOLS = Object.freeze([...REMOTE_TOOLS_READ, ...REMOTE_TOOLS_WRITE]);
 const REMOTE_WRITE_SET = new Set(REMOTE_TOOLS_WRITE);

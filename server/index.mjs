@@ -20,6 +20,7 @@ import { MEMORY_TOOLS, registerMemoryTools } from './tools/memory-tools.mjs';
 import { SOURCE_TOOLS, registerSourceTools } from './tools/source-tools.mjs';
 import { CONTEXT_TOOLS, registerContextTools } from './tools/context-tools.mjs';
 import { SOURCE_RECONCILE_TOOLS, registerSourceReconcileTools } from './tools/source-reconcile-tools.mjs';
+import { PROJECT_TOOLS, registerProjectTools } from './tools/project-tools.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
 import { withImplicitWorkspace } from './tools/implicit-workspace.mjs';
 import { PROJECTS_LIST_DEFINITION } from './tools/catalog-tools.mjs';
@@ -40,7 +41,8 @@ const TOOL_GROUPS = {
   github: [...GITHUB_TOOLS],
   audit: [...AUDIT_TOOLS],
   memory: [...MEMORY_TOOLS],
-  source: [...SOURCE_TOOLS, ...CONTEXT_TOOLS, ...SOURCE_RECONCILE_TOOLS]
+  source: [...SOURCE_TOOLS, ...CONTEXT_TOOLS, ...SOURCE_RECONCILE_TOOLS],
+  projects: [...PROJECT_TOOLS]
 };
 const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
 
@@ -54,7 +56,7 @@ const server = new McpServer({
     'worktree_create with the issue -> worktree_read_file / worktree_write_file -> jobs_submit test|build|lint, then ' +
     'job_status / job_results -> worktree_commit -> worktree_push (records a checkpoint) -> github_create_pr -> task_complete -> ' +
     'workspace_close. After losing context call workspace_recover. Stop writing as soon as a call returns stale_lease or ' +
-    'no_live_claim. Memo Bridge\'s own tools use no shell, never write outside its worktrees, never write the default ' +
+    'no_live_claim. Memo Bridge\'s own tools use no shell, never write outside its worktrees (project_create aside: one PROJECTS.md row and the new checkout), never write the default ' +
     'branch, never force-push, never merge and never deploy. Jobs run the repository\'s own test/build/lint scripts, which you ' +
     'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +
     'only, no private data or credentials) and stop when the claim ends; elsewhere they are refused unless the owner set ' +
@@ -187,5 +189,6 @@ registerMemoryTools(counted, getRuntime);
 registerSourceTools(counted, getRuntime);
 registerContextTools(counted, getRuntime);
 registerSourceReconcileTools(counted, getRuntime);
+registerProjectTools(counted, getRuntime);
 
 await server.connect(new StdioServerTransport());

@@ -124,7 +124,8 @@ owner are gate changes.
 | T-M1 | P1 | TODO | M1 | T-D1 | adopt Mergify on transferred repositories that have CI (template + canaries) |
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
-| T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
+| T-A2 | P0 | IN_REVIEW (design: section 09; code and offline tests E-12; runtime step R-A2 below) | A2 | T-A1 | `project_create` on the Mac runtime: App purposes repo_create/repo_admin, template repository `memolabs-dev/project-template` (owner publishes), registry writer under the `proj` lock, Mac clone, readiness and owner steps |
+| T-A3 | P1 | TODO | A1, A2 | T-A2 | close the gaps G-1 (Mac self-enrollment of created repositories, T-A3c) and G-2 (ORG_REPO pre-filter T-A3a, VPS registration without lab-infra hand edits T-A3b), section 09 |
 | T-H1 | P0 | DONE end to end (E-11): ChatGPT, Mac workspace, claim, Mac worktree, passing sandboxed test job, PR merged by Mergify on a private repository. Follow-up: dependency install phase for Mac jobs (Node, Go projects need it) | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
 | T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
@@ -144,8 +145,9 @@ owner are gate changes.
 | R-6 | A governance change breaks a consumer that reads it as text | before pinning a governance commit, run memo-bridge `coordinator.test.mjs` with `MEMO_BRIDGE_GOVERNANCE_ROOT` on it and parse it with the deployed module (E-04) |
 
 ## 06. Unknowns
-- U-1: GitHub App permission for repository creation in the org (Administration: write) is not
-  granted today; adding it is an owner action in the App settings.
+- U-1: closed 2026-10-18 09:41 Paris: installation 170927025 has `administration: write`.
+- U-3: whether GitHub accepts the organization-wide `repo_create` token for `generate` exactly as
+  the permissions table says; the first real call decides (refusal code `github_forbidden`).
 - U-2: whether Mergify Free covers private org repositories in practice (pricing page: free for
   private teams up to 5 users). First private canary decides.
 
@@ -274,3 +276,169 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   deployed #175. Gap left: the Mac executor has no dependency install phase (the VPS one has,
   network on, scripts off), so Node projects without `node_modules` and Go projects with modules
   fail offline in the sandbox (horslot, E-09).
+- E-12 (T-A2, 2026-10-18, offline): `project_create` implemented (memo-bridge PR feat/project-create).
+  `tests/project-create.test.mjs` 10/10 (owner only, Mac only, name validation, refused
+  combinations, idempotence, refusal paths, registry writer under its lock, no DELETE),
+  `tests/project-template.test.mjs` 2/2, `tests/github-app.test.mjs` 17/17 (purposes
+  repo_create and repo_admin, App only, purpose gate), `tests/runtime-mac-install.test.mjs` 4/4
+  (`--app-key`, plist App variables, key removed without the flag), router test (always the
+  Mac). Full suite 817 tests: 816 pass, 0 fail, 1 skipped; `test:deploy` 124 OK; build and smoke ok (67 tools).
+  `remote:toolsize` write 51 451 bytes (budget 53 289), operator 92 722 (budget 96 129).
+  R-6 regression: `coordinator.test.mjs` 31/31 with governance 8a7f7ba, its literal parsed (18).
+  Not run against GitHub: the template repository is not published and nothing was deployed.
+
+## 09. Design: `project_create` (T-A2, REQ-A2)
+
+Written 2026-10-18 before the code, from the code and the configuration as they run (memo-bridge
+main a89c7a2, lab-infra b926808, governance 8a7f7ba, App installation 170927025).
+
+### What the tool does
+
+`project_create({name, visibility?, host?, area?, template?, description?})`, owner only. In order,
+every step idempotent, so a second call with the same name converges on the same project:
+
+1. Validate: `name` kebab-case, `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`, 2 to 50 characters, not a
+   reserved name (`.github`, `project-template`); `visibility` `private` (default) or `public`;
+   `host` defaults by visibility (private: `mac`, public: `vps`); `area` one of the six registry
+   areas (`os|lab|products|research|clients|studio`, default `products`); `template` `default`
+   (the only one today). Two combinations are refused before anything is touched:
+   `private` + `vps` (`private_on_vps_refused`, the CDKF rule: no private source on the VPS) and
+   `public` + `mac` (`public_on_mac_unsupported`: the Mac runtime serves only enrolled private
+   repositories, `deploy/mac/runtime-mac.mjs enroll`).
+2. Registry: a `PROJECTS.md` row with that name whose checkout's origin is not
+   `memolabs-dev/<name>` refuses (`name_taken`). A row for the same origin is the idempotent case.
+3. GitHub: read `memolabs-dev/<name>`.
+   - Absent: generate it from the template repository
+     (`POST /repos/memolabs-dev/project-template/generate`, `owner`, `name`, `description`,
+     `private`, `include_all_branches: false`), then wait (bounded) until its default branch
+     has the template commit. Journaled `project_repo_created` at once, so a failure after it is
+     visible.
+   - Present, generated from that template (`template_repository.full_name`), same visibility,
+     not archived: the same project (`existing: true`). Anything else refuses (`repo_exists`,
+     `visibility_mismatch`, `repo_archived`) and touches nothing: the tool never edits a
+     repository it did not create.
+   - Then `PATCH /repos/memolabs-dev/<name>` `delete_branch_on_merge: true` (safe to repeat).
+4. Clone on the Mac into `$MEMOLABS_ROOT/<area>/<name>` (`git clone` with the runtime's own
+   network credentials, `networkGit`, hooks off). An existing folder must already be a checkout
+   of that origin (`path_occupied` otherwise). The Mac clone exists for both hosts: the registry
+   row then always points at a real checkout.
+5. Registry row, under the registry lock: `| <name> | <area>/<name> | repo | lab | à qualifier |
+   <stack> | - |`, inserted in alphabetical order in the main table.
+6. Readiness: `ready_for_batch_create` is true only when the runtime that will serve the project
+   already allows it. Otherwise `owner_steps` lists exactly what is missing (next subsection).
+   The answer always carries `repo`, `url`, `project`, `host`, `local_path`, `existing`, `steps`
+   (what this call did) and `next`.
+
+Never deletes: the module has no DELETE call and no rollback that removes; a failure leaves what
+was made, and the next call goes on from there.
+
+### Decisions
+
+- D-A2-1, where it runs: the Mac runtime, because `PROJECTS.md` lives there and is the source of
+  truth (`~/memolabs/AGENTS.md`). The hub's router sends `project_create` to the Mac when
+  `mac_runtime_routing` is on (`bridge/workspace-host-router.mjs`, like `workspace_open host=mac`);
+  an offline or probe-only Mac answers `host_offline`. Any other runtime answers
+  `project_create_mac_only` with one `next_step`. Rejected: running the GitHub part on the VPS
+  runner and the registry part on the Mac, which needs a two-runtime transaction in the hub for
+  no gain (both deploys are needed either way).
+- D-A2-2, credentials: GitHub App installation tokens only, no PAT fallback, two new purposes in
+  `server/integrations/github-app.mjs`:
+  `repo_create` `{administration: write, contents: read}` for the generate call and the
+  existence read, minted for the organization (no `repositories` list: the repository does not
+  exist yet, so it cannot be named there); and
+  `repo_admin` `{administration: write}`, narrowed to the one new repository, for the settings
+  PATCH. Required permissions from GitHub's table "Permissions required for GitHub Apps"
+  (https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps, read
+  2026-10-18): generate needs Administration write and Contents read; PATCH a repository needs
+  Administration write. The installation has `administration: write` (checked 2026-10-18 with
+  `gh api orgs/memolabs-dev/installations`). On the Mac the App is opt-in and narrow: the
+  installer copies the App key into the runtime's credential directory and sets
+  `MEMO_BRIDGE_GITHUB_APP_PURPOSES=repo_create,repo_admin`, so ledger, push and pull requests
+  keep the owner's `gh` token exactly as today; without that variable every purpose may use the
+  App, as on the VPS.
+- D-A2-3, template repository, not files written by the tool: the installation has no
+  `workflows` permission (same listing: actions read, administration write, contents write,
+  issues write, metadata read, organization_projects write, pull_requests write,
+  repository_projects write), and GitHub refuses to create or update `.github/workflows/*`
+  through the contents or refs API without it (same table: those endpoints list Workflows
+  write). Generation copies the template's files server side with Administration write and
+  Contents read only. The template source is versioned in memo-bridge `templates/project/`
+  (README, AGENTS.md, a zero-dependency `node --test` package, `.github/workflows/ci.yml` with one
+  required check `check`, `.github/workflows/sensitive-paths.yml` byte-identical to memo-bridge's,
+  `.mergify.yml` from `docs/MERGIFY_FLEET_ADOPTION.md` in the quoted pattern style with
+  `check-success = @github-actions/check`), checked by `tests/project-template.test.mjs`. The
+  owner publishes it once as `memolabs-dev/project-template` (public, `is_template: true`) with
+  `scripts/project-template.mjs publish`: every file in it is a gate file, so the owner does it.
+- D-A2-4, idempotence on name without a new table: GitHub and `PROJECTS.md` are the state. Same
+  name, repository generated from the template, same visibility: same project, the remaining
+  steps converge. No coordinator store migration.
+- D-A2-5, registry writer: one function, under the `proj` CLI's own lock (`mkdir
+  /tmp/proj-registry.lock`, ~/bin/proj), so `proj heal` and `project_create` serialize; read,
+  insert and atomic rename all inside the lock, a backup copy in `~/.home/proj-backups/` first
+  (same place as `proj`). Lock not obtained in 20 s: `registry_locked`, nothing written; a lock is
+  never broken by the tool. Never a row edit or removal.
+- D-A2-6, owner only and journaled: capability `github:write`, and the principal must be the
+  owner: `oidc:<owner_sub>` of this runtime's remote.json, `hub:owner` or the local stdio owner.
+  Rows: `project_create` (ok with code `created` or `existing`, denied, error) and
+  `project_repo_created`; the `issue_ref` column carries `memolabs-dev/<name>` for these rows
+  (there is no Issue), so `audit_events` finds them.
+- D-A2-7, an exception to "Memo Bridge never writes outside its worktrees": `project_create` writes
+  exactly two places outside them, one `PROJECTS.md` row and the new checkout folder, both under
+  `MEMOLABS_ROOT` on the Mac, for the owner principal only.
+- D-A2-8, Mergify on the first PR: the template's `.mergify.yml` lists the bot and the owner as
+  authors, the `check` check and the gate paths. A worker PR that touches none of them lands
+  without the owner (the E-11 loop). `delete_branch_on_merge` is set at creation (fleet step 7).
+
+### What still stands between `project_create` and `batch_create` (the gaps)
+
+- G-1, private on the Mac: the Mac runtime serves a private repository only when the owner
+  enrolled it (`owner-policy/private-repos.json`, read by the coordinator and by the governance
+  ledger, and the Mac `remote.json` `projects`, read once at start). Both are owner trust files;
+  the tool does not write them. `owner_steps` gives the one command that re-enrolls from the
+  registry and restarts the agent (`deploy/mac/install-runtime-agent.sh ... --from-registry
+  --install`); ChatGPT can run it through `operator_run` on the Mac with the owner's approval.
+  Proposal T-A3c: the Mac runtime enrolls the repositories `project_create` made itself (append to
+  both files, same checks), and re-reads them on change instead of once at start.
+- G-2, public on the VPS: the VPS runner's registry, clones and `remote.json` `projects` come from
+  lab-infra (`memo_runner_pilot_repos`, `memo_bridge_remote_projects`, identical, max 50), and the
+  deployed coordinator's pre-filter reads the `PUBLIC_ALLOWLIST` literal of
+  `memolabs-dev/.github scripts/issue_preflight.py`. The App is not installed on
+  `guillaume-flambard/lab-infra`, and both changes need a deploy, which waits for the owner's go.
+  `owner_steps` gives the exact lines. Proposals: T-A3a, memo-bridge reads `ORG_REPO` from
+  issue_preflight.py (pre-filter = registered `memolabs-dev` origins; the Python ledger already
+  checks public and not archived through GitHub since .github#61), then the literal goes (owner,
+  R-6); T-A3b, the VPS runner learns projects from a runtime-owned list written by a VPS-side
+  `project_register` the hub calls after a `host=vps` creation, cloning on demand, with lab-infra
+  rendering `remote.json` to include that list once.
+
+### Tests (offline, GitHub stubbed)
+`tests/project-create.test.mjs`: owner only (read-only principal, another OIDC sub, hub:readonly
+refused and journaled), name validation and reserved names, refused combinations, idempotence (a
+second call returns the same project, no second generate call), refusal paths (`repo_exists`,
+`visibility_mismatch`, `name_taken`, `path_occupied`, `registry_locked`, `template_unavailable`,
+`project_create_mac_only`), registry row inserted once and in order under the lock, never a
+DELETE request, App token purposes and the purpose gate. `tests/project-template.test.mjs`:
+template files and their agreement with memo-bridge's workflow and the fleet policy.
+
+### Runtime step R-A2 (what the owner does, in this order, after the T-A2 PR merges)
+
+1. Publish the template once, from a memo-bridge checkout at the merged commit, under his own
+   `gh` login (it needs the `workflow` scope): `node scripts/project-template.mjs publish`, read
+   the plan, then `node scripts/project-template.mjs publish --execute`. Check:
+   `gh api repos/memolabs-dev/project-template --jq .is_template` answers `true`.
+2. VPS deploy (his go): lab-infra PR pinning `memo_bridge_version` to the merged commit (the hub
+   lists `project_create` and routes it to the Mac). No governance pin change, so R-6 is the
+   regression check only: `coordinator.test.mjs` with `MEMO_BRIDGE_GOVERNANCE_ROOT` on 8a7f7ba.
+   Back up the store and the hub state as in E-08; no store migration in T-A2.
+3. Mac runtime at the same commit, with the App key:
+   `deploy/mac/install-runtime-agent.sh --owner-sub <sub> --governance-ref <pinned governance>
+   --from-registry --app-key "$HOME/.config/memolabs/secrets/github-app/memo-labs-automation.private-key.pem" --install`.
+4. ChatGPT, Memo Bridge connector, Refresh. "Crée un projet privé <name>" -> `project_create`
+   (expected: `repo_created`, `cloned`, `registry_row_added`, `owner_steps: enroll_on_mac`).
+5. Enrollment (G-1): the `enroll_on_mac` command it returns, in a terminal or through
+   `operator_run` on the Mac with his approval. The agent restarts with the project enrolled.
+6. Same conversation or a new one: "crée la tâche : <one small change>" -> `batch_create`, then a
+   worker chat ("travaille sur l'issue 1 de <name>") -> claim, Mac worktree, `jobs_submit test`,
+   PR -> Mergify merges it (`gh pr view 1 -R memolabs-dev/<name> --json mergedBy`).
+7. `project_create` again with the same name: `existing: true`, same `local_path`, no second
+   repository (`gh repo list memolabs-dev | grep <name>` one line). AC-A2 passes on 6 and 7.

@@ -93,7 +93,9 @@ export const OPERATION_CAPABILITY = Object.freeze({
   memory_save: CAPABILITIES.WRITE,
   memory_search: CAPABILITIES.READ,
   memory_get: CAPABILITIES.READ,
-  memory_list: CAPABILITIES.READ
+  memory_list: CAPABILITIES.READ,
+  // Owner console T-A2: a new project, served by the Mac runtime; owner only inside the tool.
+  project_create: CAPABILITIES.GITHUB_WRITE
 });
 
 // Phase 6 operator ops (spec §4). Kept apart from OPERATION_CAPABILITY on purpose: those are
