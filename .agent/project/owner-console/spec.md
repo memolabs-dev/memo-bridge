@@ -125,7 +125,7 @@ owner are gate changes.
 | T-M2 | P2 | TODO | M1 | T-M1 | minimal CI for repositories without one, then adopt |
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A2 | P0 | TODO | A2 | T-A1 | `project_create`: GitHub App needs Administration write on the org; template repository; registry writer under lock |
-| T-H1 | P0 | DEPLOYED on the VPS (E-08); Mac agent install and AC-H1 pending | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
+| T-H1 | P0 | AC-H1 PASSED live (E-09); memo-bridge#175 (task_status routing) to pin and deploy; a Mac test job that passes needs dependencies the sandbox can reach | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
 | T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
 | T-Z3 | P1 | READY, owner run pending | Z3 | T-Z2 | golden prompt set and owner protocol (same PR); the owner runs it after the next deploy, which needs his go: the VPS runs 93e3bed, 40+ commits behind main |
@@ -227,3 +227,24 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   `PRAGMA user_version = 7` on the store (the v8 tables are additive), redeploy from the revert
   commit. Still open: the Mac runtime agent install (owner) and AC-H1 from a real ChatGPT
   conversation.
+- E-09 (T-H1, 2026-10-18 11:13 to 11:40 Paris): Mac runtime agent installed on the owner's Mac
+  (`deploy/mac/install-runtime-agent.sh --install`, memo-bridge 9125909, governance ff63ce8, 23
+  private projects enrolled). The first `--install` hit a launchd race (`Bootstrap failed: 5`)
+  that left the agent unloaded about 48 s; bootstrapped by hand, `runtime_ready` with 57 ops,
+  accepted by the hub (`agent_hello` host mac, ignored 0); fixed in memo-bridge#174. From a real
+  ChatGPT conversation (Memo Bridge connector): `workspace_open` on
+  clinical-data-knowledge-foundation answered machine Mac (`ws_Bl8BU71Ki2Z_zlEV`, route `mac` in
+  the hub's `workspace_routes.json`); `batch_create` then `task_claim` created and claimed CDKF#14;
+  `worktree_create` gave `~/memolabs/workspace/worktrees/clinical-data-knowledge-foundation/agent-14-bl8bu71k`
+  on branch `agent/14-bl8bu71k`, README written (checked on disk). AC-H1 passed. CDKF has no
+  root test recipe (`unknown_recipe`), so a second canary on horslot (private, Go): horslot#1
+  claimed, Mac worktree, `jobs_submit test` ran `go test ./...` on the Mac in the sandbox
+  (`job_E5CIx0laJU7K0HGd`, host mac): packages without dependencies passed, the ones needing
+  `gopkg.in/yaml.v3` failed because the sandbox has no network (`lookup proxy.golang.org: no such
+  host`). Gap found: `task_status` on an Issue with no workspace went to the VPS and answered
+  `project_not_allowed`; fixed in memo-bridge#175 (calls naming a project or an Issue placed like
+  implicit ones), not deployed yet. Cleanup: `task_release` and `workspace_close` from ChatGPT
+  (both workspaces closed on the Mac); `worktree_remove` is not on the remote surface, so the two
+  canary worktrees and branches were removed locally; CDKF#14 and horslot#1 closed. Nothing
+  pushed. Still open: a test job that passes on the Mac (dependencies reachable offline), PR
+  merged by Mergify on a private repository (none has Mergify yet).
