@@ -133,7 +133,7 @@ owner are gate changes.
 | T-A1 | P0 | DONE for public repos (E-02, E-05; incident E-04) | A1 | - | org rule in issue_preflight.py (.github#61); 17 public projects in the VPS runner, registry and remote.json (lab-infra#241, #242), deployed. Still a list in lab-infra: a new public repo needs one line there until T-A2 automates it |
 | T-A1b | P0 | IN_REVIEW (code and offline tests E-13; deploy pending) | A1 | T-A1 | repository-scoped GitHub reads (`github_issues`, `github_pull_requests`, `github_workflows`, `github_checks`) reach the Mac when the receiving host does not register the repository; before, they answered `repo_not_registered` on a private repository (seen after E-11) |
 | T-A2 | P0 | IN_REVIEW (design: section 09; code and offline tests E-12; runtime step R-A2 below) | A2 | T-A1 | `project_create` on the Mac runtime: App purposes repo_create/repo_admin, template repository `memolabs-dev/project-template` (owner publishes), registry writer under the `proj` lock, Mac clone, readiness and owner steps |
-| T-A3 | P1 | TODO | A1, A2 | T-A2 | close the gaps G-1 (Mac self-enrollment of created repositories, T-A3c) and G-2 (ORG_REPO pre-filter T-A3a, VPS registration without lab-infra hand edits T-A3b), section 09 |
+| T-A3 | P1 | TODO | A1, A2 | T-A2 | close the gaps G-1 (Mac self-enrollment of created repositories, T-A3c) and G-2 (ORG_REPO pre-filter T-A3a, VPS registration without lab-infra hand edits T-A3b), plus the two warts the incidents exposed: the App purposes reported by `startupCheck` (T-A3d, E-15) and the governance ref the Mac install accepts (T-A3e, E-16), section 09 |
 | T-H1 | P0 | DONE end to end (E-11): ChatGPT, Mac workspace, claim, Mac worktree, passing sandboxed test job, PR merged by Mergify on a private repository. Follow-up: dependency install phase for Mac jobs (Node, Go projects need it) | H1 | - | zero-friction Mac routing (#110, #114, #147): memo-bridge#171, .github#63, lab-infra#245; runbook `mac-runtime-routing/activation.md` |
 | T-Z1 | P0 | DONE (E-06) | Z1 | - | implicit workspace: wrapper, coordinator `conversationWorkspace`, tests (memo-bridge#169) |
 | T-Z2 | P1 | IN_REVIEW (E-07) | Z2 | T-Z1 | intent-first descriptions and shorter instructions, size measured (PR feat/intent-metadata) |
@@ -364,6 +364,47 @@ Runtime: AC-A1, AC-A2, AC-H1 from a real ChatGPT conversation; canaries per adop
   - Still to do after this entry: the owner merges lab-infra#249 (protected path, human only), then
     `make deploy-memo-operator` from a clean worktree at the merged commit, then AC-A1b from ChatGPT
     (`github_pull_requests` on a private repository) and R-A2 steps 4 to 7 for AC-A2.
+- E-16 (incident, 2026-10-18 15:49 to 16:05 Paris; the owner reported `lease_denied` on CDKF#22):
+  after the E-15 switch the Mac runtime refused every private repository. The Mac journal carries
+  `task_claim` denied `lease_denied` at 15:49:30 and 15:53:57 with issue
+  `memolabs-dev/clinical-data-knowledge-foundation#22` (`via: hub`), while the same conversation had
+  claimed CDKF#21 at 15:23:11, 26 minutes earlier, before the restart.
+  - Cause: the E-15 install command passed `--governance-ref 8a7f7ba`, the **VPS** pin, to the Mac.
+    8a7f7baf is `.github#62`, i.e. before `.github#63` (ff63ce8), which fixes exactly this case:
+    Memo Bridge runs `issue_preflight.py` as its ledger child with `HOME` pointed at a private gh
+    configuration directory (`server/coordinator/credentials.mjs` `ghChildEnv`), which is active
+    because the App key sets `CREDENTIALS_DIRECTORY` and the runtime then keeps the ledger in
+    credential mode. On 8a7f7baf, `private_owner_allowlist.py` resolves the owner's home from
+    `$HOME`, so it names the gh configuration directory, and `MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE`
+    can never equal the expected path: every enrolled repository answers False, and the ledger's
+    message (`Repository privacy or enrollment mismatch`) is not in the coordinator's denial map,
+    so it surfaces as the generic `lease_denied`. ff63ce8 reads the account home from
+    `pwd.getpwuid(uid).pw_dir` instead; the two files differ only by that change.
+  - Reproduced offline with the ledger child's own environment (owner sub, Mac flags, private repos
+    file, `HOME` redirected): `private_owner_allowlist.allowed('memolabs-dev/
+    clinical-data-knowledge-foundation')` answers False on 8a7f7baf and True on ff63ce8.
+  - Fix, on the spot: the same install command with `--governance-ref
+    ff63ce8d43971bdf368892569f35d9f2147f5a4f` (the `memolabs-dev/.github` main head, #63), the same
+    bridge 2909e4c, the same App key and `--from-registry`. Staged first, the staged plist read
+    before `--install` (governance root, bridge ref, 23 projects), and the governance directory was
+    reused, not re-cloned. `runtime_ready` and `hello_accepted` at 16:04:09 Paris, 58 ops, executor
+    local; the launchd plist now names `governance/ff63ce8d...`; the probe plist is untouched.
+  - Verified after the restart, offline and read-only: the full preflight
+    `issue_preflight.assess('memolabs-dev/clinical-data-knowledge-foundation', 22)` returns clean
+    (privacy, enrollment and labels) with the exact child environment; `readPublicAllowlist()` from
+    the installed release answers ok with 18 repositories, `memolabs-dev/memo-bridge` included
+    (the R-6 regression check for a governance change); the runtime log shows `runtime_ready`, not a
+    launchd race.
+  - Lesson: the Mac governance pin is not the VPS pin. The VPS serves public repositories only,
+    where the privacy branch is never reached, so 8a7f7baf stays correct there; the Mac must run
+    the account-home fix or it refuses every enrolled private repository. R-A2 step 3 said "the
+    pinned governance" without saying which pin: corrected in section 09. Candidate T-A3e: the
+    installer refuses a `--governance-ref` whose `private_owner_allowlist.py` still resolves the
+    home from `$HOME`, so the mistake cannot be repeated silently.
+  - Separate family, not this incident: `workspace_open` answered `project_not_allowed` for a
+    **public** project asked on the Mac (`project="drop", host="mac"`), because the Mac
+    `remote.json` `projects` come from private enrollment only. The owner's ChatGPT conversation
+    reproduced it and opened draft memo-bridge#184 for #114; no second writer here.
 
 ## 09. Design: `project_create` (T-A2, REQ-A2)
 
@@ -509,8 +550,14 @@ template files and their agreement with memo-bridge's workflow and the fleet pol
    regression check only: `coordinator.test.mjs` with `MEMO_BRIDGE_GOVERNANCE_ROOT` on 8a7f7ba.
    Back up the store and the hub state as in E-08; no store migration in T-A2.
 3. Mac runtime at the same commit, with the App key:
-   `deploy/mac/install-runtime-agent.sh --owner-sub <sub> --governance-ref <pinned governance>
+   `deploy/mac/install-runtime-agent.sh --owner-sub <sub> --governance-ref <mac governance ref>
    --from-registry --app-key "$HOME/.config/memolabs/secrets/github-app/memo-labs-automation.private-key.pem" --install`.
+   The Mac governance ref is **not** the VPS pin of step 2: it must carry `.github#63` (read the
+   owner's home from the account, not from `$HOME`), because the ledger child runs with `HOME` set to
+   a private gh configuration directory. Passing the VPS pin `8a7f7ba` here refuses every private
+   repository with `lease_denied` (incident E-16). Use
+   `ff63ce8d43971bdf368892569f35d9f2147f5a4f`, or the `memolabs-dev/.github` main head at the time
+   when it is later than that.
 4. ChatGPT, Memo Bridge connector, Refresh. "Crée un projet privé <name>" -> `project_create`
    (expected: `repo_created`, `cloned`, `registry_row_added`, `owner_steps: enroll_on_mac`).
 5. Enrollment (G-1): the `enroll_on_mac` command it returns, in a terminal or through

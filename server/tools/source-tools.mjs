@@ -82,10 +82,10 @@ export function registerSourceTools(server, getRuntime, options = {}) {
           return result(fail('unknown_project'));
         }
         if (isRemotePrincipal(rt.principal)) {
-          const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy());
+          const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy(), { host: rt.host });
           if (refusal) {
             await rt.audit(name, 'denied', 'project_not_allowed');
-            return result(fail('project_not_allowed'));
+            return result(refusal);
           }
         }
         const origin = await repoFor(rt, args.project);

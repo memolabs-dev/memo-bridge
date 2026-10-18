@@ -16,10 +16,10 @@
     "in_progress": [
       "T-H1 (zero-friction-mac-routing spec; #148 merged)",
       "T-Z2 and T-Z3 (PR feat/intent-metadata)",
-      "T-A2 (merged #180; template published and Mac runtime at 2909e4c, E-15; runtime step R-A2 steps 4 to 7 pending)",
+      "T-A2 (merged #180; template published and Mac runtime at 2909e4c with governance ff63ce8, E-15 and E-16; runtime step R-A2 steps 4 to 7 pending)",
       "T-A1b (merged #181, main 2909e4c, E-13 to E-15; lab-infra#249 is green and only the owner can merge it: ansible/ is protected)"
     ],
-    "next": "T-A1b: the owner merges lab-infra#249 (no bot may: ansible/ is a protected path), then make deploy-memo-operator from a clean worktree at the merged commit, then close AC-A1b from ChatGPT with one github_pull_requests call on a private repository. Then T-A2 R-A2 steps 4 to 7 from ChatGPT for AC-A2 (project_create, enroll_on_mac, batch_create, job, PR); then T-A3 (gaps G-1, G-2)",
+    "next": "T-A1b: the owner merges lab-infra#249 (no bot may: ansible/ is a protected path), then make deploy-memo-operator from a clean worktree at the merged commit, then close AC-A1b from ChatGPT with one github_pull_requests call on a private repository. Then T-A2 R-A2 steps 4 to 7 from ChatGPT for AC-A2 (project_create, enroll_on_mac, batch_create, job, PR); then T-A3 (gaps G-1, G-2). Mac runtime rule (E-16): the governance ref installed on the Mac must carry .github#63 (ff63ce8 or later), never the VPS pin 8a7f7ba",
     "blocked": []
   },
   "acceptance": {
@@ -44,6 +44,7 @@
   ],
   "ready_for_manual_acceptance": false,
   "incidents": [
-    "E-04 2026-10-18 ledger_unavailable on the VPS for ~16 min, rolled back, no claim affected"
+    "E-04 2026-10-18 ledger_unavailable on the VPS for ~16 min, rolled back, no claim affected",
+    "E-16 2026-10-18 15:49-16:05 Paris lease_denied for every private repository on the Mac: R-A2 step 3 had installed the VPS governance pin 8a7f7ba (before .github#63); repaired by re-pinning ff63ce8, verified with the full preflight on CDKF#22 and readPublicAllowlist()"
   ]
 }
