@@ -2,13 +2,21 @@
 // A Mac route is added only after an authenticated Mac runtime accepts workspace_open.
 // Snapshot discovery is NEVER an execution grant. Unknown IDs use the legacy VPS
 // runtime; a Mac route never falls back to VPS when its host is offline.
+//
+// Placement of a workspace_open that names no host (zero-friction spec, issue #110): the VPS
+// runtime's projects_list says where the project is registered. A project the VPS knows only
+// from the Mac discovery snapshot (metadata_only, source_host mac) opens on the Mac; anything
+// else opens on the VPS, as before. Discovery decides placement only: the Mac runtime still
+// checks its own registry, Git origin, remote policy and owner-private enrollment, and refuses
+// on its own. A Mac that is offline, or connected in probe mode, answers host_offline.
 import { createHubState } from './hub-state.mjs';
 
 const ID = /^(?:ws|wt|job)_[A-Za-z0-9_-]{8,60}$/;
 const PROJECT = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const MAX_ROUTES = 2000;
 const BY_PROJECT = new Set(['batch_create', 'batch_status', 'tasks_list']);
-const fail = error => ({ ok:false, error });
+const fail = (error, detail) => ({ ok:false, error, ...(detail ? { detail } : {}) });
+const PROBE_ONLY = 'the Mac agent is connected in probe mode: its runtime is not installed (deploy/mac/install-runtime-agent.sh)';
 
 export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDir=null, audit=()=>{} }={}) {
   if (typeof requestAgent !== 'function') throw new TypeError('requestAgent required');
@@ -40,12 +48,32 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
     }
     return true;
   }
-  async function call(host,op,envelope) {
+  // {host, inferred:true, reason}. Any doubt (listing refused, several or no exact rows) keeps
+  // the legacy VPS placement, where an unknown project is refused as before.
+  async function placeOpen(host,project,envelope) {
+    const vps={host,inferred:true,reason:'project_on_vps'};
+    if (!PROJECT.test(project ?? '')) return vps;
+    let listed;
+    try {
+      listed=await requestAgent(host,'projects_list',{...envelope,args:{search:project}});
+    } catch { return vps; }
+    const rows=Array.isArray(listed?.projects) ? listed.projects.filter(p => p?.name === project) : [];
+    if (listed?.ok === false || rows.length !== 1) return vps;
+    return rows[0].metadata_only === true && rows[0].source_host === 'mac'
+      ? {host:'mac',inferred:true,reason:'project_registered_on_mac_only'} : vps;
+  }
+  async function call(host,op,inbound) {
+    let envelope=inbound;
     if (!enabled) return requestAgent(host,op,envelope);
     const args=envelope.args ?? {},principal=envelope.principal;
     const ids=[args.workspace_id,args.worktree_id,args.job_id].filter(Boolean);
     let destination=host;
-    if (op === 'workspace_open' && args.host === 'mac') destination='mac';
+    let placement=null;
+    if (op === 'workspace_open' && args.host === undefined) {
+      placement=await placeOpen(host,args.project,envelope);
+      destination=placement.host;
+      envelope={...envelope,args:{...args,host:placement.host}};
+    } else if (op === 'workspace_open' && args.host === 'mac') destination='mac';
     else {
       for (const id of ids) {
         const binding=routes.get(id);
@@ -66,10 +94,12 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
       }
     }
     const result=await requestAgent(destination,op,envelope);
+    if (destination === 'mac' && result?.ok === false && result.error === 'unsupported_op') return fail('host_offline', PROBE_ONLY);
     if (destination !== 'mac' || !result?.ok) return result;
     if (op === 'workspace_open') {
       if (result.workspace?.host !== 'mac' || !remember(result.workspace?.workspace_id,principal,args.project))
         return fail('workspace_route_not_persisted');
+      if (placement) return {...result,placement};
     } else {
       for (const id of [result.worktree?.worktree_id,result.job?.job_id]) {
         if (id && !remember(id,principal)) return fail('workspace_route_not_persisted');
