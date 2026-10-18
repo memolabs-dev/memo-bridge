@@ -56,6 +56,14 @@ test('Z3: the golden prompt set only expects tools ChatGPT is served', () => {
   for (const p of prompts.filter(x => x.expect.chain)) assert.ok(p.expect.forbid?.includes('workspace_open'), p.id);
   const doc = readFileSync(new URL('../docs/golden-prompts/PROTOCOL.md', import.meta.url), 'utf8');
   assert.equal(/[–—]/.test(doc), false, 'no dashes in the protocol');
+  // The owner fills this file during a passage: a prompt with no stub there is a prompt the run
+  // silently skips, and the score would be computed over a smaller set than the catalogue.
+  const template = JSON.parse(readFileSync(new URL('../docs/golden-prompts/results.template.json', import.meta.url), 'utf8'));
+  assert.deepEqual(
+    Object.keys(template.results).sort(),
+    prompts.map(p => p.id).sort(),
+    'results.template.json stubs every prompt of the catalogue',
+  );
 });
 
 test('Z3: scoring counts precision, recall, forbidden calls and chains', () => {
