@@ -157,7 +157,9 @@ export function remoteArgs(op, raw, principal, cfg) {
     // Repatriation D-R14 (bench 2026-10-14 20:04): a workspace is a coordination record. A chat
     // that asks for the Mac gets its workspace on the vps runtime anyway, the requested host kept
     // in the label, and a note in the result; operator tools still act on the host they name.
-    if (cfg.macRuntimeRouting === true && args.host === 'mac') return { ok: true, args };
+    // With Mac routing on, a workspace_open that names no host is placed by the hub's router
+    // (bridge/workspace-host-router.mjs): on the Mac when the project is registered there only.
+    if (cfg.macRuntimeRouting === true && (args.host === 'mac' || args.host === undefined)) return { ok: true, args };
     if (args.host !== undefined && args.host !== REMOTE_RUNTIME_HOST) {
       const requested = HOST_NAMES.has(args.host) ? args.host : 'other';
       const label = typeof args.client_label === 'string' ? args.client_label : '';

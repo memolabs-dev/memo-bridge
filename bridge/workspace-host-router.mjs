@@ -2,13 +2,31 @@
 // A Mac route is added only after an authenticated Mac runtime accepts workspace_open.
 // Snapshot discovery is NEVER an execution grant. Unknown IDs use the legacy VPS
 // runtime; a Mac route never falls back to VPS when its host is offline.
+//
+// Placement of a workspace_open that names no host (zero-friction spec, issue #110): the VPS
+// runtime's projects_list says where the project is registered. A project the VPS knows only
+// from the Mac discovery snapshot (metadata_only, source_host mac) opens on the Mac; anything
+// else opens on the VPS, as before. Discovery decides placement only: the Mac runtime still
+// checks its own registry, Git origin, remote policy and owner-private enrollment, and refuses
+// on its own. A Mac that is offline, or connected in probe mode, answers host_offline.
+//
+// Implicit workspaces (server/tools/implicit-workspace.mjs) are resolved by the runtime that
+// receives the call, so a workspace tool called without workspace_id must reach the right host
+// first: the Mac when this conversation already has a Mac workspace on the hinted project, or
+// when that project (args.project, else the repository of args.issue) is registered on the Mac
+// only. The workspace the Mac runtime then opens or picks is bound like any other.
 import { createHubState } from './hub-state.mjs';
+import { IMPLICIT_WORKSPACE_TOOLS } from '../server/tools/implicit-workspace.mjs';
 
 const ID = /^(?:ws|wt|job)_[A-Za-z0-9_-]{8,60}$/;
 const PROJECT = /^[a-z0-9][a-z0-9._-]{0,79}$/;
+const SESSION = /^[A-Za-z0-9_-]{8,64}$/;
+const ISSUE = /^[A-Za-z0-9-]{1,39}\/([A-Za-z0-9._-]{1,100})#[1-9][0-9]{0,7}$/;
+const IMPLICIT = new Set(IMPLICIT_WORKSPACE_TOOLS);
 const MAX_ROUTES = 2000;
 const BY_PROJECT = new Set(['batch_create', 'batch_status', 'tasks_list']);
-const fail = error => ({ ok:false, error });
+const fail = (error, detail) => ({ ok:false, error, ...(detail ? { detail } : {}) });
+const PROBE_ONLY = 'the Mac agent is connected in probe mode: its runtime is not installed (deploy/mac/install-runtime-agent.sh)';
 
 export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDir=null, audit=()=>{} }={}) {
   if (typeof requestAgent !== 'function') throw new TypeError('requestAgent required');
@@ -21,17 +39,21 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
   for (const row of saved?.bindings ?? []) {
     if (!row || !ID.test(row.id ?? '') || row.host !== 'mac' ||
       typeof row.owner !== 'string' || !row.owner.startsWith('oidc:') ||
-      (row.project !== undefined && row.project !== null && !PROJECT.test(row.project)))
+      (row.project !== undefined && row.project !== null && !PROJECT.test(row.project)) ||
+      (row.session !== undefined && row.session !== null && !SESSION.test(row.session)))
       throw new Error('mac_runtime_routing state invalid');
-    routes.set(row.id,{host:row.host,owner:row.owner,...(row.project ? {project:row.project} : {})});
+    routes.set(row.id,{host:row.host,owner:row.owner,...(row.project ? {project:row.project} : {}),
+      ...(row.session ? {session:row.session} : {})});
   }
-  function remember(id,principal,project=null) {
+  function remember(id,principal,project=null,session=null) {
     if (!ID.test(id ?? '') || !principal?.id?.startsWith('oidc:') || (project && !PROJECT.test(project))) return false;
+    if (!SESSION.test(session ?? '')) session=null;
     if (!routes.has(id) && routes.size >= MAX_ROUTES) return false;
     const previous=routes.get(id);
     if (previous && (previous.owner !== principal.id || (project && previous.project && previous.project !== project)))
       return false;
-    routes.set(id,{host:'mac',owner:principal.id,...(project ? {project} : previous?.project ? {project:previous.project} : {})});
+    routes.set(id,{host:'mac',owner:principal.id,...(project ? {project} : previous?.project ? {project:previous.project} : {}),
+      ...(session ? {session} : previous?.session ? {session:previous.session} : {})});
     const result=state.save('workspace_routes',{bindings:[...routes].map(([name,route])=>({id:name,...route}))});
     if (result.ok !== true) {
       if (previous) routes.set(id,previous);
@@ -40,12 +62,48 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
     }
     return true;
   }
-  async function call(host,op,envelope) {
+  // {host, inferred:true, reason}. Any doubt (listing refused, several or no exact rows) keeps
+  // the legacy VPS placement, where an unknown project is refused as before.
+  async function placeOpen(host,project,envelope) {
+    const vps={host,inferred:true,reason:'project_on_vps'};
+    if (!PROJECT.test(project ?? '')) return vps;
+    let listed;
+    try {
+      listed=await requestAgent(host,'projects_list',{...envelope,args:{search:project}});
+    } catch { return vps; }
+    const rows=Array.isArray(listed?.projects) ? listed.projects.filter(p => p?.name === project) : [];
+    if (listed?.ok === false || rows.length !== 1) return vps;
+    return rows[0].metadata_only === true && rows[0].source_host === 'mac'
+      ? {host:'mac',inferred:true,reason:'project_registered_on_mac_only'} : vps;
+  }
+  // The project a workspace tool without workspace_id means: its project, else its Issue's repository.
+  function projectHint(args) {
+    if (PROJECT.test(args.project ?? '')) return args.project;
+    const repo=ISSUE.exec(typeof args.issue === 'string' ? args.issue : '')?.[1]?.toLowerCase();
+    return repo && PROJECT.test(repo) ? repo : null;
+  }
+  async function implicitDestination(host,args,envelope) {
+    const hint=projectHint(args);
+    if (!hint) return host;
+    const session=envelope.clientSession;
+    for (const [id,binding] of routes) {
+      if (id.startsWith('ws_') && binding.owner === envelope.principal?.id && binding.project === hint &&
+        SESSION.test(session ?? '') && binding.session === session) return binding.host;
+    }
+    return (await placeOpen(host,hint,envelope)).host;
+  }
+  async function call(host,op,inbound) {
+    let envelope=inbound;
     if (!enabled) return requestAgent(host,op,envelope);
     const args=envelope.args ?? {},principal=envelope.principal;
     const ids=[args.workspace_id,args.worktree_id,args.job_id].filter(Boolean);
     let destination=host;
-    if (op === 'workspace_open' && args.host === 'mac') destination='mac';
+    let placement=null;
+    if (op === 'workspace_open' && args.host === undefined) {
+      placement=await placeOpen(host,args.project,envelope);
+      destination=placement.host;
+      envelope={...envelope,args:{...args,host:placement.host}};
+    } else if (op === 'workspace_open' && args.host === 'mac') destination='mac';
     else {
       for (const id of ids) {
         const binding=routes.get(id);
@@ -54,6 +112,8 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
         if (destination !== host && destination !== binding.host) return fail('host_mismatch');
         destination=binding.host;
       }
+      if (destination === host && IMPLICIT.has(op) && args.workspace_id === undefined && ids.length === 0)
+        destination=await implicitDestination(host,args,envelope);
       // batch_create has no workspace_id. Bind a project only AFTER Mac
       // successfully opened a workspace for this same authenticated owner.
       if (destination === host && BY_PROJECT.has(op) && PROJECT.test(args.project ?? '')) {
@@ -66,13 +126,19 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
       }
     }
     const result=await requestAgent(destination,op,envelope);
+    if (destination === 'mac' && result?.ok === false && result.error === 'unsupported_op') return fail('host_offline', PROBE_ONLY);
     if (destination !== 'mac' || !result?.ok) return result;
+    const session=envelope.clientSession ?? null;
     if (op === 'workspace_open') {
-      if (result.workspace?.host !== 'mac' || !remember(result.workspace?.workspace_id,principal,args.project))
+      if (result.workspace?.host !== 'mac' || !remember(result.workspace?.workspace_id,principal,args.project,session))
         return fail('workspace_route_not_persisted');
+      if (placement) return {...result,placement};
     } else {
+      const implicit=result.implicit_workspace;
+      if (implicit?.workspace_id && !remember(implicit.workspace_id,principal,PROJECT.test(implicit.project ?? '') ? implicit.project : null,session))
+        return fail('workspace_route_not_persisted');
       for (const id of [result.worktree?.worktree_id,result.job?.job_id]) {
-        if (id && !remember(id,principal)) return fail('workspace_route_not_persisted');
+        if (id && !remember(id,principal,null,session)) return fail('workspace_route_not_persisted');
       }
     }
     return result;

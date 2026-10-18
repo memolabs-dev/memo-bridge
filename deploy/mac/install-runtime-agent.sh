@@ -1,109 +1,191 @@
 #!/bin/bash
-# Provision the Memo Bridge Mac runtime without exporting a GitHub token.
+# Switch the Memo Bridge Mac agent from probe to runtime mode, so ChatGPT can open workspaces,
+# claim Issues, create worktrees and run jobs on this Mac for the owner's private projects
+# (issues #110, #114, #147). Owner-run, local only: nothing here talks to the VPS, and no
+# token, corpus or project path leaves the Mac.
 #
-# This is intentionally a local, owner-run bootstrap. It reads the GitHub CLI's
-# existing Keychain-backed login through `gh auth token` and writes the token only
-# to a 0700 runtime credential directory. It never prints the token, copies it to
-# the VPS, or puts it in a launchd environment variable.
+# Usage, from a trusted memo-bridge checkout with `pnpm install` done:
+#   deploy/mac/install-runtime-agent.sh --owner-sub <uuid> --governance-ref <sha> \
+#       (--from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>]            stage
+#   ... same arguments ... --install                         stage, then load it in launchd
+#   deploy/mac/install-runtime-agent.sh --rollback          restore the probe agent's plist
 #
-# Usage (from a trusted memo-bridge checkout):
-#   deploy/mac/install-runtime-agent.sh --owner-sub <Pocket-ID-sub> --install
+#   --owner-sub       the owner's Pocket ID user id (lab-infra memo_bridge_remote_owner_sub)
+#   --governance-ref  the memolabs-dev/.github commit the ledger runs (scripts/issue_lease.py,
+#                     issue_preflight.py, private_owner_allowlist.py); 40 hex
+#   --from-registry   enroll every project of ~/memolabs/PROJECTS.md whose Mac checkout has a
+#                     memolabs-dev origin that GitHub reports private and not archived
+#   --repo            enroll one such repository (repeatable)
+#   --bridge-ref      the memo-bridge commit to run (default: HEAD of this checkout); 40 hex
+#   --governance-src  where to clone the governance repository from (default GitHub)
 #
-# The hub configuration must separately contain the same owner_sub, the CDKF
-# repository, and mac_runtime_routing: "enabled". This script does not change the
-# hub and therefore cannot accidentally expose the private corpus.
+# What it writes (without --install nothing else, and launchd is not called):
+#   ~/.local/share/memo-bridge/runtime-releases/<bridge-ref>/   the runtime bundle (bridge/,
+#                     server/, production node_modules), from `git archive` of that commit
+#   ~/.local/share/memo-bridge/governance/<governance-ref>/     scripts/ of that governance commit
+#   ~/.local/share/memo-bridge/runtime-config/credentials/      0700: agent-key (the existing
+#                     probe identity, so the hub sees the same agent), ledger-gh and push-gh
+#                     (the token of the owner's own `gh` login, read from the Keychain, never
+#                     printed, never in the plist or the environment)
+#   ~/.local/share/memo-bridge/owner-policy/                    0700: private-repos.json and
+#                     remote.json (deploy/mac/runtime-mac.mjs configure)
+#   ~/.local/share/memo-bridge/launchd/dev.memolabs.memo-bridge-agent.plist   staged plist
+# --install keeps the current plist as .../launchd/dev.memolabs.memo-bridge-agent.plist.probe
+# (once), installs the staged one and restarts the agent; --rollback puts the probe one back.
+# The hub side (lab-infra memo_bridge_mac_runtime_routing: true) is a separate, reviewed deploy.
 set -euo pipefail
 umask 077
 
 die() { echo "install-runtime-agent: $*" >&2; exit 1; }
+say() { echo "{\"step\":\"$1\"${2:+,$2}}"; }
 
-INSTALL=0
-OWNER_SUB=""
-REPO="memolabs-dev/clinical-data-knowledge-foundation"
+INSTALL=0; ROLLBACK=0; FROM_REGISTRY=0
+OWNER_SUB=""; GOV_REF=""; BRIDGE_REF=""; GOV_SRC="https://github.com/memolabs-dev/.github.git"
+REPOS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --install) INSTALL=1 ;;
+    --rollback) ROLLBACK=1 ;;
+    --from-registry) FROM_REGISTRY=1 ;;
     --owner-sub) [ "$#" -ge 2 ] || die "--owner-sub needs a value"; OWNER_SUB="$2"; shift ;;
-    --repo) [ "$#" -ge 2 ] || die "--repo needs a value"; REPO="$2"; shift ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    --governance-ref) [ "$#" -ge 2 ] || die "--governance-ref needs a value"; GOV_REF="$2"; shift ;;
+    --governance-src) [ "$#" -ge 2 ] || die "--governance-src needs a value"; GOV_SRC="$2"; shift ;;
+    --bridge-ref) [ "$#" -ge 2 ] || die "--bridge-ref needs a value"; BRIDGE_REF="$2"; shift ;;
+    --repo) [ "$#" -ge 2 ] || die "--repo needs a value"; REPOS+=("$2"); shift ;;
+    -h|--help) /usr/bin/sed -n '2,37p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
 done
 
-[ "$(uname -s)" = Darwin ] || die "this installer runs on macOS only"
-[[ "$OWNER_SUB" =~ ^[A-Za-z0-9._@-]{1,120}$ ]] || die "--owner-sub is required"
-[[ "$REPO" =~ ^memolabs-dev/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] || die "invalid --repo"
-
-MEMO_HOME="${HOME:?HOME is required}"
-NODE="$(command -v node || true)"
-GH="$(command -v gh || true)"
-[ -n "$NODE" ] && [ -x "$NODE" ] || die "node is required"
-[ -n "$GH" ] && [ -x "$GH" ] || die "GitHub CLI is required"
-"$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=16)?0:1)' \
-  || die "node >= 22.16 is required"
-
-SOURCE_KEY="$MEMO_HOME/.config/memo-bridge/agent.key"
-SOURCE_CA="$MEMO_HOME/.config/memo-bridge/hub-ca.crt"
-BUNDLE="$MEMO_HOME/.local/share/memo-bridge/runtime/bridge/agent-cli.mjs"
-CONFIG="$MEMO_HOME/.local/share/memo-bridge/runtime-config"
-CREDS="$CONFIG/credentials"
-POLICY_DIR="$MEMO_HOME/.local/share/memo-bridge/owner-policy"
-POLICY="$POLICY_DIR/private-repos.json"
+[ "$(/usr/bin/uname -s)" = Darwin ] || die "this installer runs on macOS only"
+case "${HOME:-}" in /*) ;; *) die "HOME must be an absolute path" ;; esac
 LABEL="dev.memolabs.memo-bridge-agent"
-PLIST="$MEMO_HOME/Library/LaunchAgents/$LABEL.plist"
-DOMAIN="gui/$(id -u)"
+BASE="$HOME/.local/share/memo-bridge"
+STAGING="$BASE/launchd"
+TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
+PROBE_BACKUP="$STAGING/$LABEL.plist.probe"
+DOMAIN="gui/$(/usr/bin/id -u)"
 
-[ -f "$SOURCE_KEY" ] || die "missing existing probe identity: $SOURCE_KEY"
-[ -f "$SOURCE_CA" ] || die "missing hub CA: $SOURCE_CA"
-[ -f "$BUNDLE" ] || die "missing deployed runtime bundle: $BUNDLE"
-
-# gh obtains the Keychain-held token locally. Nothing captures it in logs or env.
-TOKEN="$("$GH" auth token --hostname github.com 2>/dev/null || true)"
-[[ "$TOKEN" =~ ^[A-Za-z0-9_.-]{20,2048}$ ]] || die "GitHub CLI has no usable github.com token"
-
-mkdir -p "$CREDS" "$POLICY_DIR" "$MEMO_HOME/Library/Logs/memo-bridge" "$MEMO_HOME/Library/LaunchAgents"
-chmod 0700 "$CONFIG" "$CREDS" "$POLICY_DIR"
-install -m 0600 "$SOURCE_KEY" "$CREDS/agent-key"
-printf '%s\n' "$TOKEN" > "$CREDS/ledger-gh"
-chmod 0600 "$CREDS/ledger-gh"
-TOKEN="" # do not retain it beyond the protected file write
-
-TMP_POLICY="$(mktemp "$POLICY_DIR/.private-repos.XXXXXX")"
-trap 'rm -f "$TMP_POLICY" "$PLIST.tmp"' EXIT
-printf '{"schema":"memolabs.owner-private-repos.v1","owner_sub":"%s","repos":["%s"]}\n' "$OWNER_SUB" "$REPO" > "$TMP_POLICY"
-chmod 0600 "$TMP_POLICY"
-mv -f "$TMP_POLICY" "$POLICY"
-
-cat > "$PLIST.tmp" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$NODE</string><string>$BUNDLE</string></array>
-  <key>EnvironmentVariables</key><dict>
-    <key>MEMO_BRIDGE_AGENT_MODE</key><string>runtime</string>
-    <key>MEMO_BRIDGE_MAC_RUNTIME_ENABLED</key><string>enabled</string>
-    <key>MEMO_BRIDGE_AGENT_CONFIG</key><string>$MEMO_HOME/.config/memo-bridge</string>
-    <key>CREDENTIALS_DIRECTORY</key><string>$CREDS</string>
-    <key>MEMO_BRIDGE_AGENT_URL</key><string>wss://127.0.0.1:9444/agent</string>
-    <key>MEMO_BRIDGE_HOST</key><string>mac</string>
-    <key>PATH</key><string>$(dirname "$NODE"):/usr/bin:/bin:/opt/homebrew/bin</string>
-  </dict>
-  <key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardErrorPath</key><string>$MEMO_HOME/Library/Logs/memo-bridge/stderr.log</string>
-  <key>StandardOutPath</key><string>$MEMO_HOME/Library/Logs/memo-bridge/stdout.log</string>
-</dict></plist>
-EOF
-plutil -lint "$PLIST.tmp" >/dev/null
-chmod 0644 "$PLIST.tmp"
-
-if [ "$INSTALL" = 1 ]; then
-  mv -f "$PLIST.tmp" "$PLIST"
-  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "$DOMAIN" "$PLIST"
-  launchctl kickstart -k "$DOMAIN/$LABEL"
-  echo '{"ok":true,"installed":true,"next":"enable the guarded VPS routing config, then run the CDKF E2E check"}'
-else
-  echo '{"ok":true,"installed":false,"next":"credentials and policy were prepared; rerun with --install to switch the agent to runtime mode"}'
+if [ "$ROLLBACK" = 1 ]; then
+  [ -f "$PROBE_BACKUP" ] || die "no probe plist kept at $PROBE_BACKUP"
+  /bin/cp -f "$PROBE_BACKUP" "$TARGET"
+  /bin/launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  /bin/launchctl bootstrap "$DOMAIN" "$TARGET"
+  say rollback "\"label\":\"$LABEL\",\"restored\":\"$PROBE_BACKUP\""
+  exit 0
 fi
+
+[[ "$OWNER_SUB" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "--owner-sub must be the owner's Pocket ID user id"
+[[ "$GOV_REF" =~ ^[0-9a-f]{40}$ ]] || die "--governance-ref must be a 40-hex memolabs-dev/.github commit"
+[ "$FROM_REGISTRY" = 1 ] || [ "${#REPOS[@]}" -gt 0 ] || die "pass --from-registry or at least one --repo"
+
+REPO="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+[ -n "$BRIDGE_REF" ] || BRIDGE_REF="$(/usr/bin/git -C "$REPO" rev-parse HEAD)"
+[[ "$BRIDGE_REF" =~ ^[0-9a-f]{40}$ ]] || die "--bridge-ref must be a 40-hex memo-bridge commit"
+/usr/bin/git -C "$REPO" cat-file -e "$BRIDGE_REF^{commit}" 2>/dev/null || die "commit $BRIDGE_REF is not in $REPO"
+
+NODE="$(command -v node || true)"; GH="$(command -v gh || true)"; PNPM="$(command -v pnpm || true)"
+case "$NODE" in /*) ;; *) die "node not found as an absolute path" ;; esac
+case "$GH" in /*) ;; *) die "GitHub CLI (gh) is required" ;; esac
+case "$PNPM" in /*) ;; *) die "pnpm is required to install the runtime's production dependencies" ;; esac
+"$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=16)?0:1)' \
+  || die "node >= 22.16 is required ($NODE)"
+[ -x /usr/bin/python3 ] || die "/usr/bin/python3 is required by the governance ledger"
+
+SOURCE_KEY="$HOME/.config/memo-bridge/agent.key"
+SOURCE_CA="$HOME/.config/memo-bridge/hub-ca.crt"
+[ -f "$SOURCE_KEY" ] || die "missing the probe agent identity: $SOURCE_KEY"
+[ -f "$SOURCE_CA" ] || die "missing the hub CA: $SOURCE_CA"
+
+/bin/mkdir -p "$BASE" "$STAGING" "$HOME/Library/Logs/memo-bridge" "$HOME/Library/LaunchAgents"
+/bin/chmod 0700 "$STAGING"
+
+# 1. The runtime bundle: exactly the files of one commit, then its production dependencies.
+RELEASE="$BASE/runtime-releases/$BRIDGE_REF"
+if [ ! -f "$RELEASE/.complete" ]; then
+  /bin/mkdir -p "$BASE/runtime-releases"
+  TMP_REL="$(/usr/bin/mktemp -d "$BASE/runtime-releases/.staging.XXXXXX")"
+  trap '/bin/rm -rf "$TMP_REL"' EXIT
+  /usr/bin/git -C "$REPO" archive "$BRIDGE_REF" bridge server package.json pnpm-lock.yaml pnpm-workspace.yaml \
+    | /usr/bin/tar -x -C "$TMP_REL"
+  (cd "$TMP_REL" && "$PNPM" install --prod --frozen-lockfile --ignore-scripts --prefer-offline --reporter=silent) \
+    || die "pnpm install of the runtime bundle failed"
+  (cd "$TMP_REL" && "$NODE" --input-type=module -e "await import('./server/runtime.mjs'); await import('./bridge/agent.mjs');") \
+    || die "the runtime bundle does not load"
+  /usr/bin/touch "$TMP_REL/.complete"
+  /bin/rm -rf "$RELEASE"
+  /bin/mv "$TMP_REL" "$RELEASE"
+  trap - EXIT
+fi
+/bin/chmod -R go-w "$RELEASE"
+say bundle "\"release\":\"$RELEASE\""
+
+# 2. The governance scripts the ledger runs, pinned like lab-infra pins them for the VPS.
+GOVERNANCE="$BASE/governance/$GOV_REF"
+if [ ! -f "$GOVERNANCE/scripts/issue_lease.py" ]; then
+  /bin/mkdir -p "$BASE/governance"
+  TMP_GOV="$(/usr/bin/mktemp -d "$BASE/governance/.staging.XXXXXX")"
+  trap '/bin/rm -rf "$TMP_GOV"' EXIT
+  /usr/bin/git clone --quiet --no-checkout "$GOV_SRC" "$TMP_GOV/clone" || die "cannot clone $GOV_SRC"
+  /usr/bin/git -C "$TMP_GOV/clone" cat-file -e "$GOV_REF^{commit}" 2>/dev/null || die "governance commit $GOV_REF not found"
+  /bin/mkdir -p "$TMP_GOV/tree"
+  /usr/bin/git -C "$TMP_GOV/clone" archive "$GOV_REF" scripts | /usr/bin/tar -x -C "$TMP_GOV/tree"
+  [ -f "$TMP_GOV/tree/scripts/private_owner_allowlist.py" ] || die "governance $GOV_REF has no private_owner_allowlist.py"
+  /bin/rm -rf "$GOVERNANCE"
+  /bin/mv "$TMP_GOV/tree" "$GOVERNANCE"
+  /bin/rm -rf "$TMP_GOV"
+  trap - EXIT
+fi
+say governance "\"root\":\"$GOVERNANCE\""
+
+# 3. Credentials: the probe identity, and the owner's gh token for the ledger and for pushes.
+CREDS="$BASE/runtime-config/credentials"
+/bin/mkdir -p "$CREDS"
+/bin/chmod 0700 "$BASE/runtime-config" "$CREDS"
+/usr/bin/install -m 0600 "$SOURCE_KEY" "$CREDS/agent-key"
+TOKEN="$("$GH" auth token --hostname github.com 2>/dev/null || true)"
+# Length checked apart: macOS /bin/bash 3.2 refuses a regex bound above 255 (RE_DUP_MAX).
+[[ "$TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]] && [ "${#TOKEN}" -ge 20 ] && [ "${#TOKEN}" -le 2048 ] \
+  || die "GitHub CLI has no usable github.com token (gh auth login)"
+for name in ledger-gh push-gh; do
+  printf '%s\n' "$TOKEN" > "$CREDS/$name.tmp"
+  /bin/chmod 0600 "$CREDS/$name.tmp"
+  /bin/mv -f "$CREDS/$name.tmp" "$CREDS/$name"
+done
+TOKEN=""
+say credentials "\"dir\":\"$CREDS\",\"files\":[\"agent-key\",\"ledger-gh\",\"push-gh\"]"
+
+# 4. Enrollment, the two policy files and the staged plist.
+ARGS=(configure --home "$HOME" --owner-sub "$OWNER_SUB" --release "$RELEASE" --governance "$GOVERNANCE"
+  --node "$NODE" --out "$STAGING" --path "$(/usr/bin/dirname "$GH")")
+[ "$FROM_REGISTRY" = 1 ] && ARGS+=(--from-registry)
+for r in "${REPOS[@]+"${REPOS[@]}"}"; do ARGS+=(--repo "$r"); done
+"$NODE" "$REPO/deploy/mac/runtime-mac.mjs" "${ARGS[@]}" || die "configure refused (see the JSON line above)"
+/usr/bin/plutil -lint "$STAGING/$LABEL.plist" >/dev/null || die "staged plist is invalid"
+
+if [ "$INSTALL" != 1 ]; then
+  say staged "\"plist\":\"$STAGING/$LABEL.plist\",\"next\":\"rerun with --install to switch the agent to runtime mode\""
+  exit 0
+fi
+
+# 5. Install: keep the probe plist once, then restart the agent in runtime mode.
+if [ -f "$TARGET" ] && [ ! -f "$PROBE_BACKUP" ]; then /bin/cp -p "$TARGET" "$PROBE_BACKUP"; fi
+/bin/cp -f "$STAGING/$LABEL.plist" "$TARGET.tmp"
+/bin/chmod 0644 "$TARGET.tmp"
+/bin/mv -f "$TARGET.tmp" "$TARGET"
+LOG="$HOME/Library/Logs/memo-bridge/stderr.log"
+START_LINES="$( [ -f "$LOG" ] && /usr/bin/wc -l < "$LOG" | /usr/bin/tr -d ' ' || echo 0)"
+/bin/launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+/bin/launchctl bootstrap "$DOMAIN" "$TARGET"
+/bin/launchctl kickstart -k "$DOMAIN/$LABEL"
+tries=0
+while [ "$tries" -lt 30 ]; do
+  tries=$((tries + 1))
+  if [ -f "$LOG" ] && /usr/bin/tail -n "+$((START_LINES + 1))" "$LOG" | /usr/bin/grep -q '"event":"runtime_ready"'; then
+    say installed "\"label\":\"$LABEL\",\"runtime_ready\":true,\"rollback\":\"$0 --rollback\""
+    exit 0
+  fi
+  /bin/sleep 1
+done
+die "the agent did not report runtime_ready within 30 s; read $LOG, then $0 --rollback if needed"
