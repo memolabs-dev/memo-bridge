@@ -26,8 +26,9 @@ export function registerContextTools(server, getRuntime, deps = {}) {
     return gh;
   };
   server.registerTool('project_context', {
-    description: 'Discover existing project, Source Engine observations and current PR/Issue state before proposing new work. Read-only; never authorizes a merge.',
-    inputSchema: z.object({ project: z.string().max(80), goal: z.string().max(200).optional() }),
+    description: 'Use this when the owner asks where a project stands («où en est stasis ?») or before creating new work on it: open Issues and PRs, tracked changes, so you do not duplicate an existing task. Read-only.',
+    inputSchema: z.object({ project: z.string().max(80).describe('Registered name, e.g. "stasis".'),
+      goal: z.string().max(200).optional().describe('What the owner wants, e.g. "export CSV".') }),
     annotations: readonly
   }, async (args = {}) => {
     let rt;
@@ -42,10 +43,10 @@ export function registerContextTools(server, getRuntime, deps = {}) {
     }
     // Metadata-only Mac snapshot entries never grant repository access.
     if (isRemotePrincipal(rt.principal)) {
-      const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy());
+      const refusal = remoteProjectRefusal(rt.principal, args.project, getPolicy(), { host: rt.host });
       if (refusal) {
         await rt.audit('project_context', 'denied', 'project_not_allowed');
-        return respond(fail('project_not_allowed'));
+        return respond(refusal);
       }
     }
     let project;

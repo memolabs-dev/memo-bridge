@@ -8,6 +8,7 @@
 // - this module adds what the ledger does not own: per-session workspaces, the identity of the
 //   worker (derived by the server, never by the model), Git-verified checkpoints and an audit
 //   journal, all in the private local store.
+import { withOwnerPrivateRepos } from './owner-private-repos.mjs';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
@@ -54,8 +55,7 @@ const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_clo
   'secret_detected', 'instruction_refused', 'not_a_fact', 'evidence_required', 'duplicate_fact', 'memory_full', 'revision_conflict',
   // Delegation (#47).
   ...DELEGATION_REFUSALS]);
-// Phase 5: the only host a remote (OIDC) principal's workspace may live on. Mac-hosted
-// workspaces driven remotely are deferred to Phase 5b (spec non-goals, REQ-P5-08).
+// Remotes use VPS by default; opted-in Mac runtimes only accept Mac host workspaces.
 const REMOTE_HOST = 'vps';
 const UNCERTAIN = new Set(['ledger_unavailable', 'ledger_outcome_unknown']);
 const MAX_LIST = 200;
@@ -331,11 +331,18 @@ export { workerFor };
 export function createCoordinator({ store, principal, ledger, now = Date.now, catalogOptions = {},
   resolveProject = name => catalogResolver(name, catalogOptions), projectRemote = gitHubRemote, host = defaultHost(),
   listProjectRepos = () => catalogRepos(catalogOptions), governanceRoot = defaultGovernanceRoot(),
-  readAllowlist = () => readPublicAllowlist(governanceRoot), searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
+  readAllowlist = () => readPublicAllowlist(governanceRoot),
+  privatePolicyFile = process.env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE,
+  searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
   remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
   learningThresholds = thresholdsFromEnv() }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   const remote = isRemotePrincipal(principal);
+  // Mac owner-only private enrollment is an explicit local file grant, never
+  // the VPS metadata-only snapshot or a request-provided repository name.
+  const effectiveAllowlist = async () => withOwnerPrivateRepos(await readAllowlist(), {
+    file: privatePolicyFile, principal, remotePolicy, host
+  });
   // Where the call came from and which client made it, as the server set them on the principal
   // (D6); never read from arguments. Absent attributes stay null in the journal.
   const principalVia = ['stdio', 'hub'].includes(principal.via) ? principal.via : (remote ? 'hub' : null);
@@ -570,6 +577,19 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     }
   }
 
+  // An Issue whose change a merged pull request already carried keeps its `agent:ready` label:
+  // nothing in the rank can see it, so task_next says it on the task instead of proposing silent
+  // work (A027, #196). A failed or odd check removes the signal, never the task.
+  async function mergedReferencesFor(ref) {
+    try {
+      const found = await search(`"${ref}" is:pr is:merged`, [ref.split('#')[0]]);
+      if (!found?.ok) return [];
+      return (found.items ?? []).filter(i => i?.pull_request).slice(0, 3)
+        .map(i => ({ number: Number(i.number) || 0, url: cleanText(i.html_url ?? '', 300) }))
+        .filter(p => p.number > 0 && p.url);
+    } catch { return []; }
+  }
+
   // The batch repository of a project: its GitHub origin, which must be in the ledger
   // allowlist (else no task of the batch could ever be claimed).
   async function batchRepo(projectName) {
@@ -577,7 +597,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     if (!project.ok) return project;
     const origin = await projectRemote(project.project);
     if (!origin) return fail('project_origin_unknown');
-    const allowlist = await readAllowlist();
+    const allowlist = await effectiveAllowlist();
     if (!allowlist.ok) return allowlist;
     const repo = allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase());
     if (!repo) return fail('repo_not_allowed');
@@ -684,12 +704,14 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       finally { dropClaiming(task.issue); }
       if (claim.ok) {
         const parsed = parseTaskBody(task.body);
+        const mergedReferences = await mergedReferencesFor(task.issue);
         return { ok: true, done: false,
           task: { issue: task.issue, title: task.title, url: task.url, priority: task.priority, project: task.project,
             scope: sanitizeMultiline(parsed.scope, 4000), acceptance: sanitizeMultiline(parsed.acceptance, 4000),
             ...(parsed.scope || parsed.acceptance ? {} : { body: sanitizeMultiline(task.body, 4000) }),
             workspace_id: current.id, claim_id: claim.claim_id, fence: claim.fence, expires_at: claim.expires_at,
-            instructions: workerInstructions({ workspaceId: current.id, issue: task.issue, expiresAt: claim.expires_at }) },
+            instructions: workerInstructions({ workspaceId: current.id, issue: task.issue, expiresAt: claim.expires_at }),
+            ...(mergedReferences.length ? { merged_references: mergedReferences } : {}) },
           ...(moved ? { project_changed: moved } : {}), ...(skipped.length ? { skipped } : {}),
           brief: await briefFor(current, task, meta) };
       }
@@ -708,8 +730,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     memoryGet: args => memory.get(args),
     memoryList: args => memory.list(args),
     async workspaceOpen(args) {
-      // A client kind the server derived (principal.client_type, Phase 5 D6) wins over the
-      // argument a model wrote; otherwise the argument, as before.
+      // The authenticated client kind overrides untrusted model arguments.
       const clientType = principal.client_type ?? args.client_type ?? 'other';
       if (!CLIENT_TYPES.includes(clientType)) return fail('invalid_input', 'client_type');
       const label = cleanText(args.client_label, 80);
@@ -717,7 +738,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const remote = isRemotePrincipal(principal);
       const hostId = args.host ?? (remote ? REMOTE_HOST : host);
       if (!HOSTS.includes(hostId)) return fail('invalid_input', 'host');
-      if (remote && hostId !== REMOTE_HOST) return fail('host_not_remote_enabled');
+      if (remote && hostId !== (remotePolicy?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST))
+        return fail('host_not_remote_enabled');
       if (args.branch !== undefined && args.branch !== null && !validBranch(args.branch)) return fail('invalid_input', 'branch');
       const project = await resolve(args.project);
       if (!project.ok) return project;
@@ -837,18 +859,18 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (max === undefined) return fail('invalid_input', 'limit');
       let projects;
       if (args.project !== undefined) {
-        const refusal = remoteProjectRefusal(principal, args.project, remotePolicy);
+        const refusal = remoteProjectRefusal(principal, args.project, remotePolicy, { host });
         if (refusal) return refusal;
         const project = await resolve(args.project);
         if (!project.ok) return project;
         projects = [project.project];
       } else {
-        if (remote && !remotePolicy.configured) return remoteProjectRefusal(principal, null, remotePolicy);
+        if (remote && !remotePolicy.configured) return remoteProjectRefusal(principal, null, remotePolicy, { host });
         try { projects = (await listProjectRepos()).slice(0, TASKS_SCAN.projects); } catch { return fail('catalog_unavailable'); }
         // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09).
         if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
       }
-      const allowlist = await readAllowlist();
+      const allowlist = await effectiveAllowlist();
       if (!allowlist.ok) return allowlist;
       const allowed = new Map(allowlist.repos.map(r => [r.toLowerCase(), r]));
       const origins = await Promise.all(projects.map(async p => ({ name: p.name, origin: await projectRemote(p) })));
@@ -945,11 +967,32 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         return fail(recorded === false ? 'workspace_closed' : 'store_unavailable',
           back.ok ? 'claim released' : `claim may remain until ${receipt.expires_at}`);
       }
+      // One workspace works on one task. Changing target gives the abandoned lease back in the
+      // same movement, so a pivot never leaves the previous task locked (A028). Same shape as
+      // workspace_close: release at the ledger, then reconcile the local mirror.
+      const others = (await read(repo => repo.claimsOf(ws.workspace.id, 'claimed')))
+        .filter(claim => claim.claim_id !== receipt.claim_id);
+      const released = []; const lost = []; const unreleased = []; const abandonedJobs = [];
+      for (const claim of others) {
+        const outcome = await releaseRecorded(ws.workspace, claim, 'cancelled');
+        if (outcome.state === 'unreleased') { unreleased.push({ issue: claim.issue_ref, error: outcome.error }); continue; }
+        await write((repo, at) => repo.updateClaim(claim.claim_id, { state: 'released',
+          outcome: outcome.state === 'released' ? 'cancelled' : 'lost', fence_sha: outcome.fence ?? claim.fence_sha, updated_at: at },
+        claim.fence_sha));
+        (outcome.state === 'released' ? released : lost).push(claim.issue_ref);
+        if (outcome.state === 'released') {
+          abandonedJobs.push(...await cancelJobs(ws.workspace.id, claim.issue_ref));
+          void sync?.taskReleased({ issue: claim.issue_ref, outcome: 'cancelled' },
+            syncing({ workspace_id: ws.workspace.id, issue: claim.issue_ref }, meta));
+        }
+      }
       // Also covers task_next and the takeover of an expired lease: the new holder is Réservé.
       void sync?.taskClaimed({ issue: issue.ref, clientType: ws.workspace.client_type },
         syncing({ workspace_id: ws.workspace.id, issue: issue.ref }, meta));
       return { ok: true, issue: issue.ref, worker, claim_id: receipt.claim_id, fence: receipt.fence_sha, epoch: receipt.epoch,
-        expires_at: receipt.expires_at, project_origin_verified: Boolean(origin), ...(recovered ? { recovered: true } : {}) };
+        expires_at: receipt.expires_at, project_origin_verified: Boolean(origin), ...(recovered ? { recovered: true } : {}),
+        ...(released.length ? { released, ...(lost.length ? { lost } : {}), ...(unreleased.length ? { unreleased } : {}) } : {}),
+        ...(abandonedJobs.length ? { cancelled_jobs: abandonedJobs } : {}) };
     },
 
     async taskRenew(args) {
@@ -1420,9 +1463,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     return origins;
   }
 
-  // The project an op works on, for the allowlist: the argument of workspace_open, else the
-  // project of the owned workspace it names. null when there is nothing to check yet (the
-  // operation itself then refuses the unknown or foreign workspace).
+  // Resolve the project for the remote allowlist, never trusting foreign workspaces.
   async function projectOf(op, args) {
     if (op === 'workspace_open' || op === 'batch_create' || op === 'batch_status') return typeof args.project === 'string' ? args.project : '';
     if (!WS_RE.test(args.workspace_id ?? '')) return null;
@@ -1434,7 +1475,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   async function guarded(op, method, args, meta) {
     if (remote && REMOTE_PROJECT_OPS.has(op)) {
       const project = await projectOf(op, args);
-      const refusal = project === null ? null : remoteProjectRefusal(principal, project, remotePolicy);
+      const refusal = project === null ? null : remoteProjectRefusal(principal, project, remotePolicy, { host });
       if (refusal) return { result: refusal };
     }
     let warning = null;
@@ -1533,6 +1574,75 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   // not a tool, never authorizes anything, never throws. Returns the block to add, or null.
   api.learningTick = async (info = {}, rawMeta = null) => {
     try { return await learning.tick(info ?? {}, requestMeta(rawMeta)); } catch { return null; }
+  };
+
+  // Owner console REQ-Z1 (zero ceremony): the workspace a tool call means when it names none,
+  // called by server/tools/implicit-workspace.mjs before the tool runs. Not a tool: it decides
+  // nothing the tool would not check again, it only fills workspace_id. Only a workspace of this
+  // principal bound to this conversation (session hash) is ever chosen, in this order: the one
+  // holding claim_id, the one owning worktree_id, the conversation's workspace holding a claim on
+  // the issue, the one on the hinted project (project, or the project whose GitHub origin is the
+  // issue's repository), the most recent one when there is no hint. With open: true (task_claim,
+  // task_next) and none found, one is opened on the hinted project through api.workspaceOpen, so
+  // every workspace_open guard applies (authorization, project allowlist, session binding,
+  // delegation) and the opening is journaled. Without a session hint nothing is chosen.
+  const opening = new Map(); // `${session}|${project}` -> pending open, so parallel calls share one
+  async function projectOfIssue(issue) {
+    let projects;
+    try { projects = await listProjectRepos(); } catch { return null; }
+    if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
+    for (const p of projects) {
+      const origin = await projectRemote(p);
+      if (origin && origin.toLowerCase() === issue.repo.toLowerCase()) return p.name;
+    }
+    return null;
+  }
+  api.conversationWorkspace = async (raw = {}, rawMeta = null) => {
+    const args = raw ?? {};
+    const meta = requestMeta(rawMeta);
+    const session = meta.client_session;
+    const required = next => ({ ok: false, error: 'workspace_required', next_step: next });
+    if (!session) return required('call workspace_open {"project":"<name from projects_list>"}, then repeat this call with its workspace_id');
+    try {
+      const issue = parseIssueRef(args.issue);
+      const found = await read(repo => {
+        const mine = w => w && w.status === 'active' && ownsWorkspace(principal, w) && w.client_session === session;
+        const claim = typeof args.claim_id === 'string' && CLAIM_RE.test(args.claim_id) ? repo.getClaim(args.claim_id) : null;
+        const byClaim = claim ? repo.getWorkspace(claim.workspace_id) : null;
+        if (mine(byClaim)) return { workspace: byClaim, source: 'claim' };
+        const worktree = typeof args.worktree_id === 'string' ? repo.getWorktree(args.worktree_id) : null;
+        const byWorktree = worktree ? repo.getWorkspace(worktree.workspace_id) : null;
+        if (mine(byWorktree)) return { workspace: byWorktree, source: 'worktree' };
+        const ours = repo.listWorkspaces({ principal: principal.id, status: 'active', limit: MAX_LIST }).filter(mine);
+        const holding = issue ? ours.find(w => repo.claimsOf(w.id, 'claimed').some(c => c.issue_ref === issue.ref)) : null;
+        return holding ? { workspace: holding, source: 'claim' } : { ours };
+      });
+      if (found.workspace) return { ok: true, workspace_id: found.workspace.id, project: found.workspace.project_id, opened: false, source: found.source };
+      const project = typeof args.project === 'string' && args.project ? args.project : issue ? await projectOfIssue(issue) : null;
+      const match = project ? found.ours.find(w => w.project_id === project) : found.ours[0];
+      if (match) return { ok: true, workspace_id: match.id, project: match.project_id, opened: false, source: 'conversation' };
+      if (args.open !== true) return required(project
+        ? `nothing open on ${project} in this conversation yet: claim its task first (task_claim with the Issue, or task_next)`
+        : 'nothing open in this conversation yet: name the project or the Issue (task_claim, task_next with project)');
+      // task_next without a project takes the next task of any allowed project and moves its
+      // workspace there: open it on the first allowed project.
+      const target = project ?? (args.any_project === true && remotePolicy.configured ? remotePolicy.projects[0] ?? null : null);
+      if (!target) return required(issue ? `the Issue ${issue.ref} belongs to no project you may work on` : 'name the project (projects_list)');
+      const key = `${session}|${target}`;
+      if (!opening.has(key)) {
+        const pending = api.workspaceOpen({ project: target, client_label: 'auto',
+          host: remote ? (remotePolicy?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST) : host }, rawMeta)
+          .finally(() => opening.delete(key));
+        opening.set(key, pending);
+      }
+      const opened = await opening.get(key);
+      if (!opened?.ok) return opened ?? fail('store_unavailable');
+      await note('workspace_auto_open', 'ok', null, { workspace_id: opened.workspace.workspace_id }, meta);
+      return { ok: true, workspace_id: opened.workspace.workspace_id, project: opened.workspace.project, opened: true, source: 'opened',
+        ...(opened.memory_snapshot ? { memory_snapshot: opened.memory_snapshot } : {}) };
+    } catch {
+      return fail('store_unavailable');
+    }
   };
   return Object.freeze(api);
 }

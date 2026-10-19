@@ -15,6 +15,7 @@
 // so the Mac probe agent (which imports bridge/ops.mjs) stays light.
 import { CAPABILITIES, OPERATION_CAPABILITY, OPERATOR_OPERATION_CAPABILITY, authorize, operatorTier } from './coordinator/policy.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
+import { withImplicitWorkspace } from './tools/implicit-workspace.mjs';
 
 // [module path relative to this file, register function]. Each register function takes
 // (server, getRuntime) and calls getRuntime() lazily, inside its handlers.
@@ -29,7 +30,8 @@ export const TOOL_MODULES = Object.freeze([
   ['./tools/memory-tools.mjs', 'registerMemoryTools'],
   ['./tools/source-tools.mjs', 'registerSourceTools'],
   ['./tools/context-tools.mjs', 'registerContextTools'],
-  ['./tools/source-reconcile-tools.mjs', 'registerSourceReconcileTools']
+  ['./tools/source-reconcile-tools.mjs', 'registerSourceReconcileTools'],
+  ['./tools/project-tools.mjs', 'registerProjectTools']
 ].map(Object.freeze));
 
 // The public ChatGPT surface (spec §1 non-goals, D5). Excluded on purpose:
@@ -56,7 +58,7 @@ export const REMOTE_TOOLS_WRITE = Object.freeze([
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push',
   'jobs_submit', 'job_cancel',
   'github_create_pr', 'source_reconcile',
-  'memory_save'
+  'memory_save', 'project_create'
 ]);
 export const REMOTE_TOOLS = Object.freeze([...REMOTE_TOOLS_READ, ...REMOTE_TOOLS_WRITE]);
 const REMOTE_WRITE_SET = new Set(REMOTE_TOOLS_WRITE);
@@ -94,8 +96,9 @@ export async function collectTools(getRuntime) {
         annotations: config.annotations, handler }));
     }
   };
-  // Every handler is counted for the learning review (#38, server/tools/learning-hook.mjs).
-  const counted = withLearning(collector, getRuntime);
+  // Every handler is counted for the learning review (#38, server/tools/learning-hook.mjs), after
+  // the conversation's workspace was filled in when the call named none (REQ-Z1).
+  const counted = withLearning(withImplicitWorkspace(collector, getRuntime), getRuntime);
   for (const [path, fn] of TOOL_MODULES) {
     const mod = await import(path);
     mod[fn](counted, getRuntime);

@@ -20,7 +20,7 @@ import { parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
 import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
 import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
-import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, sessionBindingDecision }
+import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, scopeOwner, sessionBindingDecision }
   from '../../bridge/write-gate.mjs';
 
 export const GITHUB_TOOLS = Object.freeze(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
@@ -42,9 +42,9 @@ const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_not_active', 
   'default_branch_refused', 'branch_not_pushed', 'unknown_workspace', 'unknown_worktree', 'project_not_allowed',
   'head_not_pushed_by_workspace', 'session_mismatch', 'workspace_other_session', 'session_required', 'path_protected']);
 
-const repoArg = z.string().max(140).describe('owner/repo of a registered project (its GitHub origin), or memolabs-dev/.github.');
+const repoArg = z.string().max(140).describe('owner/repo of a registered project, e.g. "memolabs-dev/stasis".');
 const limitArg = z.number().int().min(LIMITS.list.min).max(LIMITS.list.max).optional()
-  .describe(`Maximum items returned (default ${LIMITS.list.default}, first page only).`);
+  .describe(`At most this many (default ${LIMITS.list.default}).`);
 
 // Refuse GitHub auto-close directives in partial PR bodies.
 const ANY_CLOSING_DIRECTIVE = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*\b`, 'i');
@@ -87,7 +87,8 @@ export function registerGithubTools(server, getRuntime, options = {}) {
       }
       if (isRemotePrincipal(rt.principal) && !(await remoteRepoAllowed(github, resolved.repo))) {
         await rt.audit(op, 'denied', 'project_not_allowed');
-        return result(fail('project_not_allowed'));
+        return result(fail('project_not_allowed',
+          `repository ${resolved.repo.full} is not the origin of any project in ${scopeOwner(rt.host)} remote project allowlist`));
       }
       return result(await run(github, resolved.repo, args));
     } catch {
@@ -109,11 +110,11 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     : Number.isInteger(value) && value >= LIMITS.list.min && value <= LIMITS.list.max ? value : undefined);
 
   server.registerTool('github_issues', {
-    description: 'List Issues (pull requests excluded) of a registered repository, most recently updated first: number, title, state, labels, author, updated_at, url. Read-only.',
+    description: 'Use this when the owner asks about the Issues of a repository («les issues ouvertes de cuesheet»): number, title, state, labels, author, url, newest first. For claimable work prefer tasks_list. Read-only.',
     inputSchema: z.object({
       repo: repoArg,
-      state: z.enum(['open', 'closed', 'all']).optional().describe('Default open.'),
-      labels: z.array(z.string().max(LIMITS.label)).max(LIMITS.labels).optional().describe('Only Issues carrying all these labels.'),
+      state: z.enum(['open', 'closed', 'all']).optional().describe('"open" (default), "closed" or "all".'),
+      labels: z.array(z.string().max(LIMITS.label)).max(LIMITS.labels).optional().describe('Only Issues with all these labels, e.g. ["agent:ready"].'),
       limit: limitArg
     }),
     annotations: read
@@ -128,10 +129,10 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_pull_requests', {
-    description: 'List pull requests of a registered repository, most recently updated first: number, title, state, draft, author, head, base, labels, updated_at, url, and mergeable for the first open ones. Read-only.',
+    description: 'Use this when the owner asks about pull requests («mes PR ouvertes sur stasis», «la PR est mergée ?»): number, title, state, draft, head, url, mergeable. Read-only.',
     inputSchema: z.object({
       repo: repoArg,
-      state: z.enum(['open', 'closed', 'all']).optional().describe('Default open.'),
+      state: z.enum(['open', 'closed', 'all']).optional().describe('"open" (default), "closed" or "all".'),
       limit: limitArg
     }),
     annotations: read
@@ -144,10 +145,10 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_workflows', {
-    description: 'Recent GitHub Actions workflow runs of a registered repository, newest first, optionally for one branch: name, status, conclusion, branch, head_sha, url. Read-only.',
+    description: 'Use this when the owner asks whether CI passed on a repository or branch («la CI est verte ?»): recent GitHub Actions runs with status and conclusion. Read-only.',
     inputSchema: z.object({
       repo: repoArg,
-      branch: z.string().max(200).optional(),
+      branch: z.string().max(200).optional().describe('e.g. "main".'),
       limit: limitArg
     }),
     annotations: read
@@ -159,10 +160,10 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_checks', {
-    description: 'Check runs and the combined commit status of a commit SHA or branch of a registered repository, with a pending/failing summary. Read-only.',
+    description: 'Use this to check the CI of one branch or commit, e.g. the branch of the PR you opened: check runs and combined status, pending and failing summary. Read-only.',
     inputSchema: z.object({
       repo: repoArg,
-      ref: z.string().max(200).describe('Full 40-character commit SHA or branch name.')
+      ref: z.string().max(200).describe('Branch or full SHA, e.g. "agent/12-a1b2".')
     }),
     annotations: read
   }, readTool('github_checks', (github, repo, args) => {
@@ -172,16 +173,16 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_create_pr', {
-    description: 'Open a pull request from the branch of an active worktree of your workspace into the repository default branch. The branch must already be pushed, the workspace must hold a live claim on the worktree Issue (verified by the lease ledger), and by default "Closes #<n>" is appended when the Issue is in the same repository. For partial PRs pass close_issue: false to leave the Issue open. Returns the existing pull request when one is already open for the branch. Never merges and never enables auto-merge: the memolabs-dev/.github landing contract lands pull requests.',
+    description: 'Use this after worktree_push to open the pull request into the default branch; adds "Closes #<n>" unless close_issue is false. Returns the open PR if one exists. Never merges: Mergify lands green PRs, gate files wait for the owner. Then task_complete.',
     inputSchema: z.object({
       workspace_id: z.string().max(40).describe('Workspace id returned by workspace_open (ws_…).'),
-      worktree_id: z.string().max(60).describe('Worktree id returned by worktree_create.'),
-      title: z.string().min(1).max(LIMITS.title),
-      body: z.string().max(LIMITS.body).optional(),
-      draft: z.boolean().optional(),
-      close_issue: z.boolean().optional().describe('Default true. Set false for an incremental or partial PR: no closing keyword is allowed and the parent Issue stays open when the PR merges.'),
+      worktree_id: z.string().max(60).describe('wt_... id of the pushed worktree.'),
+      title: z.string().min(1).max(LIMITS.title).describe('e.g. "fix(login): accept refreshed tokens".'),
+      body: z.string().max(LIMITS.body).optional().describe('What changed and how it was tested.'),
+      draft: z.boolean().optional().describe('Default false; a draft is not landed.'),
+      close_issue: z.boolean().optional().describe('Default true. false for a partial PR: the Issue stays open.'),
       client_request_id: z.string().regex(CLIENT_REQUEST_ID_RE).optional()
-        .describe('Your own id for this call (8 to 128 letters, digits, _ or -). A retry with the same id returns the first result.')
+        .describe('Optional retry key (8 to 128 of A-Z a-z 0-9 _ -): a retry returns the first result.')
     }),
     annotations: write
   }, async (args = {}, extra = null) => {
@@ -253,7 +254,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
   }
   if (local.error) return local.error;
   const { workspace, worktree, claim } = local;
-  const notAllowed = remoteProjectRefusal(rt.principal, worktree.project_id, remotePolicy);
+  const notAllowed = remoteProjectRefusal(rt.principal, worktree.project_id, remotePolicy, { host: rt.host });
   if (notAllowed) return notAllowed;
   const binding = sessionBindingDecision(workspace.client_session, meta?.client_session, remotePolicy?.session_binding,
     { remote: isRemotePrincipal(rt.principal) });

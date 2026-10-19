@@ -4,7 +4,7 @@
 // write stage (enabled). Served exactly as the public listener serves it (createMcpHandler over
 // createRemoteServerFactory); nothing is forwarded, nothing touches the network.
 //
-//   node scripts/remote-toolsize.mjs          a table
+//   node scripts/remote-toolsize.mjs          a table (read stage, write stage, write stage with operator tools)
 //   node scripts/remote-toolsize.mjs --json   one JSON object
 //
 // Tokens are an estimate (bytes / 4); no ChatGPT limit is documented, so the numbers are to be
@@ -18,9 +18,12 @@ const SUB = '00000000-0000-4000-8000-000000000000';
 const CLIENT = 'https://chatgpt.com/oauth/client.json';
 const SCOPES = Object.values(CAPABILITIES);
 
-async function listTools(remoteWrites) {
+// operator: the ceiling the live remote.json grants since Phase 6 (every capability, operator tiers
+// included), so the operator_* tools are listed too: what ChatGPT really receives today.
+async function listTools(remoteWrites, { operator = false } = {}) {
   const factory = createRemoteServerFactory({
-    config: { owner_sub: SUB, allowed_client_ids: [CLIENT], remote_writes: remoteWrites ? 'enabled' : 'disabled' },
+    config: { owner_sub: SUB, allowed_client_ids: [CLIENT], remote_writes: remoteWrites ? 'enabled' : 'disabled',
+      ...(operator ? { ceiling: SCOPES } : {}) },
     dispatch: async () => ({ ok: false, error: 'not_forwarded' })
   });
   const handler = createMcpHandler(factory, { legacy: 'stateless', responseMode: 'json' });
@@ -46,6 +49,7 @@ function measure({ text, tools }) {
 // The learning_review block (#38) a tool result may carry: its largest form, against its bound.
 const reviewBytes = Math.max(...LEARNING_REASONS.map(r => Buffer.byteLength(JSON.stringify(learningReview(r, { calls: 1_000_000, turns: 1_000_000 })))));
 const report = { read: measure(await listTools(false)), write: measure(await listTools(true)),
+  operator: measure(await listTools(true, { operator: true })),
   learning_review: { bytes: reviewBytes, max_bytes: LEARNING_REVIEW_MAX_BYTES } };
 if (process.argv.includes('--json')) {
   console.log(JSON.stringify(report));

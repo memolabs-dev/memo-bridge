@@ -11,8 +11,8 @@ import { createIssueLeaseClient, parseIssueRef as parseRef } from '../server/coo
 import { CAPABILITIES, OPERATION_CAPABILITY, authorize, localOwnerPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
 import { createRuntime } from '../server/runtime.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from '../server/tools/coordinator-tools.mjs';
-import { GOVERNANCE_ROOT, HAS_GOVERNANCE, OWNER, PROJECT_ORIGINS, coordinatorOn, fakeGitHub, journal, ledgerFor, skipWithoutLedger,
-  stubLedger, stubProjects, tempDir, tempStateDir } from './helpers/coordinator-fixture.mjs';
+import { GOVERNANCE_ROOT, HAS_GOVERNANCE, OWNER, PROJECT_ORIGINS, coordinatorOn, fakeGitHub, journal, ledgerFor, sequentialLedger,
+  skipWithoutLedger, stubLedger, stubProjects, tempDir, tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const DROP = 'memolabs-dev/drop#7';
 // Characters a model must never receive, built at run time so this file stays plain ASCII.
@@ -758,4 +758,71 @@ test('registered tools match the contract, the policy table and the runtime', as
     () => { throw new Error('state_dir_not_private'); });
   assert.deepEqual(JSON.parse((await broken.get('tasks_list')({})).content[0].text),
     { ok: false, error: 'store_unavailable', detail: 'state_dir_not_private' });
+});
+
+// A028: a conversation that changes target must not leave the abandoned task locked. One
+// workspace holds one task, and the pivot gives the previous lease back in the same movement.
+test('task_claim gives back the lease of the task it leaves behind', async t => {
+  const tools = new Map();
+  const server = { registerTool: (name, config, handler) => tools.set(name, { config, handler }) };
+  const rt = createRuntime({ stateDir: await tempStateDir(t), principal: OWNER, ledger: sequentialLedger(), host: 'mac',
+    resolveProject: stubProjects(), projectRemote: () => Promise.resolve(null) });
+  t.after(() => rt.close());
+  registerCoordinatorTools(server, () => rt);
+  const call = async (name, args) => JSON.parse((await tools.get(name).handler(args)).content[0].text);
+  const held = async workspace => (await call('workspace_status', { workspace_id: workspace })).claims.map(c => c.issue);
+  const SECOND = 'memolabs-dev/drop#8';
+
+  const opened = await call('workspace_open', { project: 'drop' });
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const workspace = opened.workspace.workspace_id;
+
+  const first = await call('task_claim', { workspace_id: workspace, issue: DROP });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.released, undefined, 'a first claim has nothing to give back');
+  assert.deepEqual(await held(workspace), [DROP]);
+
+  const pivot = await call('task_claim', { workspace_id: workspace, issue: SECOND });
+  assert.equal(pivot.ok, true, JSON.stringify(pivot));
+  // The abandoned target is reported, never silently dropped.
+  assert.deepEqual(pivot.released, [DROP]);
+  // One workspace, one live claim: the local mirror shows only the new target.
+  assert.deepEqual(await held(workspace), [SECOND]);
+
+  // Re-claiming what is already held gives back the superseded lease, so no ghost row stays.
+  const again = await call('task_claim', { workspace_id: workspace, issue: SECOND });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(again.released, [SECOND]);
+  assert.deepEqual(await held(workspace), [SECOND]);
+});
+
+// A027, #196: an Issue whose change a merged pull request already carried stays open with
+// agent:ready, because the label is never retired by a merge. The rank cannot see it, so
+// task_next says so on the task instead of proposing silent work.
+test('task_next flags a task whose change a merged pull request already carried', async t => {
+  const stateDir = await tempStateDir(t);
+  const credentials = { token: async () => ({ token: `ghs_${'x'.repeat(30)}`, source: 'app' }) };
+  const scratchDir = join(stateDir, 'gh-pr');
+  const seen = [];
+  const item = ghItem('memolabs-dev/drop', 11, READY('p1'));
+  const searchIssues = async query => {
+    seen.push(query);
+    if (/is:pr/.test(query)) {
+      return { ok: true, total_count: 1, incomplete: false,
+        items: [{ ...item, number: 232, pull_request: {}, html_url: 'https://github.com/guillaume-flambard/lab-infra/pull/232' }] };
+    }
+    return { ok: true, total_count: 1, incomplete: false, items: [item] };
+  };
+  const { store, coordinator } = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: { searchIssues, credentials, scratchDir } });
+  t.after(() => store.close());
+
+  const opened = await coordinator.workspaceOpen({ project: 'drop', client_type: 'chatgpt' });
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  const next = await coordinator.taskNext({ workspace_id: opened.workspace.workspace_id });
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal(next.task.issue, 'memolabs-dev/drop#11');
+  // The doubt travels with the task the agent is about to work, never silently dropped.
+  assert.deepEqual(next.task.merged_references,
+    [{ number: 232, url: 'https://github.com/guillaume-flambard/lab-infra/pull/232' }]);
+  assert.ok(seen.some(q => q.includes('is:pr')), 'the reference check runs');
 });

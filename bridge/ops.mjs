@@ -26,6 +26,8 @@ const LEDGER_OPS = new Set(['tasks_list', 'task_status', 'batch_status', 'task_r
   'worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push', 'worktree_remove', 'github_create_pr']);
 const LEDGER_CHAIN_OPS = new Set(['task_claim', 'task_next', 'batch_create', 'task_release', 'task_complete', 'workspace_close', 'workspace_recover']);
 const GITHUB_READ_OPS = new Set(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks']);
+// project_create generates a repository, waits for its first commit (30 s at most) and clones it.
+const LONG_OPS = new Set(['project_create']);
 
 // Ops answered by the hub itself (no agent, no capability beyond authentication).
 export const HUB_LOCAL_OPS = Object.freeze(['list_hosts', 'bridge_info']);
@@ -60,7 +62,7 @@ function hostStatusResult(data, host) {
 }
 
 function timeoutFor(op) {
-  if (LEDGER_CHAIN_OPS.has(op)) return TIMEOUTS.ledgerChain;
+  if (LEDGER_CHAIN_OPS.has(op) || LONG_OPS.has(op)) return TIMEOUTS.ledgerChain;
   if (LEDGER_OPS.has(op)) return TIMEOUTS.ledger;
   if (GITHUB_READ_OPS.has(op)) return TIMEOUTS.github;
   return TIMEOUTS.default;

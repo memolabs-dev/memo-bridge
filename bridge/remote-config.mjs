@@ -52,7 +52,7 @@ export const CLIENT_CERT_MODES = Object.freeze(['off', 'log', 'require']);
 
 const KEYS = Object.freeze({
   top: ['version', 'managed_by', 'remote_enabled', 'listen', 'public_host', 'allowed_origins', 'trusted_proxies', 'oidc', 'projects',
-    'remote_writes', 'session_binding', 'client_cert', 'budgets', 'rate_limits'],
+    'remote_writes', 'session_binding', 'client_cert', 'budgets', 'rate_limits', 'mac_runtime_routing'],
   listen: ['host', 'port'],
   oidc: ['issuer', 'jwks_uri', 'audience', 'owner_sub', 'allowed_client_ids', 'required_scope', 'max_token_age_sec',
     'clock_tolerance_sec', 'ceiling'],
@@ -129,6 +129,8 @@ function parse(raw) {
   if (oidc.required_scope !== undefined && oidc.required_scope !== BASELINE_SCOPE) bad('oidc.required_scope');
   const known = Object.values(CAPABILITIES);
   if (oidc.ceiling !== undefined && (!Array.isArray(oidc.ceiling) || oidc.ceiling.length > 16 || oidc.ceiling.some(c => !known.includes(c)))) bad('oidc.ceiling');
+  const macRuntimeRouting = raw.mac_runtime_routing ?? 'disabled';
+  if (!['enabled', 'disabled'].includes(macRuntimeRouting)) bad('mac_runtime_routing');
   const remoteWrites = raw.remote_writes ?? 'disabled';
   if (!REMOTE_WRITES.includes(remoteWrites)) bad('remote_writes');
   const verifierOptions = {
@@ -169,6 +171,7 @@ function parse(raw) {
   if (policy.projects.length === 0) bad('projects');
   const surface = Object.freeze({
     owner_sub: oidc.owner_sub, allowed_client_ids: oidc.allowed_client_ids, remote_writes: remoteWrites,
+    ...(raw.mac_runtime_routing !== undefined ? { mac_runtime_routing: macRuntimeRouting } : {}),
     ...(oidc.ceiling !== undefined ? { ceiling: [...oidc.ceiling] } : {}),
     ...(budgets.result_max_bytes !== undefined ? { result_budget_bytes: budgets.result_max_bytes } : {}),
     ...(budgets.list_max_items !== undefined ? { list_limit: budgets.list_max_items } : {}),

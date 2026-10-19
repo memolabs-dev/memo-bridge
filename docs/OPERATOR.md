@@ -3,8 +3,10 @@
 Operator tools let the owner, from a ChatGPT Chat conversation (connector "Memo Bridge VPS")
 or from the 9443 hub, read, write and run commands on the VPS `lab` and on the Mac, root
 included on both (on the Mac once its root helper is installed, owner decision 2026-10-14). They are for the machine. Code in tracked repositories keeps the
-worktree, job, pull request flow (`docs/REMOTE_CHATGPT.md`): a write or a command inside a
-registered checkout on its default branch answers `use_dev_flow`.
+worktree, job, pull request flow (`docs/REMOTE_CHATGPT.md`): a write, or a write-capable command,
+inside a registered checkout on its default branch answers `use_dev_flow`. A read-only command
+(`git status`, `git log`, `ls`, `rg`) runs there: it cannot edit tracked code, and it already
+passes the read roots and the secret denylist like any other read.
 
 Specification: `.agent/project/phase-6/spec.md` (decisions D1 to D11, deviations DEV-P6-01 to
 39; the Mac root follow-up is DEV-P6-32 to 39). Server side on lab: lab-infra role `memo-operator`, `docs/memo-operator.md` there.

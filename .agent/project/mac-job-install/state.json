@@ -1,0 +1,21 @@
+{
+  "phase": "READY_FOR_MANUAL_ACCEPTANCE",
+  "scope": "Dependency install phase for Mac (local executor) jobs, memo-bridge feat/mac-job-install-phase",
+  "updated": "2026-10-18",
+  "requirements": {
+    "total": 11,
+    "verified_offline": ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"],
+    "verified_live_on_this_mac": "tests/job-install-local.test.mjs live case with MEMO_BRIDGE_LIVE_INSTALL=1, 2026-10-18 12:28 Paris: npm ci, pnpm 12.10.1 install and go mod download (github.com/google/uuid) ran in the install profile with the network, then npm test and go test ./... offline, all succeeded",
+    "pending_runtime": ["T9: the reinstalled runtime agent runs a ChatGPT test job on a Mac-only project with dependencies (horslot)"]
+  },
+  "todos": { "p0_open": 0, "p1_open": 0, "external": ["T9 owner: deploy/mac/install-runtime-agent.sh, then a ChatGPT job"] },
+  "risks": { "critical_open": 0, "high_open": 0, "medium_open": 2 },
+  "evidence": {
+    "pnpm_test": "803 tests, 802 pass, 0 fail, 1 skipped (the opt-in live case)",
+    "recipe_profile_unchanged": "sha256 of sandboxProfile({denyReadCount: 2, gitCommon}) equal to origin/main 59e9e85",
+    "found_while_testing": "pnpm 12 writes store locks to /tmp/pnpm-store-operation-locks-<uid> unless XDG_RUNTIME_DIR is a 0700 folder (CHANGELOG 12.8.2, #16390); getaddrinfo needs the /private/var/run/mDNSResponder socket"
+  },
+  "not_covered": ["Python, Cargo, SwiftPM installs", "private Go modules", "registries on a port other than 443", "a Makefile recipe that calls go"],
+  "pushed": false,
+  "deployed": false
+}

@@ -1,0 +1,20 @@
+# The one required check of a new Memo Labs project (memo-bridge project_create, template
+# memolabs-dev/project-template). Mergify lands a green PR on it: .mergify.yml names it.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test

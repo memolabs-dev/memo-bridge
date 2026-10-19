@@ -14,6 +14,12 @@ import { isRemotePrincipal } from '../coordinator/policy.mjs';
 import { remotePolicyFromEnv, remoteProjectRefusal } from '../../bridge/write-gate.mjs';
 
 export const CATALOG_TOOLS = Object.freeze(['projects_list']);
+// Shared with the stdio server's own projects_list (server/index.mjs), so both surfaces list the same tool.
+export const PROJECTS_LIST_DEFINITION = Object.freeze({
+  description: 'Use this when the owner asks about his projects («quels sont mes projets ?», «lesquels je peux faire avancer ?», "list my projects") or names one you do not know yet: registered Memo Labs projects, with status, and which ones you can work on from here. Use it to turn a project name into the exact registered name. Read-only.',
+  inputSchema: z.object({ search: z.string().max(80).optional().describe('Part of a name, e.g. "kollio".'),
+    status: z.string().max(40).optional().describe('e.g. "active", "lab" or "parked".') })
+});
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
@@ -23,8 +29,7 @@ const fail = error => ({ ok: false, error });
 export function registerCatalogTools(server, getRuntime, deps = {}) {
   const remotePolicy = deps.remotePolicy ?? (() => remotePolicyFromEnv());
   server.registerTool('projects_list', {
-    description: 'List/search registered Memo Labs projects from canonical PROJECTS.md. Read-only.',
-    inputSchema: z.object({ search: z.string().max(80).optional(), status: z.string().max(40).optional() }),
+    ...PROJECTS_LIST_DEFINITION,
     annotations: readonly
   }, async (args = {}) => {
     let rt;
@@ -38,7 +43,7 @@ export function registerCatalogTools(server, getRuntime, deps = {}) {
     try { listed = await listProjects(args ?? {}, rt.catalogOptions ?? {}); } catch { return result(fail('catalog_unavailable')); }
     if (!isRemotePrincipal(rt.principal)) return result(listed);
     const policy = remotePolicy();
-    const refusal = remoteProjectRefusal(rt.principal, null, policy);
+    const refusal = remoteProjectRefusal(rt.principal, null, policy, { host: rt.host });
     if (refusal && !policy?.configured) {
       await rt.audit('projects_list', 'denied', refusal.error);
       return result(refusal);
@@ -49,7 +54,7 @@ export function registerCatalogTools(server, getRuntime, deps = {}) {
     const ownerDiscovery = rt.catalogDiscoveryEnabled === true && policy?.configured === true &&
       typeof policy.owner_sub === 'string' && rt.principal.id === `oidc:${policy.owner_sub}`;
     const projects = listed.projects.filter(p =>
-      !remoteProjectRefusal(rt.principal, p.name, policy) || (ownerDiscovery && p.metadata_only === true));
+      !remoteProjectRefusal(rt.principal, p.name, policy, { host: rt.host }) || (ownerDiscovery && p.metadata_only === true));
     return result({ ...listed, total: projects.length, count: projects.length, projects });
   });
 }

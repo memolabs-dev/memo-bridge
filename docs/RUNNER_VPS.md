@@ -202,7 +202,7 @@ How it combines with the rest of the unit:
 
 Timing: the supervisor's safety-net deadline is now `timeout + INSTALL_TIMEOUT_SECONDS + margin`, since `started_at` is when the install unit became active and the recipe's `RuntimeMaxSec=` starts after it. `systemctl show` reads both units; the job is active while either is (`phase: install | recipe`).
 
-The Mac executor is unchanged: its Seatbelt profile allows loopback only (no DNS, no remote hosts), so a job there never installs anything and uses whatever the worktree already has.
+The Mac executor has the same two phases since 2026-10-18 (`.agent/project/mac-job-install`): the same pinned install argv plus `go mod download`, run in a second Seatbelt profile (HTTPS out, no loopback, the owner's home unreadable except toolchains), then the recipe in the unchanged loopback-only profile. See docs/RUNNER.md, "Install phase".
 
 ## Still to verify on the VPS
 

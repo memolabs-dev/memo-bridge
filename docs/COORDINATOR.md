@@ -28,7 +28,7 @@ The Mac runner that does the work of a claimed task (worktrees, files, jobs, pus
 | `workspace_recover({workspace_id})` | `coordinator:read` | Read-only resumption snapshot: claims reconciled with the ledger, active worktrees, last 10 checkpoints, recent jobs, next safe actions. |
 | `tasks_list({project?, limit?})` | `coordinator:read` | Claimable tasks of registered and allowlisted repositories, ranked p0, p1, p2, then oldest first (default 30, at most 100). |
 | `task_status({issue})` | `coordinator:read` | Shared lease state of one task (holder, expiry, current fence) and its checkpoints. |
-| `task_claim({workspace_id, issue, ttl_seconds?})` | `coordinator:write` | Reserves the task through the ledger; returns `claim_id`, `fence`, `epoch`, `expires_at`. |
+| `task_claim({workspace_id, issue, ttl_seconds?})` | `coordinator:write` | Reserves the task through the ledger; returns `claim_id`, `fence`, `epoch`, `expires_at`. Any other task the workspace still holds is released with outcome `cancelled` and listed in `released` (its jobs in `cancelled_jobs`): one workspace holds one task. |
 | `task_renew({workspace_id, issue, claim_id, fence, ttl_seconds?})` | `coordinator:write` | Extends the lease (60 to 1800 s, default 300); returns a new fence. |
 | `task_checkpoint({workspace_id, issue, claim_id, fence, branch?, commit?, note?, handoff?})` | `coordinator:write` | Records a Git-verified checkpoint and/or a structured handoff under a live claim (branch and commit required unless a handoff is given). |
 | `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `completed`, `blocked`, `failed` or `cancelled`, also from a closed workspace. |
@@ -66,7 +66,11 @@ A session that lost its context (compaction, crash, new conversation) calls `wor
   allowed projects (remote: `remote.json` `projects`; local: every catalog repository), p0 first,
   then oldest, claimed through `task_claim`'s path. A workspace with no live claim and no active
   worktree moves to the task's project (`workspace_retarget` in the journal). Every answer carries
-  `brief` (task, project, other conversations on the project, rules).
+  `brief` (task, project, other conversations on the project, rules). An Issue whose change a
+  merged pull request already carried still carries `agent:ready`, and no rank can see it: the
+  answer adds `merged_references` (merged pull requests naming the Issue) to the task, so the
+  agent reads the Issue before working it. A failed check leaves the field out and never drops the
+  task.
 - `session_binding: "enforce"`: see `docs/REMOTE_CHATGPT.md`.
 
 ## Delegation (child chats under a parent's task)
