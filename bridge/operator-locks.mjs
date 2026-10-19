@@ -230,7 +230,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
     try { first = reload(); } catch { first = { ok: false }; }
     if (first?.ok) adopt(first.data); else unavailable = true;
   } else adopt(initial);
-  const stateUnavailable = () => fail('locks_state_unavailable', { detail: 'the saved operator locks cannot be read: no lock is granted or checked until they can',
+  const stateUnavailable = () => fail('locks_state_unavailable', { detail: 'the saved operator locks cannot be read: no lock is granted or checked until they can. Remedy: fix <state dir>/locks.json, or remove it to reset every lock (removal frees all held locks)',
     next_step: 'tell the owner: locks.json in the hub state directory is unreadable or corrupt' });
   const changed = () => {
     if (unavailable) return;
@@ -411,13 +411,14 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
 
   // For sessions_overview: this principal's locks (with `you`), and the last call per tag.
   function overview(principal, clientSession) {
+    const unreadable = refused();
     sweep();
     const caller = session(clientSession);
     const mine = [...locks.values()].filter(l => l.principal === principal.id).sort((a, b) => a.taken - b.taken);
     const calls = {};
     for (const [s, at] of lastCall) calls[sessionTag(s)] = new Date(at).toISOString();
     return { locks: mine.slice(0, LOCK_LIMITS.listed).map(l => describe(l, caller)), locks_truncated: mine.length > LOCK_LIMITS.listed,
-      locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
+      ...(unreadable ? { locks_state: 'unavailable' } : {}), locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
   }
 
   // What one call touches, with the uploads this table knows (implicit locks, D-R14).
@@ -443,6 +444,6 @@ export function mergeOverview(data, view) {
   const shown = new Set(data.sessions.flatMap(s => [s.workspace_id, ...(Array.isArray(s.children) ? s.children.map(c => c.workspace_id) : [])]));
   const list = view.locks.map(({ lock_id, host, kind, target, workspace_id, session_tag, you, reason, expires_at }) => ({ lock_id, workspace_id,
     session_tag, ...(you !== undefined ? { you } : {}), ...(shown.has(workspace_id) ? {} : { host, kind, target, reason, expires_at }) }));
-  return { ...data, sessions, operator_locks: list, ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),
+  return { ...data, sessions, operator_locks: list, ...(view.locks_state ? { locks_state: view.locks_state } : {}), ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),
     locks_since: view.locks_since };
 }
