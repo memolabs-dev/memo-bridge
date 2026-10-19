@@ -458,6 +458,38 @@ test('judge_changed passes: ordinary workflow edits (step names with expressions
   passes(run({ [f]: wf('  build:\n    name: Build docs\n    runs-on: ubuntu-latest\n    steps:\n      - name: uni\n        run: echo step names are not checks\n') }));
 });
 
+// Ruling 19: YAML quoting, escapes and explicit keys cannot hide a weakening (reviewer probes).
+test('mergify_weakened: a quoted multi-line scalar that swallows base conditions (NEW1)', () => {
+  const m = '.mergify.yml';
+  violates(run({ [m]: MERGIFY.replace('    - label != hold-merge\n', "    - '-base ~= zzz\n    - label != hold-merge\n")
+    .replace('    - check-success = @github-actions/test (22)\n', "    - check-success = @github-actions/test (22)\n    - zzz'\n") }), 'mergify_weakened', m);
+  violates(run({ [m]: MERGIFY.replace('    - label != hold-merge\n', '    - "-base ~= zzz\n    - label != hold-merge\n') }), 'mergify_weakened', m);
+  violates(run({ [m]: MERGIFY.replace('    - label != hold-merge\n', '    - label != hold-merge\n    - label != a\\b\n') }), 'mergify_weakened', m);
+});
+
+test('judge_changed: escaped or unterminated double-quoted job ids and names (NEW2)', () => {
+  const ci = '.github/workflows/ci.yml'; const f = '.github/workflows/x.yml';
+  violates(run({ [f]: wf('  "uni\\u002Dratchet":\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: wf('  a:\n    name: "\\u0075ni"\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: wf("  \"t\\u0065st\":\n    strategy:\n      matrix:\n        node: ['22']\n    runs-on: ubuntu-latest\n") }), 'judge_changed', f);
+  violates(run({ [f]: wf('  a:\n    name: "$\\u007B{ matrix.n }}"\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: wf('  a:\n    name: "u\n      ni"\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [ci]: CI.replace('  test:\n    runs-on: ubuntu-latest\n', '  test:\n    name: "uni\\u002Dratchet"\n    runs-on: ubuntu-latest\n') }), 'judge_changed', ci);
+});
+
+test('judge_changed: permissions hidden behind explicit ? / : keys or escaped quoted keys (NEW3)', () => {
+  const ci = '.github/workflows/ci.yml'; const f = '.github/workflows/x.yml';
+  violates(run({ [f]: 'on: pull_request\n? permissions\n:\n  ? checks\n  : write\njobs:\n  a:\n    runs-on: ubuntu-latest\n' }), 'judge_changed', f);
+  violates(run({ [ci]: CI.replace('  test:\n    runs-on: ubuntu-latest\n', '  test:\n    runs-on: ubuntu-latest\n    ? permissions\n    :\n      ? checks\n      : write\n') }), 'judge_changed', ci);
+  violates(run({ [f]: 'on: pull_request\n"permi\\u0073sions":\n  "\\u0063hecks": write\njobs:\n  a:\n    runs-on: ubuntu-latest\n' }), 'judge_changed', f);
+  violates(run({ [f]: wf('  a:\n    runs-on: ubuntu-latest\n    steps:\n      - "\\u0072un": gh api check-runs\n') }), 'judge_changed', f);
+});
+
+test('judge_changed passes: plain quoted job ids and names, backslashes in values, : inside values', () => {
+  const f = '.github/workflows/x.yml';
+  passes(run({ [f]: wf("  \"lint\":\n    name: \"Build docs\"\n    runs-on: ubuntu-latest\n    steps:\n      - name: 'Say ${{ matrix.x }}'\n        run: printf 'a\\nb: c\\n'\n      - run: echo \"x\\ty\"\n") }));
+});
+
 test('judge_changed: a local action used by the frozen uni job is judge; another local action is not', () => {
   const ci = '.github/workflows/ci.yml';
   const base = { ...BASE, [ci]: CI.replace('      - run: uni check uni/intents/delivery.uni', '      - uses: ./.github/actions/setup-uni\n      - run: uni check uni/intents/delivery.uni') };

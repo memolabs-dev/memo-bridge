@@ -126,6 +126,15 @@ const unquote = raw => {
   return v.replace(/\s+#.*$/, '').trim();
 };
 
+// A double-quoted scalar with an escape, or any quoted scalar not closed on its line, cannot be
+// read as a name by lines: "uni\u002Dratchet" is uni-ratchet to YAML (Ruling 19, NEW2).
+const opaqueScalar = raw => {
+  const v = raw.trim();
+  if (v.startsWith('"')) { const close = v.indexOf('"', 1); return close < 0 || v.slice(1, close).includes('\\') || v.slice(1).includes('\\'); }
+  if (v.startsWith("'")) return v.indexOf("'", 1) < 0;
+  return false;
+};
+
 // Job ids and job-level names of a workflow, read by indentation under `jobs:`. Anything it cannot
 // read that way (flow style, a block-scalar name) marks the file unreadable: refused if changed.
 function workflowJobs(text) {
@@ -140,6 +149,7 @@ function workflowJobs(text) {
       if (jobIndent === null) jobIndent = n;
       if (n < jobIndent) { unreadable = true; break; }
       if (n === jobIndent) {
+        if (opaqueScalar(lines[j].trim().replace(/\s*:\s*(#.*)?$/, ''))) { unreadable = true; continue; }
         const m = /^\s*(["']?)([^"'\s:]+)\1\s*:\s*(.*)$/.exec(lines[j]);
         if (!m || m[3]) { unreadable = true; continue; }
         ids.push(m[2]); keyIndent = null;
@@ -148,7 +158,7 @@ function workflowJobs(text) {
       if (keyIndent === null) keyIndent = n;
       const name = n === keyIndent && /^\s*["']?name["']?\s*:\s*(.*)$/.exec(lines[j]);
       if (name) {
-        if (/^[|>]/.test(name[1].trim())) unreadable = true;
+        if (/^[|>]/.test(name[1].trim()) || opaqueScalar(name[1])) unreadable = true;
         names.push(unquote(name[1]));
       }
     }
@@ -174,6 +184,10 @@ function addedLines(before, after) {
   return after.filter(l => { const c = count.get(l) ?? 0; if (c) { count.set(l, c - 1); return false; } return true; });
 }
 const GRANT = /\b(checks|statuses)["']?\s*:\s*["']?write\b|\bwrite-all\b/;
+// YAML spellings of a key the line rules cannot read (Ruling 19, NEW3): an explicit `? key` /
+// `: value` pair, or a double-quoted key with an escape ("permi\u0073sions").
+const EXPLICIT_KEY = /^\s*(?:-\s+)?[?:](\s|$)/;
+const escapedKey = line => { const m = /^\s*(?:-\s+)?"([^"]*)/.exec(line); return Boolean(m && m[1].includes('\\')); };
 
 // C1: head must hold base's meaningful lines in the same order, and every other line must be one
 // plain condition at the item indent of the `land_conditions:` list, inside it, that cannot
@@ -194,7 +208,9 @@ function mergifyLoosenings(baseText, headText) {
   for (let k = 0; k < hm.length; k++) {
     if (matched[k]) continue;
     const value = /^    - (\S.*)$/.exec(hm[k])?.[1];
-    const plain = value !== undefined && !/:(\s|$)/.test(value) && !/[&*{}[\]]|<</.test(value) &&
+    // Quotes and backslashes are refused too: a quoted scalar may span lines and swallow base
+    // conditions into one string (Ruling 19, NEW1).
+    const plain = value !== undefined && !/:(\s|$)/.test(value) && !/[&*{}[\]'"\\]|<</.test(value) &&
       !/^(or|and|not)\b/.test(value) && !/^[!|>?%@`]/.test(value) && !/^-\s/.test(value);
     const inList = start >= 0 && k > start && k < end;
     const nextOk = k + 1 >= hm.length || indent(hm[k + 1]) <= 4;
@@ -334,10 +350,13 @@ export function ratchet({ base, head, paths = [], compileContract, labelEvents =
     if (!path.startsWith('.github/workflows/') || path === RATCHET_WORKFLOW || !h.has(path) || !differs(path)) continue;
     const own = text => (text === undefined ? '' : path === CI ? withoutJob(text, 'uni') : text);
     const before = own(b.get(path)); const after = own(h.get(path));
-    if (addedLines(meaningful(before), meaningful(after)).some(l => GRANT.test(l))) add(path, 'judge_changed', 'grants checks or statuses write, or write-all');
+    const added = addedLines(meaningful(before), meaningful(after));
+    if (added.some(l => GRANT.test(l))) add(path, 'judge_changed', 'grants checks or statuses write, or write-all');
+    if (added.some(l => EXPLICIT_KEY.test(l))) add(path, 'judge_changed', 'an explicit ? / : YAML key');
+    if (added.some(escapedKey)) add(path, 'judge_changed', 'a double-quoted key with an escape');
     if (!sameList(permissionBlocks(before), permissionBlocks(after))) add(path, 'judge_changed', 'a permissions block changed');
     const jb = workflowJobs(before); const ja = workflowJobs(after);
-    if (ja.unreadable) add(path, 'judge_changed', 'jobs not readable line by line (flow style or block-scalar name)');
+    if (ja.unreadable) add(path, 'judge_changed', 'jobs not readable line by line (flow style, block-scalar name, or an escaped or multi-line quoted id or name)');
     for (const id of addedLines(jb.ids, ja.ids)) if (isJudgeCheckName(id)) add(path, 'judge_changed', `job id ${id} is a required check name`);
     for (const name of addedLines(jb.names, ja.names)) {
       if (name.includes('${{')) add(path, 'judge_changed', `job name built by an expression: ${clip(name)}`);
