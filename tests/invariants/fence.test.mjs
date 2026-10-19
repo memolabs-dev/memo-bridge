@@ -123,6 +123,7 @@ test('a renewed fence is refused everywhere, and epoch and fence only move forwa
   // The worker's own workspace does not own A's claim: it is refused whatever the fence.
   const foreign = (await worker.next('wrote')).result;
   assert.equal(foreign.ok, false, JSON.stringify(foreign));
+  assert.equal(foreign.error, 'unknown_claim', JSON.stringify(foreign));
 
   // A gives the Issue back; B (another process) takes it: a higher epoch, a fence A never saw.
   assert.equal((await a.coordinator.taskRelease({ ...own, fence, outcome: 'cancelled' })).ok, true);

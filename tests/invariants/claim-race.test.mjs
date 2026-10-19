@@ -16,7 +16,7 @@ import { clientSessionHash } from '../../bridge/forward.mjs';
 import { parseRemotePolicy } from '../../bridge/write-gate.mjs';
 import { CAPABILITIES, makePrincipal } from '../../server/coordinator/policy.mjs';
 import { coordinatorOn, fakeGitHub, ledgerFor, skipWithoutLedger, tempStateDir } from './lib/fixture.mjs';
-import { claimRows, raceClaims, startWorkers, stopWorkers } from './lib/race.mjs';
+import { claimRows, raceClaims, raceInserts, startWorkers, stopWorkers } from './lib/race.mjs';
 
 const SIZES = [6, 12];
 const REPO = 'memolabs-dev/drop';
@@ -75,6 +75,34 @@ test('a lease that has not expired is held against reclaimers whose clock runs 6
     assert.deepEqual(results.map(r => r.error), Array(6).fill('lease_held'), JSON.stringify(results));
     assert.deepEqual(refs(await claimRows(holder.store, issue)).map(r => r.claim_id), [claim.claim_id]);
   });
+
+// taskClaim closes the other 'claimed' rows of the Issue before inserting its own, so the store's UNIQUE
+// live-claim index (claims_live_issue, v9) is never reached through it. Reach it directly: the same insert
+// production runs, from separate processes, with no coordinator and no ledger in between.
+for (const n of [2, SIZES[0]]) {
+  test(`the store refuses a second live claim on its own (${n} connections)`, { timeout: 120000 }, async t => {
+    const issue = issueOf(6);
+    const stateDir = await tempStateDir(t);
+    const github = await fakeGitHub(t, GITHUB_ISSUES);
+    const { workers } = await startWorkers(stateDir, github.file, n);
+    t.after(() => stopWorkers(workers).catch(() => {}));
+    const outcomes = await raceInserts(workers, issue);
+    await stopWorkers(workers);
+    assert.equal(outcomes.filter(o => o.ok).length, 1, JSON.stringify(outcomes));
+    const refused = outcomes.filter(o => !o.ok);
+    assert.equal(refused.length, n - 1);
+    assert.ok(refused.every(o => /constraint|unique/i.test(`${o.error} ${o.code}`)), JSON.stringify(refused));
+    const { store } = coordinatorOn(stateDir, { ledger: ledgerFor(github) });
+    t.after(() => store.close());
+    assert.equal(refs(await claimRows(store, issue)).length, 1, 'exactly one claimed row for the Issue');
+    // A released row does not count: once closed, the Issue can be claimed again.
+    const [winner] = await claimRows(store, issue);
+    await store.transaction(repo => repo.updateClaim(winner.claim_id, { state: 'released', outcome: 'cancelled', updated_at: new Date().toISOString() }, winner.fence_sha));
+    await store.transaction(repo => repo.insertClaim({ claim_id: 'c'.repeat(32), workspace_id: winner.workspace_id, issue_ref: issue,
+      fence_sha: 'd'.repeat(40), epoch: 2, expires_at: new Date(Date.now() + 600_000).toISOString(), updated_at: new Date().toISOString() }));
+    assert.equal(refs(await claimRows(store, issue)).length, 1);
+  });
+}
 
 describe('expired lease: the reclaim race', { skip: skipWithoutLedger }, () => {
   const world = {};
