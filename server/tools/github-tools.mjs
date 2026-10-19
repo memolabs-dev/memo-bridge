@@ -16,7 +16,7 @@ import { z } from 'zod/v4';
 import { workerFor } from '../coordinator/index.mjs';
 import { ownsWorkspace } from '../coordinator/policy.mjs';
 import { validBranch } from '../coordinator/checkpoints.mjs';
-import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { inExpiryWindow, leaseExpiring, parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
 import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
 import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
@@ -247,6 +247,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
       const claim = repo.claimsOf(workspace.id, 'claimed')
         .find(c => c.issue_ref === worktree.issue_ref && Date.parse(c.expires_at) > now);
       if (!claim) return { error: fail('claim_required') };
+      if (inExpiryWindow(claim.expires_at, now)) return { error: leaseExpiring() };
       return { workspace, worktree, claim };
     }, { write: false });
   } catch {

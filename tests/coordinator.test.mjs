@@ -852,7 +852,7 @@ test('v9: a lease that expired on this host is reclaimed by another workspace of
   const a = await open(); const b = await open();
   const first = await coordinator.taskClaim({ workspace_id: a, issue: DROP, ttl_seconds: 60 });
   assert.equal(first.ok, true, JSON.stringify(first));
-  at += 61_000; // the lease expires; a's mirror row is still 'claimed'
+  at += 121_000; // the lease expires and the 60 s clock margin passes; a's mirror row is still 'claimed'
   const second = await coordinator.taskClaim({ workspace_id: b, issue: DROP, ttl_seconds: 60 });
   assert.equal(second.ok, true, JSON.stringify(second));
   assert.equal(second.epoch, 2);
@@ -872,7 +872,7 @@ test('v9: a zombie task_complete after a takeover is refused and its summary is 
   const open = async () => (await coordinator.workspaceOpen({ project: 'drop', client_type: 'claude-code' })).workspace.workspace_id;
   const a = await open(); const b = await open();
   const first = await coordinator.taskClaim({ workspace_id: a, issue: DROP, ttl_seconds: 60 });
-  at += 61_000;
+  at += 121_000; // expiry plus the 60 s clock margin
   const second = await coordinator.taskClaim({ workspace_id: b, issue: DROP, ttl_seconds: 60 });
   assert.equal(second.ok, true, JSON.stringify(second));
   const done = await coordinator.taskComplete({ workspace_id: a, issue: DROP, claim_id: first.claim_id, fence: first.fence, summary: 'zombie summary' });

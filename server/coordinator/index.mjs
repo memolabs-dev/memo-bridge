@@ -29,7 +29,7 @@ import { createLearning, learningThresholds as thresholdsFromEnv } from './learn
 import { CHILD_RULES, DELEGATION_ID_RE, DELEGATION_LIMITS, DELEGATION_REFUSALS, DELEGATION_TTL, callerChild, childState,
   currentFenceFor, endDelegations, endReason, newDelegationId, parseBrief, parseReport, parseScope, pasteSentence as delegationSentence, publicDelegation,
   publicReport, scopesOverlap } from './delegation.mjs';
-import { LEASE_TTL, RELEASE_OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
+import { LEASE_TTL, RELEASE_OUTCOMES, defaultGovernanceRoot, inExpiryWindow, leaseExpiring, parseIssueRef, reclaimableAfter } from './issue-lease.mjs';
 import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
   isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
   from './batches.mjs';
@@ -48,7 +48,7 @@ const WS_RE = /^ws_[A-Za-z0-9_-]{16}$/;
 const CLAIM_RE = /^[0-9a-f]{32}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}$/;
-const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_closed', 'project_mismatch',
+const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'lease_expiring', 'workspace_closed', 'project_mismatch',
   'repo_not_allowed', 'issue_not_ready', 'issue_changed', 'lease_race_lost', 'lease_denied', 'host_not_remote_enabled',
   'project_not_allowed', 'session_mismatch', 'workspace_other_session', 'session_required',
   // Context memory: content refusals and conflicts (server/coordinator/memory.mjs).
@@ -451,9 +451,12 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     return stopped.map(j => j.job_id);
   }
 
-  async function releaseHeld(args, outcome, summary, meta = null) {
+  // `guarded`: the last 60 s of the lease refuse the call (task_complete). Giving a claim back
+  // (task_release) is never blocked by the safety window.
+  async function releaseHeld(args, outcome, summary, meta = null, { guarded = false } = {}) {
     const held = await heldClaim(args, { requireActive: false });
     if (held.error) return held.error;
+    if (guarded && held.claim.state === 'claimed' && inExpiryWindow(held.claim.expires_at, now())) return leaseExpiring();
     // A row closed because another holder took the Issue over: the lease is gone, nothing to release.
     if (held.claim.state === 'released' && held.claim.outcome === 'lost') return fail('stale_lease');
     if (held.claim.state === 'released') {
@@ -944,6 +947,17 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (remote && !origin) return fail('project_origin_unknown');
       const worker = workerFor(ws.workspace);
       let receipt; let recovered = false;
+      // Clock margin: the ledger judges expiry with the clock of the machine it runs on, which
+      // may run ahead of the holder's. Another holder's lease the ledger reads as expired stays
+      // theirs until expires_at + 60 s on this machine's clock, and the ledger is not asked to
+      // grant it before. A lease the ledger still reads as live is refused by the ledger itself.
+      const current = await ledger.status(issue);
+      if (current?.ok) {
+        const lease = current.receipt;
+        if (lease?.state === 'claimed' && lease.expired && lease.worker !== worker && now() < reclaimableAfter(lease.expires_at)) {
+          return fail('lease_held', 'the previous lease expired less than 60 s ago');
+        }
+      }
       const result = await ledger.claim(issue, worker, ttl);
       if (result.ok) {
         receipt = result.receipt;
@@ -1046,7 +1060,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     async taskComplete(args, meta) {
       const summary = cleanText(args.summary, SUMMARY_MAX, { multiline: true });
       if (summary === undefined) return fail('invalid_input', 'summary');
-      return releaseHeld(args, 'completed', summary, meta);
+      return releaseHeld(args, 'completed', summary, meta, { guarded: true });
     },
 
     // The checkpoint is a write boundary: the ledger verifies the fence immediately before it.
@@ -1066,6 +1080,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (note === undefined || (note && !withCommit)) return fail('invalid_input', 'note');
       const held = await heldClaim(args);
       if (held.error) return held.error;
+      if (inExpiryWindow(held.claim.expires_at, now())) return leaseExpiring();
       // Git first (it can be slow), then the ledger verify, then the insert at once.
       let check = null;
       if (withCommit) {
