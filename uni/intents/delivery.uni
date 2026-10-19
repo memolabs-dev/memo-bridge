@@ -1,0 +1,41 @@
+VERSION 0.1
+DOMAIN software
+INTENT memo-bridge.delivery
+
+GOAL
+  A memo-bridge change is done only when this exact commit proves the whole
+  suite and every collision invariant, each invariant guarded by a killed mutant.
+
+CLAIM suite REQUIRED
+  ENSURE the whole pnpm test suite passes on this commit
+INVARIANT claim-exclusive CRITICAL
+  ENSURE one Issue has exactly one live claim holder
+INVARIANT fence-monotonic CRITICAL
+  ENSURE a stale fence never writes
+INVARIANT clock-skew CRITICAL
+  ENSURE two skewed clocks never make two holders
+INVARIANT worktree-exclusive CRITICAL
+  ENSURE one branch and one path have exactly one worktree
+INVARIANT lock-exclusive CRITICAL
+  ENSURE one operator lock has one holder, even after a hub restart
+INVARIANT mutants-killed CRITICAL
+  ENSURE every mutant makes its invariant test fail
+
+VERIFY suite
+  USING suite.pnpm
+VERIFY claim-exclusive
+  USING invariant.claim-exclusive
+VERIFY fence-monotonic
+  USING invariant.fence-monotonic
+VERIFY clock-skew
+  USING invariant.clock-skew
+VERIFY worktree-exclusive
+  USING invariant.worktree-exclusive
+VERIFY lock-exclusive
+  USING invariant.lock-exclusive
+VERIFY mutants-killed
+  USING invariant.mutants-killed
+
+ACCEPT WHEN
+  required_claims == VERIFIED
+  AND critical_failures == 0

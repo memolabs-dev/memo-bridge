@@ -7,3 +7,14 @@ dist/
 .DS_Store
 __pycache__/
 *.pyc
+
+# uni runtime state: evidence, decisions, journal, trust-boundary snapshot, lock. Contract and
+# registry (.uni/config.toml, .uni/identity/) are versioned.
+.uni/evidence/
+.uni/decisions/
+.uni/artifacts/
+.uni/events.jsonl
+.uni/events.*.jsonl
+.uni/.registry.*
+.uni/.lock
+.uni/brief.md
