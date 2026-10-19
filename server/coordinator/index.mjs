@@ -336,14 +336,16 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   readAllowlist = () => readPublicAllowlist(governanceRoot),
   privatePolicyFile = process.env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE,
   searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
-  remotePolicy = remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
+  remotePolicy: remotePolicyOption = () => remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
   learningThresholds = thresholdsFromEnv() }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
+  // A function (the runtime's, rereading remote.json when it changes, #216) or a fixed policy (tests).
+  const currentRemotePolicy = typeof remotePolicyOption === 'function' ? remotePolicyOption : () => remotePolicyOption;
   const remote = isRemotePrincipal(principal);
   // Mac owner-only private enrollment is an explicit local file grant, never
   // the VPS metadata-only snapshot or a request-provided repository name.
   const effectiveAllowlist = async () => withOwnerPrivateRepos(await readAllowlist(), {
-    file: privatePolicyFile, principal, remotePolicy, host
+    file: privatePolicyFile, principal, remotePolicy: currentRemotePolicy(), host
   });
   // Where the call came from and which client made it, as the server set them on the principal
   // (D6); never read from arguments. Absent attributes stay null in the journal.
@@ -745,7 +747,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const remote = isRemotePrincipal(principal);
       const hostId = args.host ?? (remote ? REMOTE_HOST : host);
       if (!HOSTS.includes(hostId)) return fail('invalid_input', 'host');
-      if (remote && hostId !== (remotePolicy?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST))
+      if (remote && hostId !== (currentRemotePolicy()?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST))
         return fail('host_not_remote_enabled');
       if (args.branch !== undefined && args.branch !== null && !validBranch(args.branch)) return fail('invalid_input', 'branch');
       const project = await resolve(args.project);
@@ -872,16 +874,16 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (max === undefined) return fail('invalid_input', 'limit');
       let projects;
       if (args.project !== undefined) {
-        const refusal = remoteProjectRefusal(principal, args.project, remotePolicy, { host });
+        const refusal = remoteProjectRefusal(principal, args.project, currentRemotePolicy(), { host });
         if (refusal) return refusal;
         const project = await resolve(args.project);
         if (!project.ok) return project;
         projects = [project.project];
       } else {
-        if (remote && !remotePolicy.configured) return remoteProjectRefusal(principal, null, remotePolicy, { host });
+        if (remote && !currentRemotePolicy().configured) return remoteProjectRefusal(principal, null, currentRemotePolicy(), { host });
         try { projects = (await listProjectRepos()).slice(0, TASKS_SCAN.projects); } catch { return fail('catalog_unavailable'); }
         // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09).
-        if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
+        if (remote) { const allowed = currentRemotePolicy().projects; projects = projects.filter(p => allowed.includes(p.name)); }
       }
       const allowlist = await effectiveAllowlist();
       if (!allowlist.ok) return allowlist;
@@ -1495,8 +1497,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   // GitHub origins (owner/repo, lower case) of the allowlisted projects, for remote principals.
   async function remoteOrigins() {
     const origins = new Set();
-    if (!remotePolicy.configured) return origins;
-    for (const name of remotePolicy.projects) {
+    const policy = currentRemotePolicy();
+    if (!policy.configured) return origins;
+    for (const name of policy.projects) {
       const project = await resolveProject(name);
       const origin = project?.ok ? await projectRemote(project.project) : null;
       if (origin) origins.add(origin.toLowerCase());
@@ -1516,11 +1519,11 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   async function guarded(op, method, args, meta) {
     if (remote && REMOTE_PROJECT_OPS.has(op)) {
       const project = await projectOf(op, args);
-      const refusal = project === null ? null : remoteProjectRefusal(principal, project, remotePolicy, { host });
+      const refusal = project === null ? null : remoteProjectRefusal(principal, project, currentRemotePolicy(), { host });
       if (refusal) return { result: refusal };
     }
     let warning = null;
-    const mode = remotePolicy.session_binding;
+    const mode = currentRemotePolicy().session_binding;
     // enforce (D-MS3): a remote conversation without a session hint opens nothing and uses no
     // workspace (fail safe), and every op naming a workspace is checked, reads included.
     const enforce = remote && mode === 'enforce';
@@ -1631,7 +1634,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   async function projectOfIssue(issue) {
     let projects;
     try { projects = await listProjectRepos(); } catch { return null; }
-    if (remote) projects = projects.filter(p => remotePolicy.projects.includes(p.name));
+    if (remote) { const allowed = currentRemotePolicy().projects; projects = projects.filter(p => allowed.includes(p.name)); }
     for (const p of projects) {
       const origin = await projectRemote(p);
       if (origin && origin.toLowerCase() === issue.repo.toLowerCase()) return p.name;
@@ -1667,12 +1670,12 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         : 'nothing open in this conversation yet: name the project or the Issue (task_claim, task_next with project)');
       // task_next without a project takes the next task of any allowed project and moves its
       // workspace there: open it on the first allowed project.
-      const target = project ?? (args.any_project === true && remotePolicy.configured ? remotePolicy.projects[0] ?? null : null);
+      const target = project ?? (args.any_project === true && currentRemotePolicy().configured ? currentRemotePolicy().projects[0] ?? null : null);
       if (!target) return required(issue ? `the Issue ${issue.ref} belongs to no project you may work on` : 'name the project (projects_list)');
       const key = `${session}|${target}`;
       if (!opening.has(key)) {
         const pending = api.workspaceOpen({ project: target, client_label: 'auto',
-          host: remote ? (remotePolicy?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST) : host }, rawMeta)
+          host: remote ? (currentRemotePolicy()?.allow_mac_runtime === true && host === 'mac' ? 'mac' : REMOTE_HOST) : host }, rawMeta)
           .finally(() => opening.delete(key));
         opening.set(key, pending);
       }

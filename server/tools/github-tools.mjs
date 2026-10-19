@@ -59,7 +59,8 @@ function closesIssue(body, issue) {
 // options.remotePolicy injects the remote policy (tests); otherwise MEMO_BRIDGE_REMOTE_CONFIG.
 export function registerGithubTools(server, getRuntime, options = {}) {
   const built = new WeakMap();
-  const remotePolicy = options.remotePolicy ?? remotePolicyFromEnv();
+  // Read at each call: remote.json changes when project_create enrolls a project (#216).
+  const remotePolicyNow = () => options.remotePolicy ?? remotePolicyFromEnv();
   const githubOf = rt => {
     if (options.github) return options.github;
     let github = built.get(rt);
@@ -98,6 +99,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
 
   // A remote principal reads only the GitHub origins of the allowlisted projects.
   async function remoteRepoAllowed(github, repo) {
+    const remotePolicy = remotePolicyNow();
     if (!remotePolicy.configured) return false;
     for (const name of remotePolicy.projects) {
       const origin = await github.projectRepo(name);
@@ -197,7 +199,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     }
     let outcome;
     try {
-      const guard = { remotePolicy, meta };
+      const guard = { remotePolicy: remotePolicyNow(), meta };
       outcome = await runOnce(rt.store(), { principal: rt.principal.id, op, clientRequestId: args.client_request_id, now: rt.now() },
         () => createPr(rt, githubOf(rt), args, ids, guard));
     } catch {

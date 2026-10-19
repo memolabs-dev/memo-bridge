@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { z } from 'zod/v4';
 import { isRemotePrincipal } from '../coordinator/policy.mjs';
 import { loadOwnerPrivatePolicy } from '../coordinator/owner-private-repos.mjs';
+import { enrollOnMac } from '../projects/mac-enroll.mjs';
 import { memolabsRoot } from '../memolabs-root.mjs';
 import { AREAS, VISIBILITIES, createProjectCreator } from '../projects/create.mjs';
 
@@ -35,8 +36,8 @@ export function registerProjectTools(server, getRuntime, options = {}) {
   const env = options.env ?? process.env;
 
   // Ready for batch_create when the Mac runtime already serves the project: enrolled in the
-  // owner's private policy file and listed in this runtime's remote.json (both read at start by
-  // the coordinator). A VPS project is never ready from here (lab-infra, spec G-2).
+  // owner's private policy file and listed in this runtime's remote.json (both reread when they
+  // change, #216). A VPS project is never ready from here (lab-infra, spec G-2).
   const readinessFor = rt => async spec => {
     if (spec.host !== 'mac') return { ready: false };
     const policy = rt.remotePolicy?.() ?? null;
@@ -44,6 +45,20 @@ export function registerProjectTools(server, getRuntime, options = {}) {
     const enrolled = await loadOwnerPrivatePolicy({ file: options.privatePolicyFile ?? env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE,
       principal: { id: `oidc:${policy.owner_sub}` }, remotePolicy: policy, host: 'mac', home: env.HOME });
     return { ready: enrolled.ok === true && enrolled.repos.some(r => r.toLowerCase() === spec.repo.toLowerCase()) };
+  };
+
+  // #216: a private Mac project is added to this runtime's owner-policy files by project_create
+  // itself; enrollOnMac refuses (enroll_unsupported) unless this runtime reads exactly those files.
+  const enrollFor = rt => async spec => {
+    const policy = rt.remotePolicy?.() ?? null;
+    if (rt.host !== 'mac' || !policy?.configured || typeof policy.owner_sub !== 'string') return { ok: false, error: 'enroll_unsupported' };
+    const out = await enrollOnMac({ home: env.HOME, ownerSub: policy.owner_sub, name: spec.name, repo: spec.repo,
+      remoteConfigPath: env.MEMO_BRIDGE_REMOTE_CONFIG, privatePolicyPath: options.privatePolicyFile ?? env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE });
+    // Journaled when something was written or refused; not when this runtime has nothing to enroll in.
+    if (out.error !== 'enroll_unsupported' && (out.ok !== true || out.enrolled)) {
+      await rt.audit('project_enrolled', out.ok === true ? 'ok' : 'denied', out.ok === true ? 'enrolled' : out.error, { issue: spec.repo });
+    }
+    return out;
   };
 
   server.registerTool('project_create', {
@@ -78,7 +93,7 @@ export function registerProjectTools(server, getRuntime, options = {}) {
       const root = options.root ?? (env.MEMO_BRIDGE_PROJECTS_ROOT || memolabsRoot(env));
       const creator = createProjectCreator({ root, credentials: rt.githubCredentials, env,
         scratchDir: typeof rt.stateDir === 'string' ? join(rt.stateDir, 'gh-project') : null,
-        audit: (o, outcome, code, ids) => rt.audit(o, outcome, code, ids), readiness: readinessFor(rt),
+        audit: (o, outcome, code, ids) => rt.audit(o, outcome, code, ids), readiness: readinessFor(rt), enroll: enrollFor(rt),
         ownerSub: policy?.owner_sub ?? null, governanceRef: GOVERNANCE_REF_RE.exec(env.MEMO_BRIDGE_GOVERNANCE_ROOT ?? '')?.[1] ?? null,
         ...Object.fromEntries(['gh', 'clone', 'addRow', 'waitRepoMs', 'pollMs', 'wait'].filter(k => options[k] !== undefined).map(k => [k, options[k]])) });
       return done(null, await creator.create(args ?? {}));

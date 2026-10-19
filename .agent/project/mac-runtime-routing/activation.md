@@ -95,7 +95,9 @@ and exactly one `priority:*`.
 1. Zero ceremony: `task_claim(issue="memolabs-dev/emargo#N")` with no workspace: lease taken
    on the Mac, `implicit_workspace.opened = true` (the ledger accepts the private repo).
 2. Explicit variant in a second conversation: `workspace_open(project="emargo")` with no host
-   answers `workspace.host = "mac"`, `placement.reason = "project_registered_on_mac_only"`.
+   answers `workspace.host = "mac"`, `placement.reason = "project_registered_on_mac_only"`
+   (the VPS snapshot lists it) or `"project_registered_on_mac"` (the snapshot does not list it
+   yet, e.g. right after `project_create`, and the live Mac `projects_list` does: #218).
 3. `worktree_create`: a worktree under `~/memolabs/workspace/worktrees/emargo/` on the Mac.
 4. `worktree_write_file`, `jobs_submit test`, `job_results`: the sandboxed job ran on the Mac.
 5. `worktree_commit`, `worktree_push`, `github_create_pr`, `task_complete`: PR merged by Mergify.

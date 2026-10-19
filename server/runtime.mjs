@@ -76,7 +76,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const coordinatorFor = p => {
     if (!coordinators.has(p)) {
       coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host,
-        remotePolicy: policy(), projectSync: projectSyncOf(), credentials, scratchDir: join(stateDir, 'gh-pr'),
+        remotePolicy: policy, projectSync: projectSyncOf(), credentials, scratchDir: join(stateDir, 'gh-pr'),
         learningThresholds: learningThresholds(env),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
     }
@@ -95,7 +95,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
         request_id: REQUEST_ID_RE.test(ids.request_id ?? '') ? ids.request_id : null }));
     } catch { /* journal unavailable */ }
   };
-  // The remote policy of this runtime (remote.json from its env, read once per path): the same
+  // The remote policy of this runtime (remote.json from its env, reread when the file changes): the same
   // object decides the oidc grant, the write gate on remote principals and the coordinator's
   // project allowlist and session binding.
   const policy = () => remotePolicy ?? remotePolicyFromEnv(env);

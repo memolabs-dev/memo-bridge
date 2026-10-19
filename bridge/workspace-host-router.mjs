@@ -10,6 +10,14 @@
 // checks its own registry, Git origin, remote policy and owner-private enrollment, and refuses
 // on its own. A Mac that is offline, or connected in probe mode, answers host_offline.
 //
+// The snapshot is exported by hand, so a project created a minute ago by project_create is not in
+// it (issue #218). When the VPS answers that it does not know the project at all (an empty exact
+// match, never a refusal), the hub asks the Mac runtime's own projects_list for that exact name:
+// one real (not metadata-only) row places the call on the Mac. The Mac answers for the same
+// principal, through its own remote policy, so it lists only what it would also let this caller
+// open. Any doubt (Mac offline or in probe mode, listing refused, zero or several rows) keeps the
+// legacy VPS placement, and the placement is journaled.
+//
 // project_create always goes to the Mac runtime: PROJECTS.md, the source of truth of the
 // projects, lives there (owner console spec section 09, D-A2-1); an offline Mac answers host_offline.
 //
@@ -88,17 +96,26 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
   }
   // {host, inferred:true, reason}. Any doubt (listing refused, several or no exact rows) keeps
   // the legacy VPS placement, where an unknown project is refused as before.
-  async function placeOpen(host,project,envelope) {
+  async function placeOpen(host,project,envelope,op) {
     const vps={host,inferred:true,reason:'project_on_vps'};
     if (!PROJECT.test(project ?? '')) return vps;
-    let listed;
-    try {
-      listed=await requestAgent(host,'projects_list',{...envelope,args:{search:project}});
-    } catch { return vps; }
-    const rows=Array.isArray(listed?.projects) ? listed.projects.filter(p => p?.name === project) : [];
-    if (listed?.ok === false || rows.length !== 1) return vps;
-    return rows[0].metadata_only === true && rows[0].source_host === 'mac'
-      ? {host:'mac',inferred:true,reason:'project_registered_on_mac_only'} : vps;
+    const exactRows=async on => {
+      let listed;
+      try { listed=await requestAgent(on,'projects_list',{...envelope,args:{search:project}}); } catch { return null; }
+      if (listed?.ok === false || !Array.isArray(listed?.projects)) return null;
+      return listed.projects.filter(p => p?.name === project);
+    };
+    const rows=await exactRows(host);
+    if (rows === null) return vps;
+    if (rows.length === 1)
+      return rows[0].metadata_only === true && rows[0].source_host === 'mac'
+        ? {host:'mac',inferred:true,reason:'project_registered_on_mac_only'} : vps;
+    if (rows.length !== 0 || host === 'mac') return vps;
+    // Unknown here: the live Mac registry, never a snapshot, says whether it is the owner's Mac project.
+    const onMac=await exactRows('mac');
+    if (onMac?.length !== 1 || onMac[0].metadata_only === true) return vps;
+    audit({event:'project_placed_on_mac_live',op,project,principal:envelope.principal?.id});
+    return {host:'mac',inferred:true,reason:'project_registered_on_mac'};
   }
   // The project a workspace tool without workspace_id means: its project, else its Issue's repository.
   function projectHint(args) {
@@ -106,7 +123,7 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
     const repo=ISSUE.exec(typeof args.issue === 'string' ? args.issue : '')?.[1]?.toLowerCase();
     return repo && PROJECT.test(repo) ? repo : null;
   }
-  async function implicitDestination(host,args,envelope) {
+  async function implicitDestination(host,op,args,envelope) {
     const hint=projectHint(args);
     if (!hint) return host;
     const session=envelope.clientSession;
@@ -114,7 +131,7 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
       if (id.startsWith('ws_') && binding.owner === envelope.principal?.id && binding.project === hint &&
         SESSION.test(session ?? '') && binding.session === session) return binding.host;
     }
-    return (await placeOpen(host,hint,envelope)).host;
+    return (await placeOpen(host,hint,envelope,op)).host;
   }
   async function call(host,op,inbound) {
     let envelope=inbound;
@@ -124,7 +141,7 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
     let destination=host;
     let placement=null;
     if (op === 'workspace_open' && args.host === undefined) {
-      placement=await placeOpen(host,args.project,envelope);
+      placement=await placeOpen(host,args.project,envelope,op);
       destination=placement.host;
       envelope={...envelope,args:{...args,host:placement.host}};
     } else if (op === 'workspace_open' && args.host === 'mac') destination='mac';
@@ -139,7 +156,7 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
         destination=binding.host;
       }
       if (destination === host && HINTED.has(op) && args.workspace_id === undefined && ids.length === 0)
-        destination=await implicitDestination(host,args,envelope);
+        destination=await implicitDestination(host,op,args,envelope);
       // batch_create has no workspace_id. Bind a project only AFTER Mac
       // successfully opened a workspace for this same authenticated owner.
       if (destination === host && BY_PROJECT.has(op) && PROJECT.test(args.project ?? '')) {
