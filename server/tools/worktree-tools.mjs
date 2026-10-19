@@ -12,7 +12,7 @@ export const WORKTREE_TOOLS = Object.freeze(['worktrees_list', 'worktree_create'
 // Operations that change something: their outcome is always journaled. Reads journal refusals only.
 const WRITES = new Set(['worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push', 'worktree_remove']);
 // Policy refusals are journaled as 'denied'; anything else that fails is an 'error'.
-const DENIED = new Set(['forbidden', 'workspace_closed', 'no_live_claim', 'stale_lease', 'lease_held', 'issue_changed',
+const DENIED = new Set(['forbidden', 'workspace_closed', 'no_live_claim', 'stale_lease', 'lease_held', 'lease_expiring', 'issue_changed',
   'lease_denied', 'protected_branch', 'branch_changed', 'branch_exists', 'path_exists', 'path_not_allowed', 'wrong_host',
   'worktree_dirty', 'unpushed_commits', 'worktree_removed', 'push_rejected', 'job_active', 'ignored_files', 'worktree_link_changed',
   // Phase 5 remote invariants (bridge/write-gate.mjs).

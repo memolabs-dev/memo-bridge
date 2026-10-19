@@ -948,15 +948,18 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const worker = workerFor(ws.workspace);
       let receipt; let recovered = false;
       // Clock margin: the ledger judges expiry with the clock of the machine it runs on, which
-      // may run ahead of the holder's. Another holder's lease the ledger reads as expired stays
-      // theirs until expires_at + 60 s on this machine's clock, and the ledger is not asked to
-      // grant it before. A lease the ledger still reads as live is refused by the ledger itself.
+      // may run ahead of the holder's. Another holder's lease stays theirs until expires_at +
+      // 60 s on this machine's clock, whatever the ledger reads, and the ledger is not asked to
+      // grant it before. When the ledger cannot say who holds the Issue the claim fails closed:
+      // it could otherwise grant a lease that expired seconds ago.
       const current = await ledger.status(issue);
-      if (current?.ok) {
-        const lease = current.receipt;
-        if (lease?.state === 'claimed' && lease.expired && lease.worker !== worker && now() < reclaimableAfter(lease.expires_at)) {
-          return fail('lease_held', 'the previous lease expired less than 60 s ago');
-        }
+      if (!current?.ok) {
+        // A definitive refusal (repo_not_allowed...) is passed on; anything uncertain fails closed.
+        return current?.error && !UNCERTAIN.has(current.error) ? current : fail('ledger_unavailable', 'nothing was claimed');
+      }
+      const lease = current.receipt;
+      if (lease?.state === 'claimed' && lease.worker !== worker && now() < reclaimableAfter(lease.expires_at)) {
+        return fail('lease_held', 'the previous lease is live or expired less than 60 s ago');
       }
       const result = await ledger.claim(issue, worker, ttl);
       if (result.ok) {

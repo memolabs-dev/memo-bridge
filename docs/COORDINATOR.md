@@ -174,7 +174,8 @@ Every result is `{ ok: true, ... }` or `{ ok: false, error, detail? }`.
 | `forbidden` | Capability missing, or the workspace belongs to another principal |
 | `workspace_closed` | The workspace is closed |
 | `project_mismatch` | The Issue is not in the repository of the workspace project's Git origin |
-| `lease_held` | Another worker holds an active lease |
+| `lease_held` | Another worker holds an active lease, or held one that expired less than 60 s ago (clock margin) |
+| `lease_expiring` | Fewer than 60 s of your lease are left: no commit, push, pull request, checkpoint or complete until `task_renew` (`next_step`). Renewing and releasing stay allowed |
 | `lease_race_lost` | The ledger saw a concurrent change while advancing the lease; retry |
 | `stale_lease` | The fence, worker or expiry does not match the current lease |
 | `issue_not_ready` | The Issue is closed, not `agent:ready`, blocked, or has no single priority label |

@@ -19,8 +19,8 @@ import { registerWorktreeTools } from '../../../server/tools/worktree-tools.mjs'
 import { registerGithubTools } from '../../../server/tools/github-tools.mjs';
 
 export const OWNER = makePrincipal('local:owner', Object.values(CAPABILITIES));
-// The offline `gh` used by fakeGitHub (the canonical ledger script runs against it).
-export const FAKE_GH_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'helpers', 'fake-gh');
+// The offline `gh` used by fakeGitHub (a copy of tests/helpers/fake-gh; the canonical ledger script runs against it).
+export const FAKE_GH_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fake-gh');
 
 // The canonical ledger script from memolabs-dev/.github. CI checks it out and sets
 // MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 so a missing ledger fails instead of skipping.

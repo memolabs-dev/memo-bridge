@@ -124,9 +124,48 @@ test('no one reclaims before expires_at + 60 s, even with a clock 30 s ahead', a
   const takeover = await b.coordinator.taskClaim({ workspace_id: wsB, issue: ISSUE, ttl_seconds: 60 });
   assert.equal(takeover.ok, true, JSON.stringify(takeover));
   assert.notEqual(takeover.claim_id, claimA.claim_id);
+  assert.equal(takeover.epoch, 2);
   assert.equal(ledgerB.claims, 1);
 });
 
+test('the reclaim margin fails closed when the ledger cannot say who holds the Issue', async t => {
+  const world = { t: T0 };
+  const clock = () => world.t;
+  const inner = memoryLedger(clock);
+  const ledger = { status: async () => ({ ok: false, error: 'ledger_unavailable', detail: 'timeout' }), claim: (...a) => inner.claim(...a) };
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { now: clock, ledger });
+  t.after(() => store.close());
+  const workspace_id = (await coordinator.workspaceOpen({ project: 'drop', client_type: 'cli' })).workspace.workspace_id;
+  const refused = await coordinator.taskClaim({ workspace_id, issue: ISSUE, ttl_seconds: 60 });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error, 'ledger_unavailable');
+  assert.equal(inner.claims, 0, 'no claim without knowing who holds the Issue');
+});
+
+test('a lease read as live just before expires_at is still not reclaimed seconds later', async t => {
+  const world = { t: T0 };
+  const leases = new Map();
+  const clock = () => world.t;
+  const ledgerA = memoryLedger(clock, leases);
+  const ledgerB = memoryLedger(clock, leases);
+  // The status call answers "live", then time passes before Bridge goes on to claim.
+  const racing = { status: async issue => { const r = await ledgerB.status(issue); world.t += 2 * SECOND; return r; },
+    claim: (...a) => ledgerB.claim(...a) };
+  const a = coordinatorOn(await tempStateDir(t), { now: clock, ledger: ledgerA });
+  const b = coordinatorOn(await tempStateDir(t), { now: clock, ledger: racing });
+  t.after(() => { a.store.close(); b.store.close(); });
+  const wsA = (await a.coordinator.workspaceOpen({ project: 'drop', client_type: 'cli' })).workspace.workspace_id;
+  const wsB = (await b.coordinator.workspaceOpen({ project: 'drop', client_type: 'cli' })).workspace.workspace_id;
+  const claimA = await a.coordinator.taskClaim({ workspace_id: wsA, issue: ISSUE, ttl_seconds: 60 });
+  assert.equal(claimA.ok, true, JSON.stringify(claimA));
+  world.t = Date.parse(claimA.expires_at) - 1 * SECOND;
+  const refused = await b.coordinator.taskClaim({ workspace_id: wsB, issue: ISSUE, ttl_seconds: 60 });
+  assert.equal(refused.error, 'lease_held');
+  assert.equal(ledgerB.claims, 0);
+});
+
+// Catches the removal of both guards together (the write guard and the reclaim margin).
+// Removing a single guard is caught by the tests above, which exercise each side on its own.
 test('with clocks 30 s apart, holder and reclaimer never both write', async t => {
   const world = { t: T0 };
   const leases = new Map();
