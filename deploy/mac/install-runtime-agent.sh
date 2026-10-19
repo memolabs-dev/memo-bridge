@@ -43,6 +43,17 @@ umask 077
 die() { echo "install-runtime-agent: $*" >&2; exit 1; }
 say() { echo "{\"step\":\"$1\"${2:+,$2}}"; }
 
+# E-16 (2026-10-18): the ledger child runs with HOME pointed at a private gh configuration
+# directory, so a pin whose allowlist resolves the owner's home from $HOME answers False for
+# every enrolled repository, and the coordinator surfaces that as a generic lease_denied. The
+# account home has to come from the passwd database. Refuse such a pin instead of running it:
+# this is the one mistake that silently refuses every private project on this Mac.
+require_account_home_allowlist() {
+  local tree="$1" ref="$2"
+  [ -f "$tree/scripts/private_owner_allowlist.py" ] || die "governance $ref has no private_owner_allowlist.py"
+  /usr/bin/grep -q 'getpwuid' "$tree/scripts/private_owner_allowlist.py" || die "governance $ref resolves the owner home from \$HOME instead of the passwd database (incident E-16, memolabs-dev/.github before ff63ce8d): every private repository would answer lease_denied"
+}
+
 # launchctl bootout returns before the service is gone; bootstrapping it again too early fails
 # with "Bootstrap failed: 5: Input/output error" and leaves the agent unloaded (seen 2026-10-18).
 # So: wait until it is unloaded, then bootstrap, with one retry.
@@ -154,12 +165,14 @@ if [ ! -f "$GOVERNANCE/scripts/issue_lease.py" ]; then
   /usr/bin/git -C "$TMP_GOV/clone" cat-file -e "$GOV_REF^{commit}" 2>/dev/null || die "governance commit $GOV_REF not found"
   /bin/mkdir -p "$TMP_GOV/tree"
   /usr/bin/git -C "$TMP_GOV/clone" archive "$GOV_REF" scripts | /usr/bin/tar -x -C "$TMP_GOV/tree"
-  [ -f "$TMP_GOV/tree/scripts/private_owner_allowlist.py" ] || die "governance $GOV_REF has no private_owner_allowlist.py"
+  require_account_home_allowlist "$TMP_GOV/tree" "$GOV_REF"
   /bin/rm -rf "$GOVERNANCE"
   /bin/mv "$TMP_GOV/tree" "$GOVERNANCE"
   /bin/rm -rf "$TMP_GOV"
   trap - EXIT
 fi
+# Re-checked on the installed tree: a pin an earlier run already placed here is refused too.
+require_account_home_allowlist "$GOVERNANCE" "$GOV_REF"
 say governance "\"root\":\"$GOVERNANCE\""
 
 # 3. Credentials: the probe identity, and the owner's gh token for the ledger and for pushes.
