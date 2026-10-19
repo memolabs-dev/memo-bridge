@@ -37,16 +37,23 @@ const RATCHET_WORKFLOW = '.github/workflows/uni-ratchet.yml';
 const RATCHET_SCRIPT = 'scripts/uni-ratchet.mjs';
 const CONFIG = '.uni/config.toml';
 const MERGIFY = '.mergify.yml';
+const PACKAGE = 'package.json';
+// What `pnpm install` and `pnpm test` read besides the test files: frozen whole (I1).
+const PNPM_CONFIG = ['.npmrc', 'pnpm-workspace.yaml', '.pnpmfile.cjs'];
+// package.json scripts that run, or decide, `pnpm test` and `pnpm install` (I1).
+const FROZEN_SCRIPTS = ['test', 'pretest', 'posttest', 'prepare', 'preinstall', 'install', 'postinstall'];
 const SECRET = /(^|\/)\.env($|\.)/;
-// Check names the judge publishes: no other workflow may publish one of them.
-const JUDGE_CHECKS = ['uni', 'uni-ratchet'];
-// uni's runtime state, git-ignored (.gitignore of PR #214): not the judge.
+// Check names Mergify requires: no job outside the frozen uni job may be named like one (C2).
+const isJudgeCheckName = name => { const n = name.trim().toLowerCase(); return n === 'uni' || n === 'uni-ratchet' || n === 'test' || n.startsWith('test ('); };
+// uni's runtime state, git-ignored (.gitignore of PR #214): not the judge. COMMITTED_RUNTIME is
+// the part a PR must never commit, since uni would read it back as evidence or trust (M1).
 const RUNTIME = [/^\.uni\/(evidence|decisions|artifacts)\//, /^\.uni\/events(\.[^/]*)?\.jsonl$/, /^\.uni\/\.registry\./, /^\.uni\/\.lock$/, /^\.uni\/brief\.md$/];
+const COMMITTED_RUNTIME = RUNTIME.slice(0, 3);
 
 export function isJudgePath(path) {
   if (path.startsWith('.uni/')) return !RUNTIME.some(re => re.test(path));
   return path.startsWith('uni/intents/') || path.startsWith('tests/invariants/') || path.startsWith('tests/mutations/') ||
-    path.startsWith('.github/workflows/') || path === MERGIFY || path === RATCHET_SCRIPT;
+    path.startsWith('.github/workflows/') || path === MERGIFY || path === RATCHET_SCRIPT || path === PACKAGE || PNPM_CONFIG.includes(path);
 }
 
 // ---- line helpers
@@ -81,18 +88,27 @@ function tomlSections(text) {
 
 // The `uni` job of ci.yml: from `  uni:` to the next job or top-level key, trailing blank and
 // comment lines left out. Returns every such block (a duplicate key is itself a change).
-function jobBlocks(text, job) {
+function jobRanges(text, job) {
   const lines = text.split('\n');
-  const blocks = [];
+  const ranges = [];
   for (let i = 0; i < lines.length; i++) {
     if (!new RegExp(`^  ${job.replace(/[-.]/g, '\\$&')}:\\s*(#.*)?$`).test(lines[i])) continue;
     let j = i + 1;
     while (j < lines.length && !/^ {0,2}[^\s#]/.test(lines[j])) j++;
     let end = j;
     while (end > i + 1 && (!lines[end - 1].trim() || lines[end - 1].trimStart().startsWith('#'))) end--;
-    blocks.push(lines.slice(i, end).map(l => l.trimEnd()).join('\n'));
+    ranges.push([i, end]);
   }
-  return blocks;
+  return { lines, ranges };
+}
+function jobBlocks(text, job) {
+  const { lines, ranges } = jobRanges(text, job);
+  return ranges.map(([i, end]) => lines.slice(i, end).map(l => l.trimEnd()).join('\n'));
+}
+// The text without the given job's blocks (ci.yml without its frozen uni job).
+function withoutJob(text, job) {
+  const { lines, ranges } = jobRanges(text, job);
+  return lines.filter((_, k) => !ranges.some(([i, end]) => k >= i && k < end)).join('\n');
 }
 // A top-level key's block (`env:`, `defaults:`), or null.
 function topLevelBlock(text, key) {
@@ -103,18 +119,88 @@ function topLevelBlock(text, key) {
   while (j < lines.length && !/^[^\s#]/.test(lines[j])) j++;
   return lines.slice(i, j).map(l => l.trimEnd()).filter(l => l.trim() && !l.trimStart().startsWith('#')).join('\n');
 }
-// How many times a workflow declares a check named like the judge's: a job id at the jobs level
-// without a name, or a `name:` with that exact value (a step name counts too: stricter).
-function judgeCheckDeclarations(text) {
-  let count = 0;
-  for (const line of text.split('\n')) {
-    for (const check of JUDGE_CHECKS) {
-      const esc = check.replace(/[-.]/g, '\\$&');
-      if (new RegExp(`^  ${esc}:\\s*(#.*)?$`).test(line)) count++;
-      if (new RegExp(`^\\s*(-\\s+)?name:\\s*(["']?)${esc}\\2\\s*(#.*)?$`).test(line)) count++;
+const indent = line => line.length - line.trimStart().length;
+const unquote = raw => {
+  let v = raw.trim();
+  if (/^["']/.test(v)) { const q = v[0]; const close = v.indexOf(q, 1); return close > 0 ? v.slice(1, close) : v; }
+  return v.replace(/\s+#.*$/, '').trim();
+};
+
+// Job ids and job-level names of a workflow, read by indentation under `jobs:`. Anything it cannot
+// read that way (flow style, a block-scalar name) marks the file unreadable: refused if changed.
+function workflowJobs(text) {
+  const lines = meaningful(text);
+  const ids = []; const names = []; let unreadable = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^["']?jobs["']?\s*:/.test(lines[i])) continue;
+    if (!/^["']?jobs["']?\s*:\s*$/.test(lines[i])) { unreadable = true; continue; }
+    let jobIndent = null; let keyIndent = null;
+    for (let j = i + 1; j < lines.length && indent(lines[j]) > 0; j++) {
+      const n = indent(lines[j]);
+      if (jobIndent === null) jobIndent = n;
+      if (n < jobIndent) { unreadable = true; break; }
+      if (n === jobIndent) {
+        const m = /^\s*(["']?)([^"'\s:]+)\1\s*:\s*(.*)$/.exec(lines[j]);
+        if (!m || m[3]) { unreadable = true; continue; }
+        ids.push(m[2]); keyIndent = null;
+        continue;
+      }
+      if (keyIndent === null) keyIndent = n;
+      const name = n === keyIndent && /^\s*["']?name["']?\s*:\s*(.*)$/.exec(lines[j]);
+      if (name) {
+        if (/^[|>]/.test(name[1].trim())) unreadable = true;
+        names.push(unquote(name[1]));
+      }
     }
   }
-  return count;
+  return { ids, names, unreadable };
+}
+// Every `permissions:` block (the line and what is indented under it), in order.
+function permissionBlocks(text) {
+  const lines = meaningful(text);
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*["']?permissions["']?\s*:/.test(lines[i])) continue;
+    let j = i + 1;
+    while (j < lines.length && indent(lines[j]) > indent(lines[i])) j++;
+    blocks.push(lines.slice(i, j).join('\n'));
+  }
+  return blocks;
+}
+// Head lines that are not in base, as a multiset difference.
+function addedLines(before, after) {
+  const count = new Map();
+  for (const l of before) count.set(l, (count.get(l) ?? 0) + 1);
+  return after.filter(l => { const c = count.get(l) ?? 0; if (c) { count.set(l, c - 1); return false; } return true; });
+}
+const GRANT = /\b(checks|statuses)["']?\s*:\s*["']?write\b|\bwrite-all\b/;
+
+// C1: head must hold base's meaningful lines in the same order, and every other line must be one
+// plain condition at the item indent of the `land_conditions:` list, inside it, that cannot
+// re-parent the lines after it. Returns the reasons it is not so.
+function mergifyLoosenings(baseText, headText) {
+  const bm = meaningful(baseText); const hm = meaningful(headText);
+  const matched = new Array(hm.length).fill(false);
+  let j = 0;
+  for (const line of bm) {
+    while (j < hm.length && hm[j] !== line) j++;
+    if (j === hm.length) return [`removed, changed or moved: ${clip(line.trim())}`];
+    matched[j++] = true;
+  }
+  const start = hm.findIndex(l => /^  land_conditions:(\s|$)/.test(l));
+  let end = hm.length;
+  if (start >= 0) for (let k = start + 1; k < hm.length; k++) if (indent(hm[k]) <= 2) { end = k; break; }
+  const reasons = [];
+  for (let k = 0; k < hm.length; k++) {
+    if (matched[k]) continue;
+    const value = /^    - (\S.*)$/.exec(hm[k])?.[1];
+    const plain = value !== undefined && !/:(\s|$)/.test(value) && !/[&*{}[\]]|<</.test(value) &&
+      !/^(or|and|not)\b/.test(value) && !/^[!|>?%@`]/.test(value) && !/^-\s/.test(value);
+    const inList = start >= 0 && k > start && k < end;
+    const nextOk = k + 1 >= hm.length || indent(hm[k + 1]) <= 4;
+    if (!(plain && inList && nextOk)) reasons.push(`added outside a plain land_conditions item: ${clip(hm[k].trim())}`);
+  }
+  return reasons;
 }
 
 // ACCEPT WHEN clauses as written (the v0.1 IR keeps only require_verified: dropping
@@ -221,9 +307,9 @@ export function ratchet({ base, head, paths = [], compileContract, labelEvents =
     if (!before || !sameList(before, after)) add(path, 'mutant_changed', 'its -/+ lines, target or "# test:" pattern changed');
   }
 
-  // mergify_weakened
+  // mergify_weakened (C1)
   if (differs(MERGIFY) && b.has(MERGIFY)) {
-    for (const line of missing(meaningful(b.get(MERGIFY)), meaningful(h.get(MERGIFY) ?? ''))) add(MERGIFY, 'mergify_weakened', `removed or changed: ${clip(line.trim())}`);
+    for (const reason of mergifyLoosenings(b.get(MERGIFY), h.get(MERGIFY) ?? '')) add(MERGIFY, 'mergify_weakened', reason);
   }
 
   // judge_changed: the uni job of ci.yml (Ruling 18: only once base has it), and what reaches it
@@ -237,17 +323,46 @@ export function ratchet({ base, head, paths = [], compileContract, labelEvents =
   }
   for (const path of [RATCHET_WORKFLOW, RATCHET_SCRIPT]) if (b.has(path) && differs(path)) add(path, 'judge_changed', h.has(path) ? 'modified' : 'deleted');
   if (h.has(CI) && jobBlocks(h.get(CI), 'uni').length > 1) add(CI, 'judge_changed', 'two uni jobs');
-  // No other job may publish a check named like the judge's. In ci.yml the uni job itself is
-  // left out of the count: it is frozen above once base has it, and may be added (Ruling 18).
-  const declarations = (path, text) => {
-    if (text === undefined) return 0;
-    const own = path === CI ? jobBlocks(text, 'uni').reduce((t, block) => t.replace(block, ''), text) : text;
-    return judgeCheckDeclarations(own);
-  };
-  for (const path of all) {
-    if (!path.startsWith('.github/workflows/') || path === RATCHET_WORKFLOW || !h.has(path)) continue;
-    if (declarations(path, h.get(path)) > declarations(path, b.get(path))) add(path, 'judge_changed', `declares a check named ${JUDGE_CHECKS.join(' or ')}`);
+  // Local actions the frozen uni job uses are part of it.
+  if (b.has(CI)) {
+    const dirs = jobBlocks(b.get(CI), 'uni').flatMap(block => [...block.matchAll(/uses:\s*["']?\.\/([^\s"'@]+)/g)].map(m => m[1].replace(/\/+$/, '')));
+    for (const path of [...new Set(paths)].sort()) if (dirs.some(d => path === d || path.startsWith(`${d}/`))) add(path, 'judge_changed', 'local action of the uni job changed');
   }
+  // C2: outside the frozen uni job (and uni-ratchet.yml, frozen whole), no workflow may grant
+  // itself check or status writes, change a permissions block, or name a job like a required check.
+  for (const path of all) {
+    if (!path.startsWith('.github/workflows/') || path === RATCHET_WORKFLOW || !h.has(path) || !differs(path)) continue;
+    const own = text => (text === undefined ? '' : path === CI ? withoutJob(text, 'uni') : text);
+    const before = own(b.get(path)); const after = own(h.get(path));
+    if (addedLines(meaningful(before), meaningful(after)).some(l => GRANT.test(l))) add(path, 'judge_changed', 'grants checks or statuses write, or write-all');
+    if (!sameList(permissionBlocks(before), permissionBlocks(after))) add(path, 'judge_changed', 'a permissions block changed');
+    const jb = workflowJobs(before); const ja = workflowJobs(after);
+    if (ja.unreadable) add(path, 'judge_changed', 'jobs not readable line by line (flow style or block-scalar name)');
+    for (const id of addedLines(jb.ids, ja.ids)) if (isJudgeCheckName(id)) add(path, 'judge_changed', `job id ${id} is a required check name`);
+    for (const name of addedLines(jb.names, ja.names)) {
+      if (name.includes('${{')) add(path, 'judge_changed', `job name built by an expression: ${clip(name)}`);
+      else if (isJudgeCheckName(name)) add(path, 'judge_changed', `job name ${name} is a required check name`);
+    }
+  }
+
+  // judge_changed: what `pnpm install` and `pnpm test` run (I1)
+  if (b.has(PACKAGE) && differs(PACKAGE)) {
+    const scriptLines = text => text.split('\n').map(l => l.trim()).filter(l => new RegExp(`^"(${FROZEN_SCRIPTS.join('|')})"\\s*:`).test(l));
+    const parsed = text => { try { return JSON.parse(text); } catch { return null; } };
+    const pb = parsed(b.get(PACKAGE)); const ph = h.has(PACKAGE) ? parsed(h.get(PACKAGE)) : null;
+    if (!ph || typeof ph !== 'object') add(PACKAGE, 'judge_changed', h.has(PACKAGE) ? 'package.json is not valid JSON' : 'package.json deleted');
+    else {
+      if (!sameList(scriptLines(b.get(PACKAGE)), scriptLines(h.get(PACKAGE)))) add(PACKAGE, 'judge_changed', `a ${FROZEN_SCRIPTS.join('/')} script line changed`);
+      for (const key of FROZEN_SCRIPTS) {
+        if (JSON.stringify(pb?.scripts?.[key] ?? null) !== JSON.stringify(ph.scripts?.[key] ?? null)) add(PACKAGE, 'judge_changed', `scripts.${key} changed`);
+      }
+      for (const key of ['pnpm', 'packageManager']) if (JSON.stringify(pb?.[key] ?? null) !== JSON.stringify(ph[key] ?? null)) add(PACKAGE, 'judge_changed', `${key} changed`);
+    }
+  }
+  for (const path of PNPM_CONFIG) if (differs(path)) add(path, 'judge_changed', 'pnpm configuration changed');
+
+  // runtime_path (M1): committed uni runtime state would be read back as evidence or trust
+  for (const path of [...new Set(paths)].sort()) if (COMMITTED_RUNTIME.some(re => re.test(path))) add(path, 'runtime_path');
 
   // secret_path
   for (const path of [...new Set(paths)].sort()) if (SECRET.test(path)) add(path, 'secret_path');
@@ -335,6 +450,10 @@ async function judgeFiles(api, repo, sha, blobs) {
 export async function collect(api, { repo, pr, baseSha, headSha }) {
   const pull = await api('GET', `repos/${repo}/pulls/${pr}`);
   if (!pull || typeof pull.changed_files !== 'number') throw new Error(`pull request ${repo}#${pr}: unreadable`);
+  // M4: judge exactly the commits named, or nothing (a later run judges the new head).
+  if (pull.head?.sha !== headSha || pull.base?.sha !== baseSha) {
+    throw new Error(`the PR moved: it is now base ${String(pull.base?.sha).slice(0, 12)}, head ${String(pull.head?.sha).slice(0, 12)}, not the shas given`);
+  }
   const listed = await allPages(api, `repos/${repo}/pulls/${pr}/files`);
   if (listed.length < pull.changed_files) throw new Error(`the API lists ${listed.length} of the ${pull.changed_files} files of the PR: cannot read them all`);
   const paths = listed.flatMap(f => [f.filename, f.previous_filename]).filter(p => typeof p === 'string');

@@ -76,6 +76,9 @@ shared:
   land_conditions: &land_conditions
     - base = main
     - -draft
+    - or:
+        - author = memo-labs-automation[bot]
+        - author = guillaume-flambard
     - label != hold-merge
     - -files ~= ^\\.env
     - check-success = @github-actions/test (22)
@@ -105,6 +108,20 @@ jobs:
       id-token: write
     steps:
       - run: uni check uni/intents/delivery.uni
+`;
+
+const PACKAGE = `{
+  "name": "memo-bridge",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild server/index.mjs",
+    "test": "node --test --test-timeout=180000 tests/*.test.mjs",
+    "test:hub": "node --test tests/hub-auth.test.mjs"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
+  }
+}
 `;
 
 const FENCE_PATCH = `# test: a zombie holder writes nothing after a reclaim
@@ -138,6 +155,7 @@ const BASE = {
   '.github/workflows/ci.yml': CI,
   '.github/workflows/uni-ratchet.yml': 'name: uni-ratchet\non: pull_request_target\n',
   'scripts/uni-ratchet.mjs': '// the ratchet\n',
+  'package.json': PACKAGE,
   'tests/invariants/fence.test.mjs': "test('a zombie holder writes nothing after a reclaim', () => {});\n",
   'tests/invariants/clock-skew.test.mjs': "test('two skewed clocks', () => {});\n",
   'tests/invariants/lib/fixture.mjs': 'export const fixture = 1;\n',
@@ -274,8 +292,16 @@ test('policy_changed: .uni/policies/** different, added or removed; untouched po
   passes(run({ 'server/a.mjs': 'x\n' }, { base }));
 });
 
-test('uni runtime state (.uni/evidence, decisions, events.jsonl) is not the judge', () => {
-  passes(run({ '.uni/evidence/run.json': '{}\n', '.uni/events.jsonl': '{}\n' }));
+test('uni runtime state is not the judge, but committing it is runtime_path (M1)', () => {
+  for (const p of ['.uni/evidence/run.json', '.uni/decisions/d.json', '.uni/artifacts/a.bin', '.uni/events.jsonl', '.uni/events.2.jsonl', '.uni/.registry.snapshot']) {
+    const r = run({ [p]: '{}\n' });
+    assert.deepEqual(rules(r), ['runtime_path'], p);
+    violates(r, 'runtime_path', p);
+  }
+});
+
+test('runtime_path passes: names that only look like uni runtime state', () => {
+  passes(run({}, { paths: ['docs/uni/evidence.md', 'tests/fixtures/.uni/evidence/x.json', '.uni-notes/events.jsonl'] }));
 });
 
 // ---- invariant_test_changed, invariant_without_mutant
@@ -342,6 +368,33 @@ test('mergify_weakened passes: a condition or a required check added, a comment 
   passes(run({ '.mergify.yml': MERGIFY.replace('# Memo Labs autoloop.', '# Memo Labs autoloop, reworded.') }));
 });
 
+test('mergify_weakened: lines moved, or added anywhere but as a plain land_conditions item (C1 probes)', () => {
+  const m = '.mergify.yml';
+  // The judge's checks moved out of land_conditions into a dummy key.
+  violates(run({ [m]: MERGIFY.replace('    - check-success = @github-actions/test (22)\n    - check-success = @github-actions/uni\n', '')
+    .replace('queue_rules:', 'unused:\n    - check-success = @github-actions/test (22)\n    - check-success = @github-actions/uni\n\nqueue_rules:') }), 'mergify_weakened', m);
+  // A new author under or:.
+  violates(run({ [m]: MERGIFY.replace('        - author = guillaume-flambard\n', '        - author = guillaume-flambard\n        - author = other[bot]\n') }), 'mergify_weakened', m);
+  // The anchor redefined before queue_rules.
+  violates(run({ [m]: MERGIFY.replace('queue_rules:', 'again:\n  land_conditions: &land_conditions\n    - base = main\n\nqueue_rules:') }), 'mergify_weakened', m);
+  // A new, looser queue rule.
+  violates(run({ [m]: `${MERGIFY}  - name: fast\n    queue_conditions:\n      - base = main\n    merge_conditions: []\n` }), 'mergify_weakened', m);
+  // A duplicate merge_conditions key (the last one wins).
+  violates(run({ [m]: `${MERGIFY}    merge_conditions:\n      - base = main\n` }), 'mergify_weakened', m);
+  // An item at the list's indent that steals the children of or: (they become a scalar's continuation).
+  violates(run({ [m]: MERGIFY.replace('    - or:\n', '    - or:\n    - -closed\n') }), 'mergify_weakened', m);
+  // Structure inside an added item: an alias, a mapping, a nested or, a flow collection.
+  for (const item of ['- *land_conditions', '- or:', '- not: x', '- key: value', '- [base = main]', '- {a: b}', '- &x base = main', '- !!null x', '- - nested'])
+    violates(run({ [m]: MERGIFY.replace('    - label != hold-merge\n', `    - label != hold-merge\n    ${item}\n`) }), 'mergify_weakened', m);
+  // Two base lines swapped: no longer an ordered subsequence.
+  violates(run({ [m]: MERGIFY.replace('    - base = main\n    - -draft\n', '    - -draft\n    - base = main\n') }), 'mergify_weakened', m);
+});
+
+test('mergify_weakened passes: a plain condition inserted in the middle of land_conditions', () => {
+  passes(run({ '.mergify.yml': MERGIFY.replace('    - label != hold-merge\n', '    - label != hold-merge\n    - label != wip\n    - -closed\n') }));
+  passes(run({ '.mergify.yml': MERGIFY.replace('  land_conditions: &land_conditions\n', '  land_conditions: &land_conditions\n    - -conflict\n') }));
+});
+
 // ---- judge_changed
 
 test('judge_changed: the uni job of ci.yml, uni-ratchet.yml, scripts/uni-ratchet.mjs, the mutation harness', () => {
@@ -376,6 +429,58 @@ test('judge_changed passes: another job of ci.yml changed, the uni job added whe
   passes(run({ [ci]: CI.replace('jobs:\n', 'defaults:\n  run:\n    shell: bash\njobs:\n') }, { base: noUni }));
   passes(run({ '.github/workflows/docs.yml': 'name: docs\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n' }));
   passes(run({ 'scripts/uni-ratchet.mjs': '// new\n' }, { base: { ...BASE, 'scripts/uni-ratchet.mjs': null } }));
+});
+
+const wf = jobs => `name: other\non: pull_request\njobs:\n${jobs}`;
+test('judge_changed: a workflow that could publish a judge check or grant itself check writes (C2 probes)', () => {
+  const ci = '.github/workflows/ci.yml'; const f = '.github/workflows/x.yml';
+  violates(run({ [f]: wf("  a:\n    name: ${{ 'uni-ratchet' }}\n    runs-on: ubuntu-latest\n") }), 'judge_changed', f);
+  violates(run({ [f]: wf('  a:\n    strategy:\n      matrix:\n        n: [uni]\n    name: ${{ matrix.n }}\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: wf('  "uni":\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [ci]: CI.replace('  test:\n', "  'uni-ratchet':\n    runs-on: ubuntu-latest\n  test:\n") }), 'judge_changed', ci);
+  violates(run({ [f]: wf('  a:\n    name: test (22)\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: wf('  test:\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: wf('  a:\n    name: Test\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  // The unfrozen test job given checks: write, to post a check run named uni-ratchet itself.
+  violates(run({ [ci]: CI.replace('  test:\n    runs-on: ubuntu-latest\n', '  test:\n    runs-on: ubuntu-latest\n    permissions:\n      checks: write\n')
+    .replace('      - run: pnpm test\n', '      - run: pnpm test\n      - run: gh api repos/o/r/check-runs -f name=uni-ratchet -f conclusion=success\n') }), 'judge_changed', ci);
+  violates(run({ [ci]: CI.replace('permissions:\n  contents: read\n', 'permissions:\n  contents: read\n  statuses: write\n') }), 'judge_changed', ci);
+  violates(run({ [ci]: CI.replace('permissions:\n  contents: read\n', 'permissions: write-all\n') }), 'judge_changed', ci);
+  violates(run({ [ci]: CI.replace('permissions:\n  contents: read\n', 'permissions:\n  contents: write\n') }), 'judge_changed', ci);
+  violates(run({ [f]: wf('  a:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n') }), 'judge_changed', f);
+  violates(run({ [f]: 'on: pull_request\njobs: { uni: { runs-on: ubuntu-latest } }\n' }), 'judge_changed', f);
+});
+
+test('judge_changed passes: ordinary workflow edits (step names with expressions, new steps, new plain jobs)', () => {
+  const ci = '.github/workflows/ci.yml'; const f = '.github/workflows/x.yml';
+  passes(run({ [ci]: CI.replace('      - run: pnpm test\n', '      - name: Test on ${{ matrix.node }}\n        run: pnpm test\n') }));
+  passes(run({ [ci]: CI.replace('  test:\n', '  lint:\n    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm lint\n  test:\n') }));
+  passes(run({ [f]: wf('  build:\n    name: Build docs\n    runs-on: ubuntu-latest\n    steps:\n      - name: uni\n        run: echo step names are not checks\n') }));
+});
+
+test('judge_changed: a local action used by the frozen uni job is judge; another local action is not', () => {
+  const ci = '.github/workflows/ci.yml';
+  const base = { ...BASE, [ci]: CI.replace('      - run: uni check uni/intents/delivery.uni', '      - uses: ./.github/actions/setup-uni\n      - run: uni check uni/intents/delivery.uni') };
+  violates(run({}, { base, paths: ['.github/actions/setup-uni/action.yml'] }), 'judge_changed', '.github/actions/setup-uni/action.yml');
+  passes(run({}, { base, paths: ['.github/actions/other/action.yml', '.github/actions/setup-uni-extra/action.yml'] }));
+});
+
+test('judge_changed: package.json test and install scripts, .npmrc, pnpm-workspace.yaml, .pnpmfile.cjs (I1)', () => {
+  const pj = 'package.json';
+  violates(run({ [pj]: PACKAGE.replace('"test": "node --test --test-timeout=180000 tests/*.test.mjs"', '"test": "true"') }), 'judge_changed', pj);
+  violates(run({ [pj]: PACKAGE.replace('    "build":', '    "pretest": "exit 0",\n    "build":') }), 'judge_changed', pj);
+  violates(run({ [pj]: PACKAGE.replace('    "build":', '    "postinstall": "node x.mjs",\n    "build":') }), 'judge_changed', pj);
+  // A duplicate scripts key with an escaped name: JSON.parse reads "test": "true".
+  violates(run({ [pj]: PACKAGE.replace('  "dependencies": {', '  "scripts": { "te\\u0073t": "true" },\n  "dependencies": {') }), 'judge_changed', pj);
+  violates(run({ [pj]: PACKAGE.replace('  "type": "module",', '  "type": "module",\n  "pnpm": { "onlyBuiltDependencies": ["evil"] },') }), 'judge_changed', pj);
+  violates(run({ [pj]: '{ not json' }), 'judge_changed', pj);
+  violates(run({ [pj]: null }), 'judge_changed', pj);
+  for (const p of ['.npmrc', 'pnpm-workspace.yaml', '.pnpmfile.cjs']) violates(run({ [p]: 'script-shell=/usr/bin/true\n' }), 'judge_changed', p);
+  violates(run({ 'pnpm-workspace.yaml': 'packages: [b]\n' }, { base: { ...BASE, 'pnpm-workspace.yaml': 'packages: [a]\n' } }), 'judge_changed', 'pnpm-workspace.yaml');
+});
+
+test('judge_changed passes: package.json dependencies and other scripts changed', () => {
+  passes(run({ 'package.json': PACKAGE.replace('"zod": "^4.0.0"', '"zod": "^4.1.0",\n    "ws": "^8.0.0"').replace('"build": "esbuild server/index.mjs"', '"build": "esbuild server/index.mjs --minify"').replace('tests/hub-auth.test.mjs"', 'tests/hub-auth.test.mjs tests/hub-state.test.mjs"') }));
 });
 
 // ---- secret_path
@@ -420,7 +525,7 @@ const HEAD_SHA = 'b'.repeat(40);
 
 // A fake `gh api`: base and head trees built from file maps, paginated PR files, issue events
 // and comments. Records every call; fails any call it does not know.
-function fakeGitHub({ base = BASE, head = BASE, files = ['server/a.mjs'], changedFiles, events = [], comments = [], fail = {}, truncated = false } = {}) {
+function fakeGitHub({ base = BASE, head = BASE, files = ['server/a.mjs'], changedFiles, events = [], comments = [], fail = {}, truncated = false, pull = {} } = {}) {
   const blobs = new Map();
   const tree = files => ({ truncated, tree: Object.entries(files).filter(([, v]) => v !== null).map(([path, content]) => {
     blobs.set(sha(content), content);
@@ -436,7 +541,7 @@ function fakeGitHub({ base = BASE, head = BASE, files = ['server/a.mjs'], change
     calls.push({ method, path, body });
     for (const [pattern, error] of Object.entries(fail)) if (path.includes(pattern)) throw new Error(error);
     if (method === 'GET') {
-      if (path === 'repos/o/r/pulls/7') return { number: 7, changed_files: changedFiles ?? files.length, base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+      if (path === 'repos/o/r/pulls/7') return { number: 7, changed_files: changedFiles ?? files.length, base: { sha: BASE_SHA }, head: { sha: HEAD_SHA }, ...pull };
       if (path.startsWith('repos/o/r/pulls/7/files?')) return page(files.map(filename => ({ filename })), path);
       if (path.startsWith('repos/o/r/issues/7/events?')) return page(events.map(e => ({ event: e.event, label: { name: e.label }, actor: { login: e.actor } })), path);
       if (path.startsWith('repos/o/r/issues/7/comments?')) return page(comments, path);
@@ -523,6 +628,15 @@ test('cli fails closed when uni compile fails on a changed contract', async () =
   const r = await cli(gh, { env: { DRY_RUN: '1' }, compile: () => { throw new Error('uni: not found'); } });
   assert.equal(r.code, 1);
   assert.match(r.stdout, /ratchet_error|contract_weakened/);
+});
+
+test('cli fails closed when the PR head or base moved away from the shas it was asked to judge (M4)', async () => {
+  for (const moved of [{ head: { sha: 'd'.repeat(40) } }, { base: { sha: 'd'.repeat(40) } }]) {
+    const gh = fakeGitHub({ pull: moved });
+    const r = await cli(gh, { env: { DRY_RUN: '1' } });
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /ratchet_error.*moved/);
+  }
 });
 
 test('cli: a failed comment write still exits 1', async () => {
