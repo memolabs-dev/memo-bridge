@@ -43,3 +43,156 @@ jobs:
       - run: pnpm run test:deploy
       - run: pnpm run build
       - run: pnpm run smoke
+
+  # Check 1 of the delivery gate (docs/UNI_DELIVERY.md; spec "Check 1 : uni", Vault
+  # 1-Projects/home-assurance/2026-10-19-livraison-design.md). uni proves the exact head commit
+  # against uni/intents/delivery.uni, as an actor whose identity is GitHub's OIDC token (A3), and
+  # the job fails on any doubt. Frozen by scripts/uni-ratchet.mjs: only the owner changes it.
+  # No YAML anchors, aliases or merge keys here: the ratchet compares this block line by line.
+  uni:
+    name: uni
+    runs-on: ubuntu-latest
+    # The suite, five invariant files and the mutation harness, two of them waiting for a real
+    # 60 s lease expiry.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: uni-${{ github.event.pull_request.number || github.sha }}
+      cancel-in-progress: true
+    env:
+      MEMO_BRIDGE_GOVERNANCE_ROOT: ${{ github.workspace }}/governance
+      MEMO_BRIDGE_REQUIRE_GOVERNANCE: '1'
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      # uni v0.9.4, release asset digest read from the GitHub release API on 2026-10-19.
+      UNI_URL: https://github.com/memolabs-dev/uni-protocol/releases/download/v0.9.4/uni-x86_64-unknown-linux-gnu.tar.gz
+      UNI_SHA256: cdfdaa1a8c91973343089a22c7868c27679a705aa247e58b9e7e76f277e52c9f
+    defaults:
+      run:
+        shell: bash
+        working-directory: repo
+    steps:
+      # The head commit itself: the default checkout of a pull_request is the synthetic merge
+      # commit refs/pull/N/merge, which exists nowhere else. A fresh checkout every run; nothing
+      # under .uni/ is ever cached or restored.
+      - name: Check out the exact commit under proof
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: repo
+          persist-credentials: false
+      # Beside the repository, not inside it, so that `git status` after the proof sees only
+      # what the proof itself wrote.
+      - name: Check out the canonical lease ledger (read-only, never executed against GitHub)
+        uses: actions/checkout@v4
+        with:
+          repository: memolabs-dev/.github
+          ref: main
+          path: governance
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          package_json_file: repo/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: repo/pnpm-lock.yaml
+      - name: Install uni v0.9.4 (checksum pinned)
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/uni-bin"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/uni.tar.gz" "$UNI_URL"
+          (cd "$dir" && printf '%s  uni.tar.gz\n' "$UNI_SHA256" | sha256sum -c --strict -)
+          tar -xzf "$dir/uni.tar.gz" -C "$dir" uni
+          rm -f "$dir/uni.tar.gz"
+          test "$("$dir/uni" --version)" = "uni 0.9.4"
+          echo "$dir" >> "$GITHUB_PATH"
+      - run: pnpm install --frozen-lockfile
+      - name: The checkout is the commit under proof, and carries no uni state
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA" || { echo "::error::HEAD is not $HEAD_SHA"; exit 1; }
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then printf '%s\n' "$dirty"; echo "::error::the tree is not clean before the proof"; exit 1; fi
+          # Committed evidence, decisions or a registry snapshot would be read back by uni as
+          # its own state.
+          state=$(git ls-files -- .uni/evidence .uni/decisions .uni/artifacts '.uni/events*.jsonl' '.uni/.registry.*' .uni/.lock .uni/brief.md)
+          if [ -n "$state" ]; then printf '%s\n' "$state"; echo "::error::uni runtime state is committed"; exit 1; fi
+      # Its own step: the request credentials stay out of the step that runs the PR's code.
+      - name: Mint the OIDC token for uni (audience uni-cli)
+        id: token
+        run: |
+          set -euo pipefail
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::error::no OIDC token request for this run (id-token: write is required)"; exit 1
+          fi
+          jwt=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=uni-cli" | jq -r .value)
+          if [ -z "$jwt" ] || [ "$jwt" = null ]; then echo "::error::GitHub returned no OIDC token"; exit 1; fi
+          echo "::add-mask::$jwt"
+          echo "jwt=$jwt" >> "$GITHUB_OUTPUT"
+      - name: uni verify, A3, bound to the head commit
+        env:
+          UNI_IDENTITY_TOKEN: ${{ steps.token.outputs.jwt }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/uni-verify.json"
+          # uni without the token or the means to mint another one.
+          quiet() { env -u UNI_IDENTITY_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN "$@"; }
+          fail() {
+            echo "::error::uni: $1"
+            quiet uni explain --annotations || true
+            quiet uni explain || true
+            exit 1
+          }
+
+          status=0
+          env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            uni verify --json uni/intents/delivery.uni >"$out" || status=$?
+          [ "$status" = 0 ] || fail "uni verify exited $status"
+
+          # The proof neither moved HEAD nor wrote outside uni's git-ignored state.
+          [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ] || fail "HEAD moved during the proof"
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then printf '%s\n' "$dirty"; fail "the proof changed the tree"; fi
+
+          # The verdict is this run's stdout. uni 0.9.4 prints decision, claims and evidence there;
+          # A3 and independence are read from the evidence by uni's own rule (uni-decision
+          # assurance_for: every actor verified, every actor distinct from its executor), and the
+          # commit from each proof.
+          jq -e --arg sha "$HEAD_SHA" '
+            .decision == "Accepted"
+            and .trust_boundary_changed == false
+            and (.claims | type == "array" and length > 0)
+            and all(.claims[]; .state == "Valid")
+            and (.evidence | type == "array" and length > 0)
+            and ([.claims[].claim_id] | unique) == ([.evidence[].claim_id] | unique)
+            and all(.evidence[];
+              .state == "Valid"
+              and .commit_sha == $sha
+              and .workspace_dirty == false
+              and .actor.assurance == "verified"
+              and .actor.source == "oidc"
+              and (.actor.id | startswith("oidc:https://token.actions.githubusercontent.com#"))
+              and (.executor.id | length > 0) and .executor.id != "anonymous"
+              and .actor.id != .executor.id)
+          ' "$out" >/dev/null || fail "not Accepted at A3 with an independent actor on $HEAD_SHA"
+
+          # uni's own summary of the same run must agree: Accepted, A3, independent, verified.
+          report=$(quiet uni report --json) || fail "uni report failed"
+          printf '%s' "$report" | jq -e '
+            .decision == "Accepted" and .assurance == "A3"
+            and .independent_actor == true and .identity_assurance == "VERIFIED"
+          ' >/dev/null || fail "uni report disagrees: not Accepted at A3"
+
+          {
+            echo "### uni: Accepted at A3 on \`$HEAD_SHA\`"
+            echo ""
+            echo '```'
+            printf '%s' "$report" | jq '{decision, assurance, independent_actor, identity_assurance, summary}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

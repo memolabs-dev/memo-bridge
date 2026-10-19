@@ -8,8 +8,8 @@
 //   node scripts/project-template.mjs publish --execute  create and push it (the owner, once)
 //
 // check: every file is there; .github/workflows/sensitive-paths.yml is byte-identical to
-// memo-bridge's; the `-files` pattern of .mergify.yml is memo-bridge's own; the one
-// `check-success` names the CI job; the test script runs without dependencies.
+// memo-bridge's; the `-files` pattern of .mergify.yml is the fleet's (FLEET_FILES_PATTERN); the
+// one `check-success` names the CI job; the test script runs without dependencies.
 //
 // publish runs under the owner's own gh login (it needs the `workflow` scope, since the
 // template carries workflow files; the memo-labs-automation App has no workflows permission).
@@ -27,6 +27,12 @@ export const TEMPLATE_DIR = join(ROOT, 'templates', 'project');
 export const TEMPLATE_REPO = 'memolabs-dev/project-template';
 export const TEMPLATE_FILES = Object.freeze(['.github/workflows/ci.yml', '.github/workflows/sensitive-paths.yml', '.gitignore',
   '.mergify.yml', 'AGENTS.md', 'README.md', 'package.json', 'test/smoke.test.mjs']);
+
+// The sensitive paths a fleet repository keeps for the owner (docs/MERGIFY_FLEET_ADOPTION.md).
+// memo-bridge itself narrowed its own pattern to root .env files once the uni and uni-ratchet
+// checks judged its gate files (docs/UNI_DELIVERY.md); a new project has no such judge yet, so
+// the template keeps the fleet pattern.
+export const FLEET_FILES_PATTERN = String.raw`^(\.github/|\.mergify\.yml$|CODEOWNERS$|AGENTS\.md$|\.env)`;
 
 const read = path => readFileSync(join(TEMPLATE_DIR, path), 'utf8');
 
@@ -53,7 +59,7 @@ export function checkTemplate() {
   const own = readFileSync(join(ROOT, '.github', 'workflows', 'sensitive-paths.yml'), 'utf8');
   if (read('.github/workflows/sensitive-paths.yml') !== own) problems.push('sensitive-paths.yml differs from memo-bridge\'s');
   const mergify = read('.mergify.yml');
-  if (filesPattern(mergify) !== filesPattern(readFileSync(join(ROOT, '.mergify.yml'), 'utf8'))) problems.push('.mergify.yml -files pattern differs');
+  if (filesPattern(mergify) !== FLEET_FILES_PATTERN) problems.push('.mergify.yml -files pattern is not the fleet pattern');
   if (!/^\s+- "-files ~= /m.test(mergify)) problems.push('.mergify.yml: the -files line is not in the quoted style');
   const checks = [...mergify.matchAll(/check-success = @github-actions\/([^"\n]+)"/g)].map(m => m[1]);
   const ci = read('.github/workflows/ci.yml');

@@ -1,6 +1,9 @@
 # Memo Labs autoloop (docs/MERGIFY_PILOT.md, spec .agent/project/autoloop REQ-M02..M05).
 # A green PR from a trusted author lands without a human. Only sensitive paths wait for the owner;
 # Mergify's own Merge Protections comment on the PR names the condition that blocks it.
+# Delivery gate (docs/UNI_DELIVERY.md): the uni check proves the head commit at A3, the
+# uni-ratchet check refuses any loosening of the judge, so .github/, .mergify.yml and AGENTS.md
+# land on those checks; only root .env files stay out of reach.
 shared:
   land_conditions: &land_conditions
     - base = main
@@ -11,9 +14,11 @@ shared:
         - author = guillaume-flambard
     - label != hold-merge
     - label != needs-human-review
-    - -files ~= ^(\.github/|\.mergify\.yml$|CODEOWNERS$|AGENTS\.md$|\.env)
+    - -files ~= ^\.env
     - check-success = @github-actions/test (22)
     - check-success = @github-actions/test (24)
+    - check-success = @github-actions/uni
+    - check-success = @github-actions/uni-ratchet
 
 merge_queue:
   max_parallel_checks: 1

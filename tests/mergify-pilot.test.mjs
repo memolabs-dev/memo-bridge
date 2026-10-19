@@ -18,7 +18,10 @@ const requirements = [
   'author = memo-labs-automation[bot]', 'author = guillaume-flambard',
   'label != hold-merge', 'label != needs-human-review',
   'check-success = @github-actions/test (22)',
-  'check-success = @github-actions/test (24)'
+  'check-success = @github-actions/test (24)',
+  // The delivery gate (docs/UNI_DELIVERY.md): the proof of the head commit and the ratchet.
+  'check-success = @github-actions/uni',
+  'check-success = @github-actions/uni-ratchet'
 ];
 
 test('auto merging is conditional, never enabled for all PRs', () => {
@@ -46,15 +49,19 @@ test('no cutoff date and no size cap: green code PRs are eligible', () => {
   assert.doesNotMatch(text, /#files|#added-lines|#deleted-lines/);
 });
 
-test('sensitive paths stay with the owner, code paths land', () => {
-  const match = conditions().match(/-files ~= ([^\r\n]+)/);
-  assert.ok(match, 'no file deny list');
-  const regex = new RegExp(match[1].trim().replace(/^['"]|['"]$/g, ''));
-  for (const path of ['.github/workflows/ci.yml', '.mergify.yml', 'CODEOWNERS', '.env.production',
-    'AGENTS.md']) {
+// Since the delivery gate (spec "Mergify", decision 4): uni and uni-ratchet judge the gate files,
+// so .github/, .mergify.yml, CODEOWNERS and AGENTS.md land on those checks; only root .env files
+// stay with the owner.
+test('only root env files stay with the owner; the gate files land on the uni checks', () => {
+  const lines = conditions().split('\n').filter(l => l.includes('-files ~='));
+  assert.equal(lines.length, 1, 'one file deny list');
+  const regex = new RegExp(lines[0].slice(lines[0].indexOf('-files ~= ') + '-files ~= '.length).trim().replace(/^['"]|['"]$/g, ''));
+  for (const path of ['.env', '.env.production', '.env.local']) {
     assert.match(path, regex, 'sensitive path not excluded: ' + path);
   }
-  for (const path of ['server/index.mjs', 'bridge/hub-cli.mjs', 'scripts/reap-worktrees.mjs',
+  for (const path of ['.github/workflows/ci.yml', '.github/workflows/uni-ratchet.yml', '.mergify.yml', 'CODEOWNERS',
+    'AGENTS.md', '.uni/config.toml', 'uni/intents/delivery.uni', 'tests/invariants/fence.test.mjs',
+    'server/index.mjs', 'bridge/hub-cli.mjs', 'scripts/reap-worktrees.mjs',
     'tests/github.test.mjs', 'package.json', 'pnpm-lock.yaml', 'docs/guide.md', 'docs/AGENTS.md',
     'deploy/install.sh', 'infra/ansible.yml', 'migrations/001.sql']) {
     assert.doesNotMatch(path, regex, 'code path wrongly excluded: ' + path);
