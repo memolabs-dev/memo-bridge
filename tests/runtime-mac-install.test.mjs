@@ -125,7 +125,9 @@ function macHome(t) {
     '| open-app | products/open-app | repo | active | product | JS | - |', ''].join('\n'));
   writeFileSync(p('.config/memo-bridge/agent.key'), 'probe-identity\n');
   writeFileSync(p('.config/memo-bridge/hub-ca.crt'), 'ca\n');
-  for (const f of ['issue_lease.py', 'issue_preflight.py', 'private_owner_allowlist.py']) writeFileSync(p('gov/scripts', f), '# fixture\n');
+  const allowlist = '# fixture\nimport pwd\n# the account home, not $HOME: pwd.getpwuid(uid).pw_dir (incident E-16)\n';
+  for (const f of ['issue_lease.py', 'issue_preflight.py']) writeFileSync(p('gov/scripts', f), '# fixture\n');
+  writeFileSync(p('gov/scripts/private_owner_allowlist.py'), allowlist);
   git(p('gov'), 'init', '-q');
   git(p('gov'), 'add', '.');
   git(p('gov'), 'commit', '-qm', 'fixture');
@@ -231,4 +233,42 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
     const again = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry']);
     assert.equal(again.status, 0, again.stderr + again.stdout);
     assert.equal(existsSync(join(L.credentials, 'app-key')), false);
+  });
+
+test('a governance pin that resolves the owner home from $HOME is refused (incident E-16)',
+  { skip: process.platform !== 'darwin' && 'the installer runs on macOS only', timeout: 120_000 }, async t => {
+    const { home, p, govRef } = macHome(t);
+    const L = runtimeLayout(home);
+    const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    const git = (...args) => {
+      const out = spawnSync('git', args, { cwd: p('gov'), encoding: 'utf8', env: gitEnv });
+      assert.equal(out.status, 0, out.stderr);
+      return out.stdout.trim();
+    };
+    // The shape that refused every private repository on 2026-10-18: the ledger child points
+    // HOME at a private gh configuration directory, so an allowlist that reads it never sees
+    // the owner's real home and answers False for every enrolled repository.
+    writeFileSync(p('gov/scripts/private_owner_allowlist.py'),
+      '# fixture\nimport os\nhome = os.environ["HOME"]\n');
+    git('add', '.');
+    git('commit', '-qm', 'resolve the home from the environment');
+    const badRef = git('rev-parse', 'HEAD');
+    assert.notEqual(badRef, govRef);
+
+    const refused = run(home, ['--owner-sub', SUB, '--governance-ref', badRef, '--governance-src', p('gov'),
+      '--from-registry']);
+    assert.notEqual(refused.status, 0, refused.stderr + refused.stdout);
+    assert.match(refused.stderr, /E-16/);
+    assert.match(refused.stderr, /lease_denied/);
+    assert.equal(existsSync(join(L.base, 'governance', badRef)), false, 'the bad pin is never installed');
+    assert.equal(existsSync(join(home, 'Library/LaunchAgents/dev.memolabs.memo-bridge-agent.plist')), false,
+      'launchd is never called');
+
+    // The pin that carries the fix installs, which is what makes the refusal a check and not a
+    // permanent block.
+    const accepted = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'),
+      '--from-registry']);
+    assert.equal(accepted.status, 0, accepted.stderr + accepted.stdout);
+    assert.ok(existsSync(join(accepted.steps.governance.root, 'scripts', 'private_owner_allowlist.py')));
   });
