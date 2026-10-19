@@ -4,9 +4,16 @@
 # instead of a skip: a silent observer never looks green. The checkout is found through the
 # environment (MEMO_BRIDGE_GOVERNANCE_ROOT in CI, $MEMOLABS_ROOT/PROJECTS.md locally), never a path
 # written here. In uni 0.9.4 a `*` in `files` matches one whole path segment and `**` several.
+#
+# Why each `run` goes through a temporary file: uni 0.9.4 pipes a verifier's stdout and stderr and
+# reads them only once the process has exited (crates/uni-verify run_shell: wait_timeout, then
+# wait_with_output). A verifier that prints more than the pipe buffer (64 KiB on macOS) blocks on
+# write and is killed at its timeout: `pnpm test` did, observed on 2026-10-19. The wrapper keeps
+# the full output in a file, hands uni its last 2000 bytes (the summary), and exits with the
+# command's own status; if mktemp fails it exits 1, so the verifier still fails closed.
 
 [verifiers."suite.pnpm"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 pnpm test"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 pnpm test >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   ".agent/**",
   ".github/**",
@@ -31,7 +38,7 @@ files = [
 timeout = 1800
 
 [verifiers."invariant.claim-exclusive"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/claim-race.test.mjs"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/claim-race.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   "tests/invariants/claim-race.test.mjs",
   "tests/invariants/lib/**",
@@ -43,7 +50,7 @@ files = [
 timeout = 900
 
 [verifiers."invariant.fence-monotonic"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/fence.test.mjs"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/fence.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   "tests/invariants/fence.test.mjs",
   "tests/invariants/lib/**",
@@ -55,7 +62,7 @@ files = [
 timeout = 900
 
 [verifiers."invariant.clock-skew"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/clock-skew.test.mjs"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/clock-skew.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   "tests/invariants/clock-skew.test.mjs",
   "tests/invariants/lib/**",
@@ -67,7 +74,7 @@ files = [
 timeout = 900
 
 [verifiers."invariant.worktree-exclusive"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/worktree-race.test.mjs"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/worktree-race.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   "tests/invariants/worktree-race.test.mjs",
   "tests/invariants/lib/**",
@@ -79,7 +86,7 @@ files = [
 timeout = 900
 
 [verifiers."invariant.lock-exclusive"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/lock-race.test.mjs"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/lock-race.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   "tests/invariants/lock-race.test.mjs",
   "tests/invariants/lib/**",
@@ -91,7 +98,7 @@ files = [
 timeout = 900
 
 [verifiers."invariant.mutants-killed"]
-run = "MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node tests/mutations/run.mjs"
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node tests/mutations/run.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
 files = [
   "tests/mutations/**",
   "tests/invariants/**",
