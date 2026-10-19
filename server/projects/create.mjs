@@ -9,7 +9,9 @@
 //      visibility, else nothing is touched; then delete_branch_on_merge;
 //   4. a clone on the Mac under $MEMOLABS_ROOT/<area>/<name>;
 //   5. the registry row, under the registry lock (registry-writer.mjs);
-//   6. readiness: true only when the runtime that serves the project already allows it, else the
+//   6. on the Mac, a private repository is enrolled in the runtime's owner-policy files
+//      (mac-enroll.mjs, #216), so the running runtime serves it without a reinstall;
+//   7. readiness: true only when the runtime that serves the project already allows it, else the
 //      owner steps that are missing.
 // GitHub is reached with GitHub App installation tokens only (github-app.mjs purposes
 // repo_create and repo_admin), through gh with a per-call environment. Nothing is ever deleted:
@@ -69,7 +71,7 @@ export function validateProjectArgs(args = {}) {
 function ownerSteps(spec, { ownerSub, governanceRef }) {
   if (spec.host === 'mac') {
     return [{ step: 'enroll_on_mac',
-      why: 'the Mac runtime serves a private repository only once the owner enrolled it (owner-policy files, read at start)',
+      why: 'project_create could not enroll it on this Mac runtime (see enrollment_error); the installer enrolls every private project of the registry',
       run_on: 'the Mac, from a trusted memo-bridge checkout',
       command: `deploy/mac/install-runtime-agent.sh --owner-sub ${ownerSub ?? '<owner sub>'} --governance-ref ${governanceRef ?? '<governance commit>'} --from-registry --app-key "$HOME/${APP_KEY_HOME_PATH}" --install`,
       from_chatgpt: 'operator_run on host mac with that command, which asks for your approval' }];
@@ -87,10 +89,10 @@ function ownerSteps(spec, { ownerSub, governanceRef }) {
 
 // deps: root (MEMOLABS_ROOT), credentials (github-app.mjs provider), gh (runGh), scratchDir
 // (private parent for gh config dirs), env (runtime env, for git), audit(op, outcome, code, ids),
-// readiness(spec) -> {ready, missing?}, ownerSub, governanceRef, registry {add} overrides for tests,
+// readiness(spec) -> {ready, missing?}, enroll(spec) -> {ok, enrolled} | refusal (Mac private projects), ownerSub, governanceRef, registry {add} overrides for tests,
 // clone(spec, path) override for tests, waitRepoMs and pollMs for the template commit.
 export function createProjectCreator({ root, credentials, gh = runGh, scratchDir = null, env = process.env, audit = async () => {},
-  readiness = async () => ({ ready: false }), ownerSub = null, governanceRef = null, addRow = addRegistryRow, clone = null,
+  readiness = async () => ({ ready: false }), enroll = null, ownerSub = null, governanceRef = null, addRow = addRegistryRow, clone = null,
   waitRepoMs = 30_000, pollMs = 1_500, wait = sleep } = {}) {
   if (typeof root !== 'string' || !root.startsWith('/')) throw new Error('project_create_requires_root');
 
@@ -248,7 +250,14 @@ export function createProjectCreator({ root, credentials, gh = runGh, scratchDir
     if (!row.added && row.row.path !== relPath) return fail('name_taken', `"${spec.name}" was registered meanwhile for ${row.row.path}`, { repo: spec.repo, steps });
     steps.push(row.added ? 'registry_row_added' : 'registry_row_found');
 
-    // 6. Readiness.
+    // 6. Enrollment on the Mac runtime: only a private repository this call created or verified above.
+    let enrollment = null;
+    if (spec.host === 'mac' && spec.visibility === 'private' && typeof enroll === 'function') {
+      try { enrollment = await enroll(spec); } catch { enrollment = fail('enroll_write_failed'); }
+      if (enrollment?.ok === true) steps.push(enrollment.enrolled ? 'enrolled_on_mac' : 'enrollment_found');
+    }
+
+    // 7. Readiness.
     let ready;
     try { ready = await readiness(spec); } catch { ready = { ready: false }; }
     const result = { ok: true, project: spec.name, repo: spec.repo, url: `https://github.com/${spec.repo}`, visibility: spec.visibility,
@@ -256,6 +265,7 @@ export function createProjectCreator({ root, credentials, gh = runGh, scratchDir
       ready_for_batch_create: ready.ready === true };
     if (ready.ready === true) result.next = `batch_create with project "${spec.name}" and the first tasks; Mergify lands green pull requests`;
     else {
+      if (enrollment && enrollment.ok !== true) result.enrollment_error = enrollment.error;
       result.owner_steps = ownerSteps(spec, { ownerSub, governanceRef });
       result.next = 'the owner steps below, then batch_create with project "' + spec.name + '"';
     }

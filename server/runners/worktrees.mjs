@@ -558,7 +558,11 @@ const protectedRefusal = hits => fail('path_protected',
   `${hits.count} change(s) under .github/workflows, .github/actions or .github/dependabot.yml: ${hits.shown.join(', ')}`);
 
 export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explicitCredentials,
-  remotePolicy = typeof rt?.remotePolicy === 'function' ? rt.remotePolicy() : remotePolicyFromEnv(explicitEnv ?? process.env) } = {}) {
+  remotePolicy: remotePolicyOption = typeof rt?.remotePolicy === 'function' ? () => rt.remotePolicy()
+    : () => remotePolicyFromEnv(explicitEnv ?? process.env) } = {}) {
+  // Read at each call, not when the runner is built: project_create adds projects to remote.json
+  // while the runtime runs (#216). A fixed policy object (tests) stays fixed.
+  const currentRemotePolicy = typeof remotePolicyOption === 'function' ? remotePolicyOption : () => remotePolicyOption;
   const runnerEnv = explicitEnv ?? process.env;
   // The runtime's shared provider, unless the caller passed its own environment.
   const credentials = explicitCredentials ?? (explicitEnv === undefined && rt?.githubCredentials
@@ -605,7 +609,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
   // the per-request metadata the runtime received next to the principal, never tool
   // arguments. In 'warn' mode the call goes on and its result carries session_warning.
   function sessionCheck(workspace, ctx) {
-    const decision = sessionBindingDecision(workspace.client_session, requestMeta(ctx.meta).client_session, remotePolicy.session_binding,
+    const decision = sessionBindingDecision(workspace.client_session, requestMeta(ctx.meta).client_session, currentRemotePolicy().session_binding,
       { remote: isRemotePrincipal(rt.principal) });
     if (!decision.ok) return { error: decision };
     if (decision.warning) ctx.sessionWarning = decision.warning;
@@ -639,7 +643,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
     if (info.delegation.parent_workspace_id !== row.workspace_id || info.delegation.worktree_id !== row.id) {
       return { error: fail('outside_delegation_scope', 'not the worktree of your delegation') };
     }
-    const decision = sessionBindingDecision(info.child.client_session, session, remotePolicy.session_binding,
+    const decision = sessionBindingDecision(info.child.client_session, session, currentRemotePolicy().session_binding,
       { remote: isRemotePrincipal(rt.principal) });
     if (!decision.ok) return { error: decision };
     if (decision.warning) ctx.sessionWarning = decision.warning;
@@ -756,7 +760,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const { workspace } = ws;
       const asChild = await read(repo => callerChild(repo, rt.principal.id, { workspace, session: requestMeta(ctx.meta).client_session }));
       if (asChild) return parentOnly('worktree_create');
-      const notAllowed = remoteProjectRefusal(rt.principal, workspace.project_id, remotePolicy, { host: rt.host });
+      const notAllowed = remoteProjectRefusal(rt.principal, workspace.project_id, currentRemotePolicy(), { host: rt.host });
       if (notAllowed) return notAllowed;
       const bound = sessionCheck(workspace, ctx);
       if (bound.error) return bound.error;

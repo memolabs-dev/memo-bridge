@@ -20,10 +20,12 @@
 //   3. the launchd plist of dev.memolabs.memo-bridge-agent in runtime mode, staged in --out.
 // Nothing here talks to the VPS: no corpus, path or credential leaves the Mac.
 import { execFile } from 'node:child_process';
-import { chmodSync, closeSync, constants as fsConstants, mkdirSync, openSync, renameSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, mkdirSync, openSync, renameSync, rmdirSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readProjectRegistry } from '../../server/catalog.mjs';
+import { ENROLL_LOCK } from '../../server/projects/mac-enroll.mjs';
+import { acquireLock } from '../../server/projects/registry-writer.mjs';
 
 export const LABEL = 'dev.memolabs.memo-bridge-agent';
 export const AGENT_URL = 'wss://127.0.0.1:9444/agent';
@@ -201,8 +203,17 @@ export async function configure({ home, ownerSub, release, governance, node, out
   try { registry = await readProjectRegistry({ projectsRoot: L.registryRoot, layoutRoot: L.registryRoot }); } catch { return { ok: false, error: 'registry_unavailable' }; }
   const enrolled = await enroll({ projects: registry.projects, explicit: repos, fromRegistry, origin, visibility });
   if (!enrolled.ok) return enrolled;
-  writeAtomic(L.privatePolicy, renderPrivatePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
-  writeAtomic(L.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects }), 0o600);
+  // Under the lock project_create's enrollment takes (server/projects/mac-enroll.mjs, #216), so an
+  // enrollment never renames an older copy over what the installer just wrote.
+  mkdirSync(L.policyDir, { recursive: true, mode: 0o700 });
+  const lock = join(L.policyDir, ENROLL_LOCK);
+  if (!(await acquireLock(lock, { waitMs: 10_000, stepMs: 50 }))) return { ok: false, error: 'owner_policy_locked', detail: lock };
+  try {
+    writeAtomic(L.privatePolicy, renderPrivatePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
+    writeAtomic(L.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects }), 0o600);
+  } finally {
+    rmdirSync(lock);
+  }
   chmodSync(L.policyDir, 0o700);
   const staged = join(out, `${LABEL}.plist`);
   writeAtomic(staged, renderPlist({ home, node, release, governance, ownerSub, extraPath, githubApp }), 0o644);

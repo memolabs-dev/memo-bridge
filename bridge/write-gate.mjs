@@ -14,7 +14,7 @@
 //   runs as root (lab-infra #161).
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { isRemotePrincipal } from '../server/coordinator/policy.mjs';
 
 const fail = (error, detail) => ({ ok: false, error, ...(detail !== undefined ? { detail } : {}) });
@@ -94,15 +94,23 @@ export function parseRemotePolicy(value) {
 export const UNCONFIGURED_POLICY = Object.freeze({ projects: Object.freeze([]), session_binding: 'warn',
   soft_deadline_ms: SOFT_DEADLINE.default, remote_writes: 'disabled', owner_sub: null, configured: false });
 
-// MEMO_BRIDGE_REMOTE_CONFIG: absolute path of remote.json. Read once per process.
+// MEMO_BRIDGE_REMOTE_CONFIG: absolute path of remote.json. Read again only when the file changed
+// (inode, size or mtime): on the Mac, project_create adds a project to it while the runtime runs
+// (#216, server/projects/mac-enroll.mjs), and a policy read once per process kept refusing it
+// until a restart. An unchanged file returns the same frozen policy object.
 const loaded = new Map();
-export function remotePolicyFromEnv(env = process.env, { readFile = path => readFileSync(path, 'utf8') } = {}) {
+const fileSignature = (stat, path) => {
+  try { const s = stat(path); return `${s.ino}:${s.size}:${s.mtimeMs}`; } catch { return 'missing'; }
+};
+export function remotePolicyFromEnv(env = process.env, { readFile = path => readFileSync(path, 'utf8'), stat = statSync } = {}) {
   const path = env.MEMO_BRIDGE_REMOTE_CONFIG;
   if (typeof path !== 'string' || !path.startsWith('/')) return UNCONFIGURED_POLICY;
-  if (loaded.has(path)) return loaded.get(path);
+  const signature = fileSignature(stat, path);
+  const cached = loaded.get(path);
+  if (cached && cached.signature === signature) return cached.policy;
   let policy;
   try { policy = parseRemotePolicy(JSON.parse(readFile(path))); } catch { policy = UNCONFIGURED_POLICY; }
-  loaded.set(path, policy);
+  loaded.set(path, { signature, policy });
   return policy;
 }
 
