@@ -12,6 +12,7 @@ import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 import { openSqliteStore } from '../server/coordinator/store.mjs';
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { enrollOnMac } from '../server/projects/mac-enroll.mjs';
+import { registerCatalogTools } from '../server/tools/catalog-tools.mjs';
 import { tempStateDir, stubProjects, stubLedger, stubRemote } from './helpers/coordinator-fixture.mjs';
 
 const OWNER_SUB = '0b6c1f4e-1111-4222-8333-944445555666';
@@ -132,4 +133,36 @@ test('#216 a coordinator built before the enrollment opens the new project (poli
   projects = ['drop', 'cuesheet'];
   const opened = await coordinator.workspaceOpen({ project: 'cuesheet', client_type: 'chatgpt', host: 'mac' });
   assert.equal(opened.ok, true, JSON.stringify(opened));
+});
+
+// #218: the hub places a call that names no host by asking the Mac's own projects_list when the
+// VPS does not know the project. That only works if the running Mac runtime lists the new project
+// to the owner's remote principal right after the enrollment, with no restart and no snapshot.
+test('#218 the running Mac projects_list shows the owner a project as soon as project_create enrolled it', async t => {
+  const h = await home(t);
+  const root = join(h.home, 'memolabs');
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, 'PROJECTS.md'), [
+    '# Projects', '## Projets appartenant à Memo Labs',
+    '| Name | Path | Kind | Status | Nature | Stack | Vault note |',
+    '|---|---|---|---|---|---|---|',
+    '| alpha | products/alpha | repo | active | app | TypeScript | - |',
+    '| relay-v2 | products/relay-v2 | repo | active | app | TypeScript | - |',
+    '', '## Dépôts de référence'
+  ].join('\n'));
+  for (const name of ['alpha', 'relay-v2']) await mkdir(join(root, 'products', name), { recursive: true });
+  const previous = process.env.MEMO_BRIDGE_REMOTE_CONFIG;
+  process.env.MEMO_BRIDGE_REMOTE_CONFIG = h.remoteFile;
+  t.after(() => { if (previous === undefined) delete process.env.MEMO_BRIDGE_REMOTE_CONFIG; else process.env.MEMO_BRIDGE_REMOTE_CONFIG = previous; });
+  // Registered exactly as server/registry.mjs does: no injected policy, the runtime's env decides.
+  let handler;
+  registerCatalogTools({ registerTool(name, conf, fn) { handler = fn; } }, () => ({
+    principal: makePrincipal(`oidc:${OWNER_SUB}`, [CAPABILITIES.READ], { client_type: 'chatgpt' }), host: 'mac',
+    authorize: () => true, audit: async () => {}, catalogOptions: { projectsRoot: root, layoutRoot: root }
+  }));
+  const listed = async search => JSON.parse((await handler({ search })).content[0].text);
+  assert.deepEqual((await listed('relay-v2')).projects, []);
+  assert.equal((await enrollOnMac(args(h))).ok, true);
+  const rows = (await listed('relay-v2')).projects;
+  assert.deepEqual(rows.map(p => [p.name, p.metadata_only === true]), [['relay-v2', false]]);
 });
