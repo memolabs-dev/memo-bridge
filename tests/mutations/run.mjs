@@ -5,17 +5,22 @@
 // it. For each mutant the harness:
 //   1. copies the committed tree (git archive HEAD) into a temporary directory and refuses to
 //      run at all while tracked files have uncommitted changes: the proof is about the commit;
-//   2. links node_modules, applies the patch with git apply inside the copy, then compares the
-//      copy file by file (content and mode) with an untouched extraction: any difference outside
-//      server/ and bridge/ is refused (a rename out of tests/ included), and node --check runs on
-//      every changed .mjs/.js/.cjs (a syntax-only mutant is not a mutant);
+//   2. reads the paths the patch names (tests/mutations/patches.mjs) and refuses, before git apply
+//      ever runs, a patch it cannot read or one naming anything outside server/ and bridge/
+//      (node_modules/, which is a link to the real one, included); then links node_modules,
+//      applies the patch with git apply inside the copy, and compares the copy file by file
+//      (content and mode) with an untouched extraction: any difference outside server/ and
+//      bridge/ is refused (a rename out of tests/ included), and node --check runs on every
+//      changed .mjs/.js/.cjs (a syntax-only mutant is not a mutant);
 //   3. runs the target invariant file on an unpatched copy with the same pattern (baseline): it
 //      must pass and select at least one test, so a kill cannot come from a broken environment
 //      or an empty selection;
 //   4. runs it on the mutant: killed iff node --test exits non-zero AND at least one test that
-//      passed in the baseline now fails with failureType 'testCodeFailure' (an assertion or an
-//      error thrown by the test). A non-zero exit for any other reason (the file no longer loads,
-//      a timeout, a hook, a cancelled test) is a harness error, never a kill.
+//      passed in the baseline now fails with failureType 'testCodeFailure' on an assertion (an
+//      AssertionError, code ERR_ASSERTION). A non-zero exit for any other reason (the file no
+//      longer loads, a timeout, a hook, a cancelled test, a TypeError or any other error thrown
+//      by production code) is a harness error, never a kill: a mutant that crashes the program
+//      proves the test runs the code, not that it checks the behaviour.
 // Tests run with MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 and MEMO_BRIDGE_GOVERNANCE_ROOT set to the real
 // governance checkout, resolved as tests/invariants/lib/fixture.mjs does. Nothing is ever
 // written into the original repository; temporary directories are removed afterwards.
@@ -29,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defaultGovernanceRoot } from '../../server/coordinator/issue-lease.mjs';
+import { patchPaths } from './patches.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPORTER = pathToFileURL(join(HERE, 'count-reporter.mjs')).href;
@@ -198,8 +204,13 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       const t0 = Date.now();
       const fail = reason => { failures.push(`${m.file}: ${reason}`); complain(`ERROR    ${m.file}: ${reason}`); };
       const patchFile = join(mutationsDir, m.file);
+      const text = readFileSync(patchFile, 'utf8');
       let pattern;
-      try { pattern = headerPattern(readFileSync(patchFile, 'utf8')); } catch (error) { fail(error.message); continue; }
+      try { pattern = headerPattern(text); } catch (error) { fail(error.message); continue; }
+      let named;
+      try { named = patchPaths(text); } catch (error) { fail(`cannot read the paths of the patch, refused before git apply: ${error.message}`); continue; }
+      const namedOutside = named.filter(p => !inScope(p));
+      if (namedOutside.length) { fail(`changes files outside server/ and bridge/: ${namedOutside.join(', ')} (named by the patch, refused before git apply)`); continue; }
 
       const copy = fresh();
       const applied = git(copy, ['apply', patchFile]);
@@ -229,14 +240,14 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       if (run.timedOut) { fail(`mutant run timed out after ${seconds(RUN_TIMEOUT_MS)}`); continue; }
       if (!run.count || run.count.tests === 0) { fail(`mutant run selected no test (exit ${run.code}):\n${tail(run.stderr)}`); continue; }
       if (run.code !== 0) {
-        // Only an assertion (or an error thrown by the test body) in a test the baseline passed kills.
+        // Only an assertion in a test the baseline passed kills (Ruling 17a).
         const passedBefore = new Set(base.count.passed);
-        const killers = run.count.failed.filter(f => passedBefore.has(f.key) && f.failureType === 'testCodeFailure');
+        const killers = run.count.failed.filter(f => passedBefore.has(f.key) && f.failureType === 'testCodeFailure' && f.assertion === true);
         if (killers.length) {
           say(`killed   ${m.name}  [${m.invariant}] ${killers.length}/${run.count.tests} test(s) failed on an assertion  (${timing})`);
         } else {
-          const seen = run.count.failed.map(f => `${f.key} (${f.failureType ?? 'file-level failure'})`).join(', ') || 'none';
-          fail(`exit ${run.code} but no test that passed in the baseline failed on an assertion (testCodeFailure); failures: ${seen}  (${timing})\n${tail(run.log)}`);
+          const seen = run.count.failed.map(f => `${f.key} (${[f.failureType ?? 'file-level failure', f.error].filter(Boolean).join(', ')})`).join(', ') || 'none';
+          fail(`exit ${run.code} but no test that passed in the baseline failed on an assertion (testCodeFailure, AssertionError); failures: ${seen}  (${timing})\n${tail(run.log)}`);
         }
       } else {
         failures.push(`${m.file}: survived`);
