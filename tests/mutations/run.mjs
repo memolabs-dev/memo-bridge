@@ -5,21 +5,26 @@
 // it. For each mutant the harness:
 //   1. copies the committed tree (git archive HEAD) into a temporary directory and refuses to
 //      run at all while tracked files have uncommitted changes: the proof is about the commit;
-//   2. links node_modules, checks the patch only touches server/ or bridge/, applies it with
-//      git apply inside the copy and runs node --check on every touched .mjs/.js (a syntax-only
-//      mutant is not a mutant);
+//   2. links node_modules, applies the patch with git apply inside the copy, then compares the
+//      copy file by file (content and mode) with an untouched extraction: any difference outside
+//      server/ and bridge/ is refused (a rename out of tests/ included), and node --check runs on
+//      every changed .mjs/.js/.cjs (a syntax-only mutant is not a mutant);
 //   3. runs the target invariant file on an unpatched copy with the same pattern (baseline): it
 //      must pass and select at least one test, so a kill cannot come from a broken environment
 //      or an empty selection;
-//   4. runs it on the mutant: killed iff node --test exits non-zero.
+//   4. runs it on the mutant: killed iff node --test exits non-zero AND at least one test that
+//      passed in the baseline now fails with failureType 'testCodeFailure' (an assertion or an
+//      error thrown by the test). A non-zero exit for any other reason (the file no longer loads,
+//      a timeout, a hook, a cancelled test) is a harness error, never a kill.
 // Tests run with MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 and MEMO_BRIDGE_GOVERNANCE_ROOT set to the real
 // governance checkout, resolved as tests/invariants/lib/fixture.mjs does. Nothing is ever
 // written into the original repository; temporary directories are removed afterwards.
 //
-// Usage: node tests/mutations/run.mjs [--only <invariant|mutant>] [--repo <dir>]
+// Usage: node tests/mutations/run.mjs [--only <invariant|mutant>] [--repo <dir>] [--test-timeout <ms>]
 // Exit 0 if and only if every selected mutant is killed.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -30,6 +35,7 @@ const REPORTER = pathToFileURL(join(HERE, 'count-reporter.mjs')).href;
 const TEST_SUFFIX = '.test.mjs';
 const IN_SCOPE = /^(server|bridge)\//;
 const RUN_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_TEST_TIMEOUT_MS = 180_000;
 
 // Ruling 4: a mutant <name>.patch targets tests/invariants/<prefix>.test.mjs for the LONGEST test
 // basename <prefix> such that <name> starts with "<prefix>-". Every invariant is a key (possibly
@@ -67,18 +73,30 @@ function git(cwd, args, { input } = {}) {
   return { code: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? '').trim() };
 }
 
-// Paths the patch touches, from git's own parser (-z: exact names; a rename lists both sides).
-function touchedPaths(copy, patchFile) {
-  const r = git(copy, ['apply', '--numstat', '-z', patchFile]);
-  if (r.code !== 0) throw new Error(`git apply --numstat: ${r.stderr}`);
-  const paths = [];
-  const fields = r.stdout.split('\0');
-  for (let i = 0; i < fields.length; i++) {
-    const m = /^[-\d]+\t[-\d]+\t(.*)$/s.exec(fields[i]);
-    if (!m) continue;
-    if (m[1] === '') { paths.push(fields[i + 1], fields[i + 2]); i += 2; } else paths.push(m[1]);
-  }
-  return paths.filter(p => p !== undefined);
+// Every file of an extracted tree (node_modules link excluded), as path -> "mode:sha256" (or the
+// target of a symlink). Comparing two snapshots shows exactly what a patch changed, whatever git
+// apply was told (a rename, a mode change, a new or deleted file).
+function snapshot(root) {
+  const files = new Map();
+  const walk = rel => {
+    for (const entry of readdirSync(join(root, rel), { withFileTypes: true })) {
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      if (path === 'node_modules') continue;
+      const full = join(root, path);
+      const info = lstatSync(full);
+      if (info.isDirectory()) walk(path);
+      else if (info.isSymbolicLink()) files.set(path, `link:${readlinkSync(full)}`);
+      else files.set(path, `${(info.mode & 0o777).toString(8)}:${createHash('sha256').update(readFileSync(full)).digest('hex')}`);
+    }
+  };
+  walk('');
+  return files;
+}
+function changedPaths(before, after) {
+  const changed = [];
+  for (const [path, id] of after) if (before.get(path) !== id) changed.push(path);
+  for (const path of before.keys()) if (!after.has(path)) changed.push(path);
+  return changed.sort();
 }
 const inScope = path => IN_SCOPE.test(path) && !path.split('/').some(s => s === '' || s === '.' || s === '..') && !path.includes('\\');
 
@@ -91,7 +109,7 @@ function extract(tar, dir, repo) {
 }
 
 // One node --test run of a single invariant file; resolves {code, tests, failed, ms}.
-function runTest(copy, invariant, pattern, governanceRoot, scratch) {
+function runTest(copy, invariant, pattern, governanceRoot, scratch, testTimeoutMs) {
   const countFile = join(scratch, 'count.json');
   const logFile = join(scratch, 'spec.log');
   const env = { ...gitEnv(copy), MEMO_BRIDGE_REQUIRE_GOVERNANCE: '1', MEMO_BRIDGE_GOVERNANCE_ROOT: governanceRoot };
@@ -99,7 +117,7 @@ function runTest(copy, invariant, pattern, governanceRoot, scratch) {
   // Under an outer node --test (the harness's own unit test), NODE_TEST_CONTEXT would make this
   // run a child of that runner: it would stream to stdout and never call the reporters.
   delete env.NODE_TEST_CONTEXT;
-  const args = ['--test', '--experimental-test-isolation=none', '--test-timeout=180000', `--test-name-pattern=${pattern}`,
+  const args = ['--test', '--experimental-test-isolation=none', `--test-timeout=${testTimeoutMs}`, `--test-name-pattern=${pattern}`,
     `--test-reporter=${REPORTER}`, `--test-reporter-destination=${countFile}`, '--test-reporter=spec', `--test-reporter-destination=${logFile}`,
     join('tests', 'invariants', `${invariant}${TEST_SUFFIX}`)];
   const started = Date.now();
@@ -126,11 +144,12 @@ const tail = text => text.trim().split('\n').slice(-40).join('\n');
 export async function main(argv = process.argv.slice(2), { out = process.stdout, err = process.stderr } = {}) {
   const say = line => out.write(`${line}\n`);
   const complain = line => err.write(`${line}\n`);
-  let only = null; let repoArg = null;
+  let only = null; let repoArg = null; let testTimeoutMs = DEFAULT_TEST_TIMEOUT_MS;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--only' && argv[i + 1]) only = argv[++i];
     else if (argv[i] === '--repo' && argv[i + 1]) repoArg = argv[++i];
-    else { complain(`mutations: unknown argument ${argv[i]} (usage: run.mjs [--only <invariant|mutant>] [--repo <dir>])`); return 1; }
+    else if (argv[i] === '--test-timeout' && /^[1-9]\d*$/.test(argv[i + 1] ?? '')) testTimeoutMs = Number(argv[++i]);
+    else { complain(`mutations: unknown argument ${argv[i]} (usage: run.mjs [--only <invariant|mutant>] [--repo <dir>] [--test-timeout <ms>])`); return 1; }
   }
   const top = git(resolve(repoArg ?? join(HERE, '..', '..')), ['rev-parse', '--show-toplevel']);
   if (top.code !== 0) { complain(`mutations: not a git repository: ${top.stderr}`); return 1; }
@@ -146,6 +165,9 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
     return 1;
   }
   const head = git(repo, ['rev-parse', '--short', 'HEAD']).stdout.trim();
+  const untracked = git(repo, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'tests/mutations']).stdout.split('\0')
+    .filter(p => p.endsWith('.patch'));
+  for (const p of untracked) complain(`mutations: warning: ${p} is not committed and is ignored (the harness reads HEAD)`);
 
   const work = mkdtempSync(join(tmpdir(), 'memo-mutations-'));
   let runs = 0;
@@ -155,6 +177,7 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
     if (archived.code !== 0) { complain(`mutations: git archive: ${archived.stderr}`); return 1; }
     const fresh = () => extract(tar, join(work, `tree-${runs++}`), repo);
     const listing = fresh();
+    const pristine = snapshot(listing);
     const mutationsDir = join(listing, 'tests', 'mutations');
     let map;
     try { map = mutantsByInvariant(mutationsDir); } catch (error) { complain(`mutations: ${error.message}`); return 1; }
@@ -179,38 +202,45 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       try { pattern = headerPattern(readFileSync(patchFile, 'utf8')); } catch (error) { fail(error.message); continue; }
 
       const copy = fresh();
-      let paths;
-      try { paths = touchedPaths(copy, patchFile); } catch (error) { fail(error.message); continue; }
-      if (!paths.length) { fail('the patch touches no file'); continue; }
-      const outside = paths.filter(p => !inScope(p));
-      if (outside.length) { fail(`touches files outside server/ and bridge/: ${outside.join(', ')}`); continue; }
       const applied = git(copy, ['apply', patchFile]);
       if (applied.code !== 0) { fail(`does not apply to HEAD: ${applied.stderr}`); continue; }
-      const unparsable = paths.filter(p => /\.m?js$/.test(p) && existsSync(join(copy, p)))
+      const paths = changedPaths(pristine, snapshot(copy));
+      if (!paths.length) { fail('the patch changes no file'); continue; }
+      const outside = paths.filter(p => !inScope(p));
+      if (outside.length) { fail(`changes files outside server/ and bridge/: ${outside.join(', ')}`); continue; }
+      const unparsable = paths.filter(p => /\.[cm]?js$/.test(p) && existsSync(join(copy, p)))
         .filter(p => spawnSync(process.execPath, ['--check', join(copy, p)], { stdio: 'ignore' }).status !== 0);
       if (unparsable.length) { fail(`node --check fails on ${unparsable.join(', ')}: a syntax error is not a mutant`); continue; }
 
       const key = `${m.invariant}\0${pattern}`;
       if (!baselines.has(key)) {
         const scratch = join(work, `run-${runs++}`); mkdirSync(scratch);
-        baselines.set(key, await runTest(fresh(), m.invariant, pattern, governanceRoot, scratch));
+        baselines.set(key, await runTest(fresh(), m.invariant, pattern, governanceRoot, scratch, testTimeoutMs));
       }
       const base = baselines.get(key);
       if (base.timedOut) { fail(`baseline timed out after ${seconds(RUN_TIMEOUT_MS)}`); continue; }
       if (!base.count) { fail(`baseline wrote no test count (exit ${base.code}):\n${tail(base.stderr)}`); continue; }
       if (base.count.tests === 0) { fail(`"# test: ${pattern}" selects no test in tests/invariants/${m.invariant}${TEST_SUFFIX}`); continue; }
-      if (base.code !== 0) { fail(`baseline fails without the mutant (exit ${base.code}), so a kill would prove nothing:\n${tail(base.log)}`); continue; }
+      if (base.code !== 0 || base.count.failed.length || !base.count.passed.length) { fail(`baseline fails without the mutant (exit ${base.code}), so a kill would prove nothing:\n${tail(base.log)}`); continue; }
 
       const scratch = join(work, `run-${runs++}`); mkdirSync(scratch);
-      const run = await runTest(copy, m.invariant, pattern, governanceRoot, scratch);
+      const run = await runTest(copy, m.invariant, pattern, governanceRoot, scratch, testTimeoutMs);
       const timing = `baseline ${seconds(base.ms)}, mutant ${seconds(run.ms)}, total ${seconds(Date.now() - t0)}`;
       if (run.timedOut) { fail(`mutant run timed out after ${seconds(RUN_TIMEOUT_MS)}`); continue; }
       if (!run.count || run.count.tests === 0) { fail(`mutant run selected no test (exit ${run.code}):\n${tail(run.stderr)}`); continue; }
       if (run.code !== 0) {
-        say(`killed   ${m.name}  [${m.invariant}] ${run.count.failed}/${run.count.tests} test(s) failed  (${timing})`);
+        // Only an assertion (or an error thrown by the test body) in a test the baseline passed kills.
+        const passedBefore = new Set(base.count.passed);
+        const killers = run.count.failed.filter(f => passedBefore.has(f.key) && f.failureType === 'testCodeFailure');
+        if (killers.length) {
+          say(`killed   ${m.name}  [${m.invariant}] ${killers.length}/${run.count.tests} test(s) failed on an assertion  (${timing})`);
+        } else {
+          const seen = run.count.failed.map(f => `${f.key} (${f.failureType ?? 'file-level failure'})`).join(', ') || 'none';
+          fail(`exit ${run.code} but no test that passed in the baseline failed on an assertion (testCodeFailure); failures: ${seen}  (${timing})\n${tail(run.log)}`);
+        }
       } else {
         failures.push(`${m.file}: survived`);
-        complain(`SURVIVED ${m.name}  [${m.invariant}] all ${run.count.tests} test(s) matching /${pattern}/ pass with the mutant  (${timing})`);
+        complain(`SURVIVED ${m.name}  [${m.invariant}] all ${run.count.passed.length} test(s) matching /${pattern}/ pass with the mutant  (${timing})`);
       }
     }
     if (failures.length) {

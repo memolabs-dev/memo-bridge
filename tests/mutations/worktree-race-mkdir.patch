@@ -1,4 +1,6 @@
 # test: worktree_create resolving to one path
+# note: this kill depends on interleaving: the look-then-create mutant only fails when two racers pass the
+# lstat check before either mkdir. A SURVIVED here means rerun once, then investigate if it survives again.
 diff --git a/server/runners/worktrees.mjs b/server/runners/worktrees.mjs
 index c3b3a8f..1041f91 100644
 --- a/server/runners/worktrees.mjs
