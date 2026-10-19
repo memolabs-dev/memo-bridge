@@ -83,6 +83,29 @@ queue_rules:
 7. Set `delete_branch_on_merge` on the repository (T-C3, owner setting) and record the result in
    the table below.
 
+## A green pull request that never lands
+
+Symptom: the PR is ready, not a draft, its author is trusted, it carries no hold label, it touches
+no sensitive path, and its required checks are green on the exact head SHA, yet the
+`Mergify Merge Queue` check stays `neutral` and shows the `check-success` conditions unmet.
+
+Cause: Mergify's last evaluation of that pull request predates the state that now satisfies the
+conditions. It does not re-evaluate until a new event arrives on the pull request.
+
+Remedy: comment `@mergifyio refresh` on the pull request, then read the `Mergify Merge Queue`
+check again. It re-evaluates, enters the queue when everything holds, and Mergify merges. Never
+`gh pr merge`, and never a second merge engine: the queue is the single executor.
+
+Evidence: memo-bridge #130, head `10959283`, `test (22)` and `test (24)` green on that head since
+2026-10-16 16:18 UTC; the queue check of 2026-10-17 22:16 UTC still reported both conditions
+unmet. `@mergifyio refresh` on 2026-10-19 07:10 UTC: entered the queue, merged by `mergify[bot]`
+at 07:12:50 UTC. A scan of cuesheet, uni-protocol, problem-intelligence-engine,
+memo-founder-skills and emargo on the same day found no second case.
+
+A refresh is not a decision. A PR held by `hold-merge` stays held, a draft never enters the queue,
+and a PR whose conflicts need resolving or whose issue is already closed needs an owner decision,
+not a refresh.
+
 ## Rollback (REQ-M08)
 
 Remove `.mergify.yml` (or add `hold-merge` to the open PRs while it is being removed) and only
