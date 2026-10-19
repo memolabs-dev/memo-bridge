@@ -110,6 +110,8 @@ const IN_FLIGHT_MAX = 1000;
 const REQUESTS_SHOWN = 10;
 // workspace_recover bounds: ledger status calls are slow (python + gh), so only the most
 // recent held claims are reconciled.
+// The last `count` rows; none when the budget is spent (slice(-0) would return them all).
+export const lastRows = (rows, count) => (count > 0 ? rows.slice(-count) : []);
 const RECOVER = Object.freeze({ claims: 10, checkpoints: 10, jobs: 10, worktrees: 50, actions: 20, handoffs: 2 });
 // tasks_list bounds: projects scanned, repositories per search query, search calls per listing.
 // With App tokens (the VPS runner) a token covers one repository, so the search runs once per
@@ -842,7 +844,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       // claimsOf orders by updated_at ascending: reconcile the most recent ones.
       const held = local.held.slice(-RECOVER.claims).reverse();
       const claims = await Promise.all(held.map(c => reconcile(workspace, c)));
-      for (const c of local.superseded.slice(-Math.max(0, RECOVER.claims - claims.length)).reverse()) {
+      for (const c of lastRows(local.superseded, RECOVER.claims - claims.length).reverse()) {
         claims.push({ issue: c.issue_ref, claim_id: c.claim_id, local_fence: c.fence_sha, local_expires_at: c.expires_at,
           state: 'lost', ledger_state: 'superseded' });
       }
@@ -958,8 +960,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         return current?.error && !UNCERTAIN.has(current.error) ? current : fail('ledger_unavailable', 'nothing was claimed');
       }
       const lease = current.receipt;
-      if (lease?.state === 'claimed' && lease.worker !== worker && now() < reclaimableAfter(lease.expires_at)) {
-        return fail('lease_held', 'the previous lease is live or expired less than 60 s ago');
+      // An unreadable expiry is held too: only a finite time already past the margin lets go.
+      if (lease?.state === 'claimed' && lease.worker !== worker && !(now() >= reclaimableAfter(lease.expires_at))) {
+        return fail('lease_held', 'the previous lease is live, expired less than 60 s ago, or has no readable expiry');
       }
       const result = await ledger.claim(issue, worker, ttl);
       if (result.ok) {

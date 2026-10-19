@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createCoordinator, decodeOutcome, ghSearchIssues, parsePublicAllowlist, rankTasks, readPublicAllowlist,
+import { createCoordinator, decodeOutcome, lastRows, ghSearchIssues, parsePublicAllowlist, rankTasks, readPublicAllowlist,
   sanitizeExternal, tasksQuery, workerFor } from '../server/coordinator/index.mjs';
 import { memoryLedger } from './helpers/memory-ledger.mjs';
 import { createIssueLeaseClient, parseIssueRef as parseRef } from '../server/coordinator/issue-lease.mjs';
@@ -881,4 +881,26 @@ test('v9: a zombie task_complete after a takeover is refused and its summary is 
   const rows = await store.transaction(repo => repo.claimsOfIssue(DROP), { write: false });
   assert.ok(rows.every(r => !String(r.outcome ?? '').includes('zombie summary')));
   assert.deepEqual(rows.map(r => [r.claim_id, r.state]).sort(), [[first.claim_id, 'released'], [second.claim_id, 'claimed']].sort());
+});
+
+test('workspace_recover shows no superseded row once its claims cap is spent', async t => {
+  assert.deepEqual(lastRows(['a', 'b', 'c'], 2), ['b', 'c']);
+  assert.deepEqual(lastRows(['a', 'b'], 0), [], 'slice(-0) would return every row');
+  assert.deepEqual(lastRows(['a', 'b'], -3), []);
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { ledger: sequentialLedger() });
+  t.after(() => store.close());
+  const ws = (await coordinator.workspaceOpen({ project: 'drop', client_type: 'claude-code' })).workspace.workspace_id;
+  const at = Date.now();
+  // Ten held rows fill the cap (10), plus one row another holder superseded.
+  await store.transaction(repo => {
+    for (let i = 1; i <= 11; i++) {
+      repo.insertClaim({ claim_id: i.toString(16).padStart(32, '0'), workspace_id: ws, issue_ref: `memolabs-dev/drop#${100 + i}`,
+        fence_sha: i.toString(16).padStart(40, 'a'), epoch: 1, expires_at: new Date(at + 300_000).toISOString(), updated_at: at + i });
+    }
+    repo.updateClaim((11).toString(16).padStart(32, '0'), { state: 'released', outcome: 'lost', updated_at: at + 20 }, (11).toString(16).padStart(40, 'a'));
+  });
+  const snap = await coordinator.workspaceRecover({ workspace_id: ws });
+  assert.equal(snap.claims.length, 10);
+  assert.ok(snap.claims.every(c => c.ledger_state !== 'superseded'), 'the cap is respected');
+  assert.equal(snap.claims_truncated, false);
 });

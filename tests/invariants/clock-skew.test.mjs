@@ -142,6 +142,21 @@ test('the reclaim margin fails closed when the ledger cannot say who holds the I
   assert.equal(inner.claims, 0, 'no claim without knowing who holds the Issue');
 });
 
+test('a foreign lease whose expiry cannot be read is held, never reclaimed', async t => {
+  for (const expires_at of ['garbage', null, undefined, '']) {
+    const clock = () => T0;
+    const inner = memoryLedger(clock);
+    const ledger = { status: async () => ({ ok: true, receipt: { state: 'claimed', expired: true, worker: 'mb.mac.someone_else', claim_id: 'a'.repeat(32),
+      fence_sha: 'b'.repeat(40), epoch: 1, expires_at } }), claim: (...a) => inner.claim(...a) };
+    const { store, coordinator } = coordinatorOn(await tempStateDir(t), { now: clock, ledger });
+    t.after(() => store.close());
+    const workspace_id = (await coordinator.workspaceOpen({ project: 'drop', client_type: 'cli' })).workspace.workspace_id;
+    const refused = await coordinator.taskClaim({ workspace_id, issue: ISSUE, ttl_seconds: 60 });
+    assert.equal(refused.error, 'lease_held', String(expires_at));
+    assert.equal(inner.claims, 0, `no claim call for expires_at ${String(expires_at)}`);
+  }
+});
+
 test('a lease read as live just before expires_at is still not reclaimed seconds later', async t => {
   const world = { t: T0 };
   const leases = new Map();
