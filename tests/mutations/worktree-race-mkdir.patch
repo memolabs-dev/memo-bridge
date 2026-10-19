@@ -1,0 +1,14 @@
+# test: worktree_create resolving to one path
+diff --git a/server/runners/worktrees.mjs b/server/runners/worktrees.mjs
+index c3b3a8f..1041f91 100644
+--- a/server/runners/worktrees.mjs
++++ b/server/runners/worktrees.mjs
+@@ -817,7 +817,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
+       // sessions whose branches differ only in their separators (a/b-c, a-b/c) both pass, and both
+       // `git worktree add` into the same empty directory.
+       await mkdir(dirname(path), { recursive: true });
+-      try { await mkdir(path); } catch (error) { return error?.code === 'EEXIST' ? fail('path_exists') : fail('git_failed', 'mkdir'); }
++      try { await lstat(path); return fail('path_exists'); } catch { /* free */ }
+ 
+       const added = await runGit(repoPath, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, '--', path, baseCommit],
+         { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env });
