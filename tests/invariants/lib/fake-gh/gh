@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Offline stand-in for `gh api`, used to run the canonical issue_lease.py in tests.
+
+It emulates the GitHub semantics the lease protocol relies on: ref creation is exclusive and
+ref updates without force must fast-forward. State lives in the JSON file named by
+FAKE_GH_STATE and is guarded by an exclusive file lock, so racing processes see the same
+atomicity as on GitHub.
+"""
+import fcntl, hashlib, json, os, sys, time
+
+LEDGER = "memolabs-dev/.github"
+
+
+def fail(message, code=1):
+    sys.stderr.write(message + "\n")
+    sys.exit(code)
+
+
+def main(argv):
+    if not argv or argv[0] != "api":
+        fail("fake gh: only `api` is supported")
+    args, verb, path = argv[1:], "GET", None
+    body = None
+    i = 0
+    while i < len(args):
+        if args[i] == "-X":
+            verb = args[i + 1]; i += 2
+        elif args[i] == "-H":
+            i += 2
+        elif args[i] == "--input":
+            body = json.loads(sys.stdin.read()); i += 2
+        else:
+            path = args[i]; i += 1
+    # Test hook: a slow GitHub on ref creation, to exercise timeouts mid-write.
+    if verb == "POST" and path and path.endswith("/git/refs") and os.environ.get("FAKE_GH_SLOW_REFS"):
+        time.sleep(float(os.environ["FAKE_GH_SLOW_REFS"]))
+    state_path = os.environ["FAKE_GH_STATE"]
+    with open(state_path, "r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        state = json.load(handle)
+        out = route(state, verb, path, body)
+        handle.seek(0); handle.truncate(); json.dump(state, handle); handle.flush()
+    print(json.dumps(out))
+
+
+def route(state, verb, path, body):
+    refs, commits = state["refs"], state["commits"]
+    prefix = "repos/" + LEDGER + "/git/"
+    if path.startswith(prefix):
+        rest = path[len(prefix):]
+        if verb == "GET" and rest.startswith("ref/"):
+            name = "refs/" + rest[len("ref/"):]
+            if name not in refs:
+                fail("gh: Not Found (HTTP 404)")
+            return {"ref": name, "object": {"sha": refs[name]}}
+        if verb == "GET" and rest.startswith("commits/"):
+            sha = rest[len("commits/"):]
+            if sha not in commits:
+                fail("gh: Not Found (HTTP 404)")
+            return {"sha": sha, **commits[sha]}
+        if verb == "POST" and rest == "commits":
+            payload = json.dumps(body, sort_keys=True) + str(len(commits))
+            sha = hashlib.sha1(payload.encode()).hexdigest()
+            commits[sha] = {"message": body["message"], "tree": {"sha": body["tree"]}, "parents": body["parents"]}
+            return {"sha": sha}
+        if verb == "POST" and rest == "refs":
+            if body["ref"] in refs:
+                fail("gh: Reference already exists (HTTP 422)")
+            refs[body["ref"]] = body["sha"]
+            return {"ref": body["ref"], "object": {"sha": body["sha"]}}
+        if verb == "PATCH" and rest.startswith("refs/"):
+            name = rest
+            current = refs.get(name)
+            if current is None:
+                fail("gh: Not Found (HTTP 404)")
+            if not body.get("force") and current not in commits.get(body["sha"], {}).get("parents", []):
+                fail("gh: Update is not a fast forward (HTTP 422)")
+            refs[name] = body["sha"]
+            return {"ref": name, "object": {"sha": body["sha"]}}
+    if verb == "GET" and path.startswith("repos/"):
+        parts = path.split("/")
+        repo = parts[1] + "/" + parts[2]
+        if len(parts) == 3:
+            return {"full_name": repo, "private": False, "archived": False}
+        if len(parts) == 5 and parts[3] == "issues":
+            key = repo + "#" + parts[4]
+            if key not in state["issues"]:
+                fail("gh: Not Found (HTTP 404)")
+            issue = state["issues"][key]
+            return {"number": int(parts[4]), "state": issue.get("state", "open"),
+                    "labels": [{"name": n} for n in issue.get("labels", ["agent:ready", "priority:p1"])],
+                    "html_url": "https://github.com/" + repo + "/issues/" + parts[4],
+                    "updated_at": issue.get("updated_at", "2026-10-13T12:00:00Z"), "body": issue.get("body", "")}
+    fail("fake gh: unsupported " + verb + " " + str(path))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -242,9 +242,9 @@ test('release_on_finish releases the claim once the last job of that claim has e
   await s.finish(b.job_id, { service_result: 'exit-code', exit_code: 'exited', exit_status: '1' });
   await s.supervisor.tick();
   const releases = s.ledger.calls.filter(c => c[0] === 'release');
-  assert.deepEqual(releases.map(c => c[2]), ['completed']);
+  assert.deepEqual(releases.map(c => c[2]), ['cancelled'], 'a succeeded job never records completed: only task_complete does');
   const c = await s.claim();
-  assert.deepEqual([c.state, c.outcome], ['released', `completed: job ${a.job_id} succeeded`]);
+  assert.deepEqual([c.state, c.outcome], ['released', `cancelled: job ${a.job_id} succeeded (done requires task_complete)`]);
   assert.equal(c.fence_sha, s.ledger.lease.fence);
   await s.supervisor.tick();
   assert.equal(s.ledger.calls.filter(x => x[0] === 'release').length, 1, 'released once');

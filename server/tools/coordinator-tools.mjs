@@ -7,7 +7,7 @@
 // argument is looked at (server/coordinator/index.mjs).
 import { z } from 'zod/v4';
 import { CLIENT_TYPES, HOSTS, SUMMARY_MAX, TASKS_LIMIT } from '../coordinator/index.mjs';
-import { LEASE_TTL, OUTCOMES } from '../coordinator/issue-lease.mjs';
+import { LEASE_TTL, RELEASE_OUTCOMES } from '../coordinator/issue-lease.mjs';
 import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
 import { BATCH_MAX, BATCH_PRIORITIES, TASK_TEXT } from '../coordinator/batches.mjs';
 import { HANDOFF_LIMITS } from '../coordinator/handoff.mjs';
@@ -119,7 +119,7 @@ export function registerCoordinatorTools(server, getService) {
   server.registerTool('task_release', {
     description: 'Use this when you stop a task without finishing it (outcome blocked, failed or cancelled). Never closes the Issue, merges or deploys.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence,
-      outcome: z.enum(OUTCOMES).describe('blocked, failed or cancelled; completed is task_complete.') }),
+      outcome: z.enum(RELEASE_OUTCOMES).describe('blocked, failed or cancelled; completed is task_complete.') }),
     annotations: write
   }, call('taskRelease'));
 

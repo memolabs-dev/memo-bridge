@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createCoordinator, decodeOutcome, ghSearchIssues, parsePublicAllowlist, rankTasks, readPublicAllowlist,
+import { createCoordinator, decodeOutcome, lastRows, ghSearchIssues, parsePublicAllowlist, rankTasks, readPublicAllowlist,
   sanitizeExternal, tasksQuery, workerFor } from '../server/coordinator/index.mjs';
+import { memoryLedger } from './helpers/memory-ledger.mjs';
 import { createIssueLeaseClient, parseIssueRef as parseRef } from '../server/coordinator/issue-lease.mjs';
 import { CAPABILITIES, OPERATION_CAPABILITY, authorize, localOwnerPrincipal, makePrincipal } from '../server/coordinator/policy.mjs';
 import { createRuntime } from '../server/runtime.mjs';
@@ -57,7 +58,7 @@ test('happy path: claim, heartbeat, checkpoint, release, all through the canonic
   assert.equal(cp.ok, true, JSON.stringify(cp));
   assert.equal(cp.durability, 'unverified');
 
-  const done = await coordinator.taskRelease({ ...held, fence: beat.fence, outcome: 'completed' });
+  const done = await coordinator.taskRelease({ ...held, fence: beat.fence, outcome: 'cancelled' });
   assert.equal(done.ok, true, JSON.stringify(done));
   assert.equal((await coordinator.taskStatus({ issue: DROP })).lease.state, 'released');
   assert.equal((await coordinator.taskStatus({ issue: DROP })).checkpoints.length, 1);
@@ -82,6 +83,8 @@ test('one holder: a second workspace is refused, then takes over after expiry wi
   assert.equal((await coordinator.taskRenew(old)).error, 'stale_lease');
   assert.equal((await coordinator.taskCheckpoint({ ...old, branch: 'main', commit: 'b'.repeat(40) })).error, 'stale_lease');
   assert.equal((await coordinator.taskRelease({ ...old, outcome: 'failed' })).error, 'stale_lease');
+  // The superseded holder's completion is refused too, and its summary is not stored.
+  assert.equal((await coordinator.taskComplete({ ...old, summary: 'zombie summary' })).error, 'stale_lease');
   // Knowing the new holder's claim and fence is not enough from another workspace.
   assert.equal((await coordinator.taskRenew({ workspace_id: a, issue: DROP, claim_id: second.claim_id, fence: second.fence })).error,
     'unknown_claim');
@@ -334,7 +337,7 @@ test('a claim whose outcome was lost is recovered, not orphaned', { skip: skipWi
   assert.equal(claim.ok, true, JSON.stringify(claim));
   assert.equal(claim.recovered, true);
   ctl.lose.clear();
-  const done = await coordinator.taskRelease({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence, outcome: 'completed' });
+  const done = await coordinator.taskRelease({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence, outcome: 'cancelled' });
   assert.equal(done.ok, true, JSON.stringify(done));
   assert.equal((await real.status(parseRef(DROP))).receipt.state, 'released');
 });
@@ -393,6 +396,17 @@ test('task_complete releases with outcome completed and keeps the summary with t
     { ok: true, issue: DROP, released: true, outcome: 'completed', summary }, 'repeating reports the recorded completion');
   const ops = (await journal(store, { issue: DROP })).map(e => `${e.op}:${e.outcome}`).reverse();
   assert.deepEqual(ops, ['task_claim:ok', 'task_complete:ok', 'task_complete:ok']);
+});
+
+test('task_release refuses outcome completed: only task_complete writes it', { skip: skipWithoutLedger }, async t => {
+  const { coordinator, ws } = await setup(t);
+  const a = await ws();
+  const claim = await coordinator.taskClaim({ workspace_id: a, issue: DROP });
+  const held = { workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence };
+  assert.deepEqual(await coordinator.taskRelease({ ...held, outcome: 'completed' }),
+    { ok: false, error: 'invalid_input', detail: 'outcome' });
+  assert.equal((await coordinator.taskStatus({ issue: DROP })).lease.state, 'claimed', 'the claim is untouched');
+  assert.equal((await coordinator.taskComplete(held)).outcome, 'completed', 'task_complete still records it');
 });
 
 test('task_complete without summary, and with a dead fence, follows task_release', { skip: skipWithoutLedger }, async t => {
@@ -724,7 +738,9 @@ test('workspace_recover against the canonical ledger: held, then expired, then l
   assert.equal((await coordinator.workspaceRecover({ workspace_id: a })).claims[0].state, 'expired');
   const b = await ws();
   assert.equal((await coordinator.taskClaim({ workspace_id: b, issue: DROP })).ok, true);
-  assert.equal((await coordinator.workspaceRecover({ workspace_id: a })).claims[0].state, 'lost');
+  const lost = await coordinator.workspaceRecover({ workspace_id: a });
+  assert.equal(lost.claims[0].state, 'lost');
+  assert.match(lost.next_actions.join('\n'), /no longer held by this workspace: do not write/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -825,4 +841,66 @@ test('task_next flags a task whose change a merged pull request already carried'
   assert.deepEqual(next.task.merged_references,
     [{ number: 232, url: 'https://github.com/guillaume-flambard/lab-infra/pull/232' }]);
   assert.ok(seen.some(q => q.includes('is:pr')), 'the reference check runs');
+});
+
+test('v9: a lease that expired on this host is reclaimed by another workspace of the same store; one claimed row remains', async t => {
+  let at = Date.parse('2026-10-14T16:00:00Z');
+  const clock = () => at;
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { now: clock, ledger: memoryLedger(clock) });
+  t.after(() => store.close());
+  const open = async () => (await coordinator.workspaceOpen({ project: 'drop', client_type: 'claude-code' })).workspace.workspace_id;
+  const a = await open(); const b = await open();
+  const first = await coordinator.taskClaim({ workspace_id: a, issue: DROP, ttl_seconds: 60 });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  at += 121_000; // the lease expires and the 60 s clock margin passes; a's mirror row is still 'claimed'
+  const second = await coordinator.taskClaim({ workspace_id: b, issue: DROP, ttl_seconds: 60 });
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.equal(second.epoch, 2);
+  const rows = await store.transaction(repo => repo.claimsOfIssue(DROP), { write: false });
+  assert.equal(rows.filter(r => r.state === 'claimed').length, 1);
+  assert.equal(rows.find(r => r.state === 'claimed').claim_id, second.claim_id);
+  const old = rows.find(r => r.claim_id === first.claim_id);
+  assert.deepEqual([old.state, old.outcome], ['released', 'lost']);
+  assert.deepEqual((await coordinator.workspaceStatus({ workspace_id: a })).claims, []);
+});
+
+test('v9: a zombie task_complete after a takeover is refused and its summary is never stored', async t => {
+  let at = Date.parse('2026-10-14T16:00:00Z');
+  const clock = () => at;
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { now: clock, ledger: memoryLedger(clock) });
+  t.after(() => store.close());
+  const open = async () => (await coordinator.workspaceOpen({ project: 'drop', client_type: 'claude-code' })).workspace.workspace_id;
+  const a = await open(); const b = await open();
+  const first = await coordinator.taskClaim({ workspace_id: a, issue: DROP, ttl_seconds: 60 });
+  at += 121_000; // expiry plus the 60 s clock margin
+  const second = await coordinator.taskClaim({ workspace_id: b, issue: DROP, ttl_seconds: 60 });
+  assert.equal(second.ok, true, JSON.stringify(second));
+  const done = await coordinator.taskComplete({ workspace_id: a, issue: DROP, claim_id: first.claim_id, fence: first.fence, summary: 'zombie summary' });
+  assert.equal(done.ok, false, JSON.stringify(done));
+  assert.equal(done.error, 'stale_lease');
+  const rows = await store.transaction(repo => repo.claimsOfIssue(DROP), { write: false });
+  assert.ok(rows.every(r => !String(r.outcome ?? '').includes('zombie summary')));
+  assert.deepEqual(rows.map(r => [r.claim_id, r.state]).sort(), [[first.claim_id, 'released'], [second.claim_id, 'claimed']].sort());
+});
+
+test('workspace_recover shows no superseded row once its claims cap is spent', async t => {
+  assert.deepEqual(lastRows(['a', 'b', 'c'], 2), ['b', 'c']);
+  assert.deepEqual(lastRows(['a', 'b'], 0), [], 'slice(-0) would return every row');
+  assert.deepEqual(lastRows(['a', 'b'], -3), []);
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { ledger: sequentialLedger() });
+  t.after(() => store.close());
+  const ws = (await coordinator.workspaceOpen({ project: 'drop', client_type: 'claude-code' })).workspace.workspace_id;
+  const at = Date.now();
+  // Ten held rows fill the cap (10), plus one row another holder superseded.
+  await store.transaction(repo => {
+    for (let i = 1; i <= 11; i++) {
+      repo.insertClaim({ claim_id: i.toString(16).padStart(32, '0'), workspace_id: ws, issue_ref: `memolabs-dev/drop#${100 + i}`,
+        fence_sha: i.toString(16).padStart(40, 'a'), epoch: 1, expires_at: new Date(at + 300_000).toISOString(), updated_at: at + i });
+    }
+    repo.updateClaim((11).toString(16).padStart(32, '0'), { state: 'released', outcome: 'lost', updated_at: at + 20 }, (11).toString(16).padStart(40, 'a'));
+  });
+  const snap = await coordinator.workspaceRecover({ workspace_id: ws });
+  assert.equal(snap.claims.length, 10);
+  assert.ok(snap.claims.every(c => c.ledger_state !== 'superseded'), 'the cap is respected');
+  assert.equal(snap.claims_truncated, false);
 });

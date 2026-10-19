@@ -96,16 +96,19 @@ export function journal(store, { issue, workspace_id, limit = 200 } = {}) {
   return store.transaction(repo => repo.listEvents({ issue_ref: issue, workspace_id, limit }), { write: false });
 }
 
-// A ledger that always grants, for tests that need a lease but not the canonical script.
+// A ledger that always grants, for tests that need a lease but not the canonical script. Its
+// status says what a ledger would: nobody holds the Issue until a claim, then the claimant does.
 export function stubLedger({ worker } = {}) {
   const fence = 'b'.repeat(40);
   const receipt = { state: 'claimed', expired: false, worker: worker ?? null, claim_id: 'c'.repeat(32), fence_sha: fence,
     epoch: 1, expires_at: '2099-01-01T00:00:00+00:00' };
+  const unclaimed = { state: 'unclaimed', expired: false, worker: null, claim_id: null, fence_sha: null, epoch: null, expires_at: null };
+  let claimant = worker;
   const ok = extra => Promise.resolve({ ok: true, receipt: { ...receipt, ...extra } });
   return {
     receipt,
-    status: () => ok(),
-    claim: (issue, w) => ok({ worker: w }),
+    status: () => (claimant === undefined ? Promise.resolve({ ok: true, receipt: unclaimed }) : ok({ worker: claimant })),
+    claim: (issue, w) => { claimant = w; return ok({ worker: w }); },
     verify: () => ok(),
     heartbeat: () => ok(),
     release: () => ok({ state: 'released' })
@@ -114,12 +117,18 @@ export function stubLedger({ worker } = {}) {
 
 // A ledger that grants every claim with a distinct claim id and fence, and reports the latest
 // claim as the holder, so two workspaces can hold the same Issue one after the other (the
-// takeover a second conversation does). `verify` overrides the fence check.
+// takeover a second conversation does). Before the first claim nobody holds the Issue; a release
+// of the latest claim leaves it released; `expire()` lets the latest lease run out, which is what
+// a takeover needs since Bridge keeps a foreign live lease (or one expired less than 60 s ago)
+// from being claimed. `verify` overrides the fence check.
 export function sequentialLedger({ verify } = {}) {
   let n = 0; let last = { worker: null, claim_id: 'f'.repeat(32), fence_sha: 'b'.repeat(40) };
   const receipt = extra => ({ state: 'claimed', expired: false, epoch: 1, expires_at: '2099-01-01T00:00:00+00:00', ...extra });
+  const unclaimed = { state: 'unclaimed', expired: false, worker: null, claim_id: null, fence_sha: null, epoch: null, expires_at: null };
   return {
-    status: () => Promise.resolve({ ok: true, receipt: receipt(last) }),
+    expire() { last = { ...last, state: 'claimed', expired: true, expires_at: '2000-01-01T00:00:00+00:00' }; },
+    // Nobody holds the Issue before the first claim.
+    status: () => Promise.resolve({ ok: true, receipt: n === 0 ? unclaimed : receipt(last) }),
     claim: (issue, worker) => {
       n++;
       last = { worker, claim_id: n.toString(16).padStart(32, '0'), fence_sha: n.toString(16).padStart(40, 'a') };
@@ -127,6 +136,10 @@ export function sequentialLedger({ verify } = {}) {
     },
     verify: verify ?? (() => Promise.resolve({ ok: true, receipt: receipt(last) })),
     heartbeat: () => Promise.resolve({ ok: true, receipt: receipt(last) }),
-    release: () => Promise.resolve({ ok: true, receipt: receipt({ ...last, state: 'released' }) })
+    release: (issue, worker, claimId) => {
+      const released = receipt({ ...last, state: 'released' });
+      if (claimId === last.claim_id) last = { ...last, state: 'released' };
+      return Promise.resolve({ ok: true, receipt: released });
+    }
   };
 }

@@ -31,7 +31,7 @@ The Mac runner that does the work of a claimed task (worktrees, files, jobs, pus
 | `task_claim({workspace_id, issue, ttl_seconds?})` | `coordinator:write` | Reserves the task through the ledger; returns `claim_id`, `fence`, `epoch`, `expires_at`. Any other task the workspace still holds is released with outcome `cancelled` and listed in `released` (its jobs in `cancelled_jobs`): one workspace holds one task. |
 | `task_renew({workspace_id, issue, claim_id, fence, ttl_seconds?})` | `coordinator:write` | Extends the lease (60 to 1800 s, default 300); returns a new fence. |
 | `task_checkpoint({workspace_id, issue, claim_id, fence, branch?, commit?, note?, handoff?})` | `coordinator:write` | Records a Git-verified checkpoint and/or a structured handoff under a live claim (branch and commit required unless a handoff is given). |
-| `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `completed`, `blocked`, `failed` or `cancelled`, also from a closed workspace. |
+| `task_release({workspace_id, issue, claim_id, fence, outcome})` | `coordinator:write` | Releases with `blocked`, `failed` or `cancelled` (`completed` is `task_complete` only), also from a closed workspace. |
 | `task_complete({workspace_id, issue, claim_id, fence, summary?})` | `coordinator:write` | `task_release` with outcome `completed` and an optional plain-text summary (at most 2000 characters) kept with the claim. |
 | `workspace_delegate({workspace_id, scope, paths?, worktree_id?, issue?, brief?, ttl_seconds?, client_request_id?})` | `coordinator:write` | Splits work inside the task this workspace holds; returns `delegation_id` and the `paste` sentence for a new chat. See "Delegation". |
 | `delegation_join({delegation_id, client_label?})` | `coordinator:write` | The new chat joins: its child workspace, bound to this conversation (single use). |
@@ -174,7 +174,8 @@ Every result is `{ ok: true, ... }` or `{ ok: false, error, detail? }`.
 | `forbidden` | Capability missing, or the workspace belongs to another principal |
 | `workspace_closed` | The workspace is closed |
 | `project_mismatch` | The Issue is not in the repository of the workspace project's Git origin |
-| `lease_held` | Another worker holds an active lease |
+| `lease_held` | Another worker holds an active lease, or held one that expired less than 60 s ago (clock margin) |
+| `lease_expiring` | Fewer than 60 s of your lease are left: no commit, push, pull request, checkpoint or complete until `task_renew` (`next_step`). Renewing and releasing stay allowed |
 | `lease_race_lost` | The ledger saw a concurrent change while advancing the lease; retry |
 | `stale_lease` | The fence, worker or expiry does not match the current lease |
 | `issue_not_ready` | The Issue is closed, not `agent:ready`, blocked, or has no single priority label |

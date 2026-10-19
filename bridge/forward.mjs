@@ -25,7 +25,7 @@ const MAX_SESSION_CHARS = 512;
 // Refusals counted as 'denied' in the journal; any other failure is an 'error'.
 export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 'write_gate_closed', 'mutating_disabled',
   'project_not_allowed', 'path_protected', 'session_mismatch', 'workspace_other_session', 'session_required', 'protected_branch', 'push_rejected', 'lease_held',
-  'stale_lease', 'host_not_remote_enabled', 'head_not_pushed_by_workspace', 'default_branch_refused', 'workspace_closed',
+  'stale_lease', 'lease_expiring', 'host_not_remote_enabled', 'head_not_pushed_by_workspace', 'default_branch_refused', 'workspace_closed',
   'no_live_claim', 'claim_required', 'unsupported_op',
   // Phase 6 operator refusals (host agent or hub).
   'frozen', 'operator_disabled', 'tier_not_allowed', 'tier_mismatch', 'path_secret', 'path_not_allowed', 'git_internal',

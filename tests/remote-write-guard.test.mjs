@@ -95,8 +95,12 @@ async function fixture(t, { principal = LOCAL, policy = { projects: ['demo'] } }
     const id = `ws_${randomBytes(12).toString('base64url')}`;
     await rt.store().transaction(r => r.insertWorkspace({ id, principal: principal.id, client_type: 'chatgpt', project_id: project,
       host: 'mac', status: 'active', created_at: Date.now(), updated_at: Date.now(), client_session }));
-    await rt.store().transaction(r => r.insertClaim({ claim_id: randomBytes(16).toString('hex'), workspace_id: id, issue_ref: ISSUE,
-      fence_sha: randomBytes(20).toString('hex'), epoch: 1, expires_at: new Date(Date.now() + 600_000).toISOString(), updated_at: Date.now() }));
+    await rt.store().transaction(r => {
+      // v9: one claimed row per Issue in the store; a newer holder supersedes the earlier mirror row.
+      for (const c of r.claimsOfIssue(ISSUE)) if (c.state === 'claimed') r.updateClaim(c.claim_id, { state: 'released', outcome: 'expired', updated_at: Date.now() }, c.fence_sha);
+      r.insertClaim({ claim_id: randomBytes(16).toString('hex'), workspace_id: id, issue_ref: ISSUE,
+        fence_sha: randomBytes(20).toString('hex'), epoch: 1, expires_at: new Date(Date.now() + 600_000).toISOString(), updated_at: Date.now() });
+    });
     return id;
   };
   const ready = async (options = {}) => {
