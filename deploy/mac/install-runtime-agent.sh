@@ -155,6 +155,15 @@ fi
 /bin/chmod -R go-w "$RELEASE"
 say bundle "\"release\":\"$RELEASE\""
 
+# Before touching credentials or switching launchd, compare the pinned code to the actual
+# durable SQLite schema and take a transactionally consistent backup (including WAL).
+# This blocks the v8-on-v9 failure observed on 2026-10-19.
+# Never "fix" that failure by lowering SQLite user_version or clearing the database.
+/usr/bin/python3 -I -B "$REPO/deploy/mac/guard-coordinator-state.py" \
+  "$RELEASE/server/coordinator/store.mjs" \
+  "$HOME/Library/Application Support/memo-bridge/coordinator.sqlite" \
+  || die "runtime release is incompatible with coordinator state; launchd remains unchanged"
+
 # 2. The governance scripts the ledger runs, pinned like lab-infra pins them for the VPS.
 GOVERNANCE="$BASE/governance/$GOV_REF"
 if [ ! -f "$GOVERNANCE/scripts/issue_lease.py" ]; then
