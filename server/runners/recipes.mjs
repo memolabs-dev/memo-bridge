@@ -68,7 +68,8 @@ function makeTargets(root) {
 }
 
 // Return { recipeName: argv } for every recipe the worktree supports. When several
-// ecosystems coexist, the first match in this order wins: npm, SwiftPM, Python, Cargo, Go, make.
+// ecosystems coexist, the first match wins: npm, SwiftPM, Python's explicit Makefile,
+// Python fallback, Cargo, Go, make. A declared test target beats a global pytest executable.
 export function detectRecipes(worktreePath) {
   const recipes = {};
   const npm = npmScripts(worktreePath);
@@ -82,6 +83,7 @@ export function detectRecipes(worktreePath) {
     test: [
       npm?.test && ['npm', 'test'],
       swift && ['swift', 'test'],
+      (python && make?.test) && ['make', 'test'],
       python && ['python3', '-m', 'pytest', '-q'],
       cargo && ['cargo', 'test'],
       go && ['go', 'test', './...'],

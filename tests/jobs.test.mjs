@@ -138,7 +138,8 @@ test('detectRecipes: fixed argv per ecosystem, npm first, symlinks ignored', asy
   assert.deepEqual(detectRecipes(dir), { test: ['cargo', 'test'], build: ['cargo', 'build'] });
 
   await writeFile(join(dir, 'pytest.ini'), '[pytest]\n');
-  assert.deepEqual(detectRecipes(dir).test, ['python3', '-m', 'pytest', '-q']);
+  assert.deepEqual(detectRecipes(dir).test, ['make', 'test'],
+    'an explicit Python Makefile test target beats the global Python pytest fallback');
   assert.deepEqual(detectRecipes(dir).build, ['cargo', 'build'], 'python has no build recipe');
 
   await writeFile(join(dir, 'Package.swift'), '// swift-tools-version:5.9\n');
@@ -157,6 +158,37 @@ test('detectRecipes: fixed argv per ecosystem, npm first, symlinks ignored', asy
   assert.deepEqual(detectRecipes(other), {}, 'a symlinked manifest is not read');
   await writeFile(join(other, 'pyproject.toml'), '[project]\n');
   assert.deepEqual(detectRecipes(other), { test: ['python3', '-m', 'pytest', '-q'] });
+});
+
+test('Python recipes prefer an explicit Makefile test, but never a variable or symlink', async t => {
+  const root = await tempDir(t, 'memo-uv-make-');
+  await writeFile(join(root, 'pyproject.toml'), '[project]\\nname = "sample"\\n');
+  await writeFile(join(root, 'uv.lock'), 'version = 1\\n');
+  assert.deepEqual(detectRecipes(root).test, ['python3', '-m', 'pytest', '-q'],
+    'uv.lock alone does not authorize a new command shape');
+
+  await writeFile(join(root, 'Makefile'), 'test:\\n\\tuv run --locked pytest -q\\n');
+  assert.deepEqual(detectRecipes(root).test, ['make', 'test'],
+    'projects declare their canonical Python test runner explicitly');
+
+  await writeFile(join(root, 'Makefile'), 'test := not a target\\n');
+  assert.deepEqual(detectRecipes(root).test, ['python3', '-m', 'pytest', '-q'],
+    'a make variable must never be interpreted as an executable recipe');
+  await rm(join(root, 'Makefile'));
+  await writeFile(join(root, 'real.mk'), 'test:\\n\\tuv run --locked pytest -q\\n');
+  symlinkSync(join(root, 'real.mk'), join(root, 'Makefile'));
+  assert.deepEqual(detectRecipes(root).test, ['python3', '-m', 'pytest', '-q'],
+    'symlinked Makefile is not trusted');
+
+  await rm(join(root, 'Makefile'));
+  await writeFile(join(root, 'Makefile'), 'test:\\n\\tuv run --locked pytest -q\\n');
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node check.js' } }));
+  assert.deepEqual(detectRecipes(root).test, ['npm', 'test'],
+    'npm scripts keep precedence over Makefile in mixed projects');
+  await rm(join(root, 'package.json'));
+  await writeFile(join(root, 'Package.swift'), '// swift-tools-version:5.9\\n');
+  assert.deepEqual(detectRecipes(root).test, ['swift', 'test'],
+    'SwiftPM retains its established precedence');
 });
 
 test('runner helpers: nice wrapper, secret-free env, capped log with marker', async t => {
