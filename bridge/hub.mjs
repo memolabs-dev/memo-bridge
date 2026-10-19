@@ -118,7 +118,7 @@ export function createHub(options) {
       : { ok: false, error: out?.error ?? 'workspace_unverified' };
   });
   const locks = createOperatorLocks({ ...(operator?.now ? { now: operator.now } : {}), verifyWorkspace,
-    homes: operator?.homes ?? DEFAULT_HOMES, initial: hubState.load('locks', null), onChange: data => hubState.save('locks', data) });
+    homes: operator?.homes ?? DEFAULT_HOMES, reload: () => hubState.read('locks'), onChange: data => hubState.save('locks', data) });
   // Repatriated tools (part 2): operator_transfer relayed here, source reads signed for the caller.
   const transfers = createTransfers({ readSource: (host, op, args, principal) => sendInternal(host, op, args, principal),
     writeDest: (host, op, args, ctx) => operatorCall(host, op, { args, principal: ctx.principal, clientSession: ctx.clientSession,

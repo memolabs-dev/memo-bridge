@@ -9,7 +9,9 @@
 //
 // Writes are atomic (temporary file in the same directory, fsync, rename) and the files are
 // 0600. A document that cannot be read or parsed is set aside as <name>.corrupt-<ms> and the
-// table starts empty, journaled, never crashing the hub. Without a directory (tests, a hub
+// table starts empty, journaled, never crashing the hub. The one exception is the operator locks:
+// they are read with read() (fail closed), the file stays in place, and the hub refuses every
+// lock with locks_state_unavailable until the document reads again (fixed, or removed to reset). Without a directory (tests, a hub
 // started by hand) every load answers the fallback and every save is a no-op: the behaviour of
 // the hub before this module.
 //
@@ -65,6 +67,33 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
     }
   }
 
+  // Fail-closed read for a table whose silent loss is unsafe (the operator locks): {ok:true, data}
+  // (data null when the document does not exist yet) or {ok:false, error}. An unreadable or
+  // unparsable document is journaled but left in place, so a later read can succeed once it is
+  // fixed; nothing here starts an empty table on its behalf. Without a directory: {ok:true, data:null}.
+  function read(name) {
+    if (!dir) return { ok: true, data: null };
+    const file = pathOf(name);
+    let text;
+    try {
+      const st = lstatSync(file);
+      if (!st.isFile() || st.size > HUB_STATE_MAX_BYTES) throw new Error('not a regular file or too large');
+      text = readFileSync(file, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { ok: true, data: null };
+      record('hub_state_corrupt', { document: name, reason: 'unreadable', kept: true });
+      return fail('unreadable');
+    }
+    try {
+      const doc = JSON.parse(text);
+      if (doc?.version !== HUB_STATE_VERSION || !Object.hasOwn(doc, 'data')) throw new Error('version');
+      return { ok: true, data: doc.data };
+    } catch {
+      record('hub_state_corrupt', { document: name, reason: 'unparsable', kept: true });
+      return fail('unparsable');
+    }
+  }
+
   function setAside(name, file, reason) {
     try { renameSync(file, `${file}.corrupt-${now()}`); } catch { /* left in place: the next save replaces it */ }
     record('hub_state_corrupt', { document: name, reason });
@@ -96,5 +125,5 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
     }
   }
 
-  return Object.freeze({ dir, load, save, get durable() { return Boolean(dir); } });
+  return Object.freeze({ dir, load, read, save, get durable() { return Boolean(dir); } });
 }
