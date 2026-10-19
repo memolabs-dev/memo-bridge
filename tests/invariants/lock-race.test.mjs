@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHub } from '../../bridge/hub.mjs';
 import { createOperatorLocks } from '../../bridge/operator-locks.mjs';
@@ -19,7 +19,8 @@ import { CAPABILITIES, makePrincipal } from '../../server/coordinator/policy.mjs
 import { tempDir, tempStateDir } from './lib/fixture.mjs';
 
 const PRINCIPAL = makePrincipal('oidc:owner-sub', Object.values(CAPABILITIES), { client_type: 'chatgpt', via: 'hub' });
-const N = 8; // within [6, 12]
+const SIZES = [6, 12]; // the plan's sizes
+const N = 8; // the refusal cases below only need several sessions
 const ROUNDS = 25;
 const workspaceOf = i => `ws_${String(i).padStart(16, 'W')}`;
 const sessionOf = i => String(i).padStart(32, 'a');
@@ -32,42 +33,44 @@ const verifyWorkspace = async (principal, id) => {
 const lockArgs = (i, target = '/opt/stacks/drop') => ({ host: 'vps', workspace_id: workspaceOf(i), kind: 'path', target, ttl_seconds: 900 });
 const ask = (locks, i, target) => locks.handle('operator_lock', lockArgs(i, target), { principal: PRINCIPAL, clientSession: sessionOf(i) });
 
-test(`${N} sessions take the same lock: one holder, the rest locked_by_other_session`, async () => {
-  for (let round = 0; round < ROUNDS; round++) {
-    const locks = createOperatorLocks({ verifyWorkspace });
-    const answers = await Promise.all(Array.from({ length: N }, (_, i) => ask(locks, i)));
-    const holders = answers.filter(a => a.ok === true);
-    const refused = answers.filter(a => a.ok !== true);
-    assert.equal(holders.length, 1, `round ${round}: ${JSON.stringify(answers)}`);
-    assert.equal(refused.length, N - 1);
-    for (const r of refused) {
-      assert.equal(r.error, 'locked_by_other_session', JSON.stringify(r));
-      assert.equal(r.holder.workspace_id, holders[0].lock.workspace_id);
+for (const n of SIZES) {
+  test(`${n} sessions take the same lock: one holder, the rest locked_by_other_session`, async () => {
+    for (let round = 0; round < ROUNDS; round++) {
+      const locks = createOperatorLocks({ verifyWorkspace });
+      const answers = await Promise.all(Array.from({ length: n }, (_, i) => ask(locks, i)));
+      const holders = answers.filter(a => a.ok === true);
+      const refused = answers.filter(a => a.ok !== true);
+      assert.equal(holders.length, 1, `round ${round}: ${JSON.stringify(answers)}`);
+      assert.equal(refused.length, n - 1);
+      for (const r of refused) {
+        assert.equal(r.error, 'locked_by_other_session', JSON.stringify(r));
+        assert.equal(r.holder.workspace_id, holders[0].lock.workspace_id);
+      }
+      assert.equal(locks.size, 1, 'one lock in the table');
     }
-    assert.equal(locks.size, 1, 'one lock in the table');
-  }
-});
+  });
 
-test(`${N} sessions take overlapping paths: the table never holds two overlapping locks of different workspaces`, async () => {
-  const targets = ['/opt/stacks', '/opt/stacks/drop', '/opt/stacks/drop/app', '/opt/stacks/drop/app/src', '/opt/stacks/other'];
-  for (let round = 0; round < ROUNDS; round++) {
-    const locks = createOperatorLocks({ verifyWorkspace });
-    const answers = await Promise.all(Array.from({ length: N }, (_, i) => ask(locks, i, targets[i % targets.length])));
-    for (const a of answers) assert.ok(a.ok === true || a.error === 'locked_by_other_session', JSON.stringify(a));
-    const held = answers.filter(a => a.ok === true).map(a => a.lock);
-    assert.ok(held.length >= 1);
-    // /opt/stacks covers every drop path, so a holder of it is alone; /opt/stacks/other only
-    // overlaps /opt/stacks.
-    const inside = p => p === '/opt/stacks/drop' || p.startsWith('/opt/stacks/drop/');
-    for (const a of held) {
-      for (const b of held) {
-        if (a === b) continue;
-        const overlap = a.target === '/opt/stacks' || b.target === '/opt/stacks' || (inside(a.target) && inside(b.target));
-        assert.equal(overlap, false, `${a.target} (${a.workspace_id}) and ${b.target} (${b.workspace_id}) are both held`);
+  test(`${n} sessions take overlapping paths: the table never holds two overlapping locks of different workspaces`, async () => {
+    const targets = ['/opt/stacks', '/opt/stacks/drop', '/opt/stacks/drop/app', '/opt/stacks/drop/app/src', '/opt/stacks/other'];
+    for (let round = 0; round < ROUNDS; round++) {
+      const locks = createOperatorLocks({ verifyWorkspace });
+      const answers = await Promise.all(Array.from({ length: n }, (_, i) => ask(locks, i, targets[i % targets.length])));
+      for (const a of answers) assert.ok(a.ok === true || a.error === 'locked_by_other_session', JSON.stringify(a));
+      const held = answers.filter(a => a.ok === true).map(a => a.lock);
+      assert.ok(held.length >= 1);
+      // /opt/stacks covers every drop path, so a holder of it is alone; /opt/stacks/other only
+      // overlaps /opt/stacks.
+      const inside = p => p === '/opt/stacks/drop' || p.startsWith('/opt/stacks/drop/');
+      for (const a of held) {
+        for (const b of held) {
+          if (a === b) continue;
+          const overlap = a.target === '/opt/stacks' || b.target === '/opt/stacks' || (inside(a.target) && inside(b.target));
+          assert.equal(overlap, false, `${a.target} (${a.workspace_id}) and ${b.target} (${b.workspace_id}) are both held`);
+        }
       }
     }
-  }
-});
+  });
+}
 
 // The real hub on a state directory, not started: its own wiring of the locks to hub-state.
 let tls = null;
@@ -126,12 +129,37 @@ test('a hub that cannot read its saved locks refuses every lock, and serves agai
   assert.equal(readdirSync(dir).filter(n => n.includes('.corrupt-')).length, 0);
   assert.equal(readFileSync(file, 'utf8'), '{ not json');
 
-  // A valid document again: the same hub serves, with the table it holds (here, the removed file = a reset).
+  // A valid document again: the same hub serves, with the table it holds .
   writeFileSync(file, JSON.stringify({ version: 1, data: { locks: [], families: [] } }), { mode: 0o600 });
   const back = await ask(hub.operatorLocks, 2, '/srv/free-2');
   assert.equal(back.ok, true, JSON.stringify(back));
   const conflict = await ask(hub.operatorLocks, 3, '/srv/free-2/sub');
   assert.equal(conflict.error, 'locked_by_other_session');
+});
+
+test('removing an unreadable locks file resets the table and restores service; overview and the refusal say what is wrong', async t => {
+  const dir = await tempStateDir(t);
+  const seeded = await hubOn(t, dir);
+  assert.equal((await ask(seeded.operatorLocks, 1)).ok, true);
+  const file = join(dir, 'locks.json');
+  writeFileSync(file, '{ not json', { mode: 0o600 });
+
+  const hub = await hubOn(t, dir);
+  const refused = await ask(hub.operatorLocks, 2);
+  assert.equal(refused.error, 'locks_state_unavailable');
+  assert.match(refused.detail, /locks\.json/);
+  assert.match(refused.detail, /remove it to reset every lock/);
+  const unknown = hub.operatorLocks.overview(PRINCIPAL, sessionOf(2));
+  assert.equal(unknown.locks_state, 'unavailable');
+  assert.deepEqual(unknown.locks, []);
+
+  unlinkSync(file);
+  const back = await ask(hub.operatorLocks, 2);
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal(hub.operatorLocks.size, 1, 'an empty table: only the new lock');
+  assert.equal(Object.hasOwn(hub.operatorLocks.overview(PRINCIPAL, sessionOf(2)), 'locks_state'), false);
+  // Workspace 2 now holds /opt/stacks/drop although workspace 1 held it before the corruption: the removal freed it.
+  assert.equal((await ask(hub.operatorLocks, 1, '/opt/stacks/other')).ok, true);
 });
 
 test('a locks file of an unknown version also refuses', async t => {
