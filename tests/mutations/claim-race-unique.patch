@@ -1,0 +1,15 @@
+# test: the store refuses a second live claim on its own
+diff --git a/server/coordinator/store.mjs b/server/coordinator/store.mjs
+index d05d1f6..3eb81d7 100644
+--- a/server/coordinator/store.mjs
++++ b/server/coordinator/store.mjs
+@@ -273,8 +273,7 @@ function migrateV9(db, now = Date.now()) {
+     [['host', 'path'], `SELECT host, path, GROUP_CONCAT(id, '${sep}') AS ids FROM worktrees WHERE status = 'active' GROUP BY host, path HAVING COUNT(*) > 1`]
+   ]) refused.push(...dupes(sql, ...columns).map(d => ({ table: 'worktrees', ...d })));
+   if (refused.length) throw Object.assign(new Error('state_duplicate_live_rows'), { rows: refused });
+-  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS claims_live_issue ON claims(issue_ref) WHERE state = 'claimed';
+-CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_branch ON worktrees(project_id, host, branch) WHERE status = 'active';
++  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_branch ON worktrees(project_id, host, branch) WHERE status = 'active';
+ CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_path ON worktrees(host, path) WHERE status = 'active';`);
+ }
+ 

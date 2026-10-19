@@ -1,0 +1,14 @@
+# test: a zombie holder writes nothing after a reclaim
+diff --git a/server/runners/worktrees.mjs b/server/runners/worktrees.mjs
+index c3b3a8f..0b2b205 100644
+--- a/server/runners/worktrees.mjs
++++ b/server/runners/worktrees.mjs
+@@ -661,8 +661,6 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
+     if (held.error) return held;
+     // The last 60 s of a lease are a clock margin: no write until task_renew (issue-lease.mjs).
+     if (inExpiryWindow(held.claim.expires_at, now())) return { error: leaseExpiring() };
+-    const verified = await rt.ledger.verify(parseIssueRef(row.issue_ref), workerFor(workspace), held.claim.claim_id, held.claim.fence_sha);
+-    if (!verified?.ok) return { error: verified?.error ? fail(verified.error, verified.detail) : fail('ledger_unavailable') };
+     return held;
+   }
+ 
