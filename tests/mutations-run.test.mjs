@@ -144,8 +144,13 @@ test('a mutant that only breaks loading the test file is an error, not a kill', 
   assert.doesNotMatch(r.stdout, /killed/);
 });
 
+// The hang holds a ref'd 3 s timer, well past the 300 ms --test-timeout: with an empty event
+// loop, Node 22 reports a bare pending promise as cancelledByParent before any timeout fires
+// (Node 24 as testTimeoutFailure). The timer keeps the loop alive so both see a real timeout, and
+// it ends on its own, so the run still exits.
 test('a mutant that only makes a test time out is an error, not a kill', t => {
-  const r = harness(toy(t, { 'toy-hang.patch': patch('value is one', { file: 'server/wait.mjs', from: WAIT, to: 'export const wait = () => new Promise(() => {});' }) }),
+  const r = harness(toy(t, { 'toy-hang.patch': patch('value is one', { file: 'server/wait.mjs', from: WAIT,
+    to: 'export const wait = () => new Promise(resolve => setTimeout(resolve, 3000));' }) }),
     '--test-timeout', '300');
   assert.equal(r.code, 1, r.stdout + r.stderr);
   assert.match(r.stderr, /ERROR.*toy-hang.*testTimeoutFailure/);
