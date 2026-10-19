@@ -59,8 +59,8 @@ jobs:
           (cd "$dir" && printf '%s  uni.tar.gz\n' "$UNI_SHA256" | sha256sum -c --strict -)
           tar -xzf "$dir/uni.tar.gz" -C "$dir" uni
           rm -f "$dir/uni.tar.gz"
-          test "$("$dir/uni" --version)" = "uni 0.9.4"
-          echo "$dir" >> "$GITHUB_PATH"
+          version=$("$dir/uni" --version) || { echo "::error::uni --version failed"; exit 1; }
+          [ "$version" = "uni 0.9.4" ] || { echo "::error::installed $version, not uni 0.9.4"; exit 1; }
       - name: Compare the PR's judge with the base's
         shell: bash
         env:
@@ -69,7 +69,10 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # `uni compile` by absolute path, never looked up on PATH.
+          UNI_BIN: ${{ runner.temp }}/uni-bin/uni
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$BASE_SHA" || { echo "::error::the checkout is not the base $BASE_SHA"; exit 1; }
+          head=$(git rev-parse HEAD) || { echo "::error::git rev-parse failed"; exit 1; }
+          [ "$head" = "$BASE_SHA" ] || { echo "::error::the checkout is not the base $BASE_SHA"; exit 1; }
           node scripts/uni-ratchet.mjs --repo "$REPO" --pr "$PR" --base "$BASE_SHA" --head "$HEAD_SHA"

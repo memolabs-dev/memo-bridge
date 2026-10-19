@@ -100,6 +100,7 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
           cache-dependency-path: repo/pnpm-lock.yaml
+      # uni is called by this absolute path in every step, never looked up on PATH.
       - name: Install uni v0.9.4 (checksum pinned)
         run: |
           set -euo pipefail
@@ -109,62 +110,71 @@ jobs:
           (cd "$dir" && printf '%s  uni.tar.gz\n' "$UNI_SHA256" | sha256sum -c --strict -)
           tar -xzf "$dir/uni.tar.gz" -C "$dir" uni
           rm -f "$dir/uni.tar.gz"
-          test "$("$dir/uni" --version)" = "uni 0.9.4"
-          echo "$dir" >> "$GITHUB_PATH"
+          version=$("$dir/uni" --version) || { echo "::error::uni --version failed"; exit 1; }
+          [ "$version" = "uni 0.9.4" ] || { echo "::error::installed $version, not uni 0.9.4"; exit 1; }
       - run: pnpm install --frozen-lockfile
+      # Every command substitution in the steps below ends in `|| fail` (or `|| { ...; exit 1; }`):
+      # a command that fails never reads as an empty, clean answer.
       - name: The checkout is the commit under proof, and carries no uni state
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$HEAD_SHA" || { echo "::error::HEAD is not $HEAD_SHA"; exit 1; }
-          dirty=$(git status --porcelain)
-          if [ -n "$dirty" ]; then printf '%s\n' "$dirty"; echo "::error::the tree is not clean before the proof"; exit 1; fi
+          fail() { echo "::error::$1"; exit 1; }
+          head=$(git rev-parse HEAD) || fail "git rev-parse failed"
+          [ "$head" = "$HEAD_SHA" ] || fail "HEAD is $head, not $HEAD_SHA"
+          dirty=$(git status --porcelain) || fail "git status failed"
+          if [ -n "$dirty" ]; then printf '%s\n' "$dirty"; fail "the tree is not clean before the proof"; fi
           # Committed evidence, decisions or a registry snapshot would be read back by uni as
           # its own state.
-          state=$(git ls-files -- .uni/evidence .uni/decisions .uni/artifacts '.uni/events*.jsonl' '.uni/.registry.*' .uni/.lock .uni/brief.md)
-          if [ -n "$state" ]; then printf '%s\n' "$state"; echo "::error::uni runtime state is committed"; exit 1; fi
+          state=$(git ls-files -- .uni/evidence .uni/decisions .uni/artifacts '.uni/events*.jsonl' '.uni/.registry.*' .uni/.lock .uni/brief.md) || fail "git ls-files failed"
+          if [ -n "$state" ]; then printf '%s\n' "$state"; fail "uni runtime state is committed"; fi
       # Its own step: the request credentials stay out of the step that runs the PR's code.
       - name: Mint the OIDC token for uni (audience uni-cli)
         id: token
         run: |
           set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
-            echo "::error::no OIDC token request for this run (id-token: write is required)"; exit 1
+            fail "no OIDC token request for this run (id-token: write is required)"
           fi
           jwt=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=uni-cli" | jq -r .value)
-          if [ -z "$jwt" ] || [ "$jwt" = null ]; then echo "::error::GitHub returned no OIDC token"; exit 1; fi
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=uni-cli" | jq -r .value) || fail "the OIDC token request failed"
+          if [ -z "$jwt" ] || [ "$jwt" = null ]; then fail "GitHub returned no OIDC token"; fi
           echo "::add-mask::$jwt"
           echo "jwt=$jwt" >> "$GITHUB_OUTPUT"
       - name: uni verify, A3, bound to the head commit
         env:
           UNI_IDENTITY_TOKEN: ${{ steps.token.outputs.jwt }}
         run: |
-          set -uo pipefail
-          out="$RUNNER_TEMP/uni-verify.json"
+          set -euo pipefail
+          uni="$RUNNER_TEMP/uni-bin/uni"
           # uni without the token or the means to mint another one.
           quiet() { env -u UNI_IDENTITY_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN "$@"; }
           fail() {
             echo "::error::uni: $1"
-            quiet uni explain --annotations || true
-            quiet uni explain || true
+            quiet "$uni" explain --annotations || true
+            quiet "$uni" explain || true
             exit 1
           }
 
           status=0
-          env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
-            uni verify --json uni/intents/delivery.uni >"$out" || status=$?
+          out=$(env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            "$uni" verify --json uni/intents/delivery.uni) || status=$?
           [ "$status" = 0 ] || fail "uni verify exited $status"
 
           # The proof neither moved HEAD nor wrote outside uni's git-ignored state.
-          [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ] || fail "HEAD moved during the proof"
-          dirty=$(git status --porcelain)
+          head=$(git rev-parse HEAD) || fail "git rev-parse failed"
+          [ "$head" = "$HEAD_SHA" ] || fail "HEAD moved during the proof"
+          dirty=$(git status --porcelain) || fail "git status failed"
           if [ -n "$dirty" ]; then printf '%s\n' "$dirty"; fail "the proof changed the tree"; fi
 
-          # The verdict is this run's stdout. uni 0.9.4 prints decision, claims and evidence there;
-          # A3 and independence are read from the evidence by uni's own rule (uni-decision
-          # assurance_for: every actor verified, every actor distinct from its executor), and the
-          # commit from each proof.
-          jq -e --arg sha "$HEAD_SHA" '
+          # The verdict is this run's stdout, and it is exactly one JSON value.
+          count=$(printf '%s' "$out" | jq -s 'length') || fail "uni verify printed no JSON"
+          [ "$count" = 1 ] || fail "uni verify printed $count JSON values, not one"
+          # uni 0.9.4 prints decision, claims and evidence there, and no commit, assurance or
+          # independent_actor: A3 and independence are read from the evidence by uni's own rule
+          # (uni-decision assurance_for: every actor verified, every actor distinct from its
+          # executor), and the commit from each proof.
+          printf '%s' "$out" | jq -e --arg sha "$HEAD_SHA" '
             .decision == "Accepted"
             and .trust_boundary_changed == false
             and (.claims | type == "array" and length > 0)
@@ -180,19 +190,22 @@ jobs:
               and (.actor.id | startswith("oidc:https://token.actions.githubusercontent.com#"))
               and (.executor.id | length > 0) and .executor.id != "anonymous"
               and .actor.id != .executor.id)
-          ' "$out" >/dev/null || fail "not Accepted at A3 with an independent actor on $HEAD_SHA"
+          ' >/dev/null || fail "not Accepted at A3 with an independent actor on $HEAD_SHA"
 
           # uni's own summary of the same run must agree: Accepted, A3, independent, verified.
-          report=$(quiet uni report --json) || fail "uni report failed"
+          report=$(quiet "$uni" report --json) || fail "uni report failed"
+          count=$(printf '%s' "$report" | jq -s 'length') || fail "uni report printed no JSON"
+          [ "$count" = 1 ] || fail "uni report printed $count JSON values, not one"
           printf '%s' "$report" | jq -e '
             .decision == "Accepted" and .assurance == "A3"
             and .independent_actor == true and .identity_assurance == "VERIFIED"
           ' >/dev/null || fail "uni report disagrees: not Accepted at A3"
 
+          summary=$(printf '%s' "$report" | jq '{decision, assurance, independent_actor, identity_assurance, summary}') || fail "jq failed"
           {
             echo "### uni: Accepted at A3 on \`$HEAD_SHA\`"
             echo ""
             echo '```'
-            printf '%s' "$report" | jq '{decision, assurance, independent_actor, identity_assurance, summary}'
+            printf '%s\n' "$summary"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

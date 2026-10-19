@@ -62,14 +62,17 @@ test('uni job: the token is minted apart, kept from the PR code, and the verdict
   const runs = runBlocks(uni);
   for (const body of runs) assert.doesNotMatch(body, /\$\{\{/, 'no expression inside a run script');
   const mint = runs.find(b => b.includes('audience=uni-cli'));
-  const verify = runs.find(b => b.includes('uni verify --json uni/intents/delivery.uni'));
+  const verify = runs.find(b => b.includes('"$uni" verify --json uni/intents/delivery.uni'));
   assert.ok(mint && verify && mint !== verify, 'minting and verifying are two steps');
   assert.match(mint, /::add-mask::\$jwt/);
-  assert.match(verify, /env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \\\n\s+uni verify --json uni\/intents\/delivery\.uni >"\$out"/);
+  // The verdict is captured from stdout into a variable, never a file another process could write.
+  assert.match(verify, /out=\$\(env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \\\n\s+"\$uni" verify --json uni\/intents\/delivery\.uni\) \|\| status=\$\?/);
+  assert.match(verify, /\[ "\$count" = 1 \] \|\| fail "uni verify printed/);
+  assert.match(verify, /jq -s 'length'/);
   assert.match(uni, /UNI_IDENTITY_TOKEN: \$\{\{ steps\.token\.outputs\.jwt \}\}/);
   for (const needle of ['.decision == "Accepted"', '.commit_sha == $sha', '.workspace_dirty == false', '.actor.assurance == "verified"',
     '.actor.id != .executor.id', '.assurance == "A3"', '.independent_actor == true', 'git status --porcelain', 'git rev-parse HEAD',
-    'uni explain --annotations']) {
+    '"$uni" explain --annotations']) {
     assert.ok(verify.includes(needle), `verify step checks ${needle}`);
   }
   assert.doesNotMatch(verify, /decisions\/last\.json/);
@@ -89,4 +92,24 @@ test('uni-ratchet: pull_request_target from the base, least privilege, data thro
   assert.ok(body.includes(`UNI_SHA256: ${UNI_SHA256}`));
   for (const run of runBlocks(body)) assert.doesNotMatch(run, /\$\{\{/, 'no expression inside a run script');
   assert.match(body, /node scripts\/uni-ratchet\.mjs --repo "\$REPO" --pr "\$PR" --base "\$BASE_SHA" --head "\$HEAD_SHA"/);
+});
+
+// Each run script with its `\`-continued lines joined, so one command is one line.
+const commands = text => runBlocks(text).flatMap(b => b.replace(/\\\n\s*/g, ' ').split('\n'));
+
+test('uni job and uni-ratchet fail closed: every command substitution is guarded, uni is called by path', () => {
+  for (const [label, text] of [['uni job', job(ci, 'uni')], ['uni-ratchet.yml', ratchetWorkflow]]) {
+    const lines = commands(text);
+    assert.ok(lines.length > 10, `${label}: run scripts found`);
+    for (const line of lines.filter(l => l.includes('$('))) {
+      // name=$(...) || fail ... / || { ...; exit 1; } / || status=$?: a failing command is never an empty answer.
+      assert.match(line, /^\s*[a-z_]+=\$\(.*\)\s*\|\|\s*(fail\b|\{ .*exit 1; \}|status=\$\?)/, `${label}: unguarded command substitution: ${line.trim()}`);
+    }
+    for (const line of lines) {
+      assert.doesNotMatch(line, /(^|[\s;(|&])uni\s+(verify|report|explain|compile|--version)\b/, `${label}: uni looked up on PATH: ${line.trim()}`);
+    }
+    assert.doesNotMatch(text, /GITHUB_PATH/, `${label}: nothing is added to PATH`);
+    for (const body of runBlocks(text)) assert.match(body, /^\s*set -euo pipefail$/m, `${label}: every script runs with set -euo pipefail`);
+  }
+  assert.match(ratchetWorkflow, /UNI_BIN: \$\{\{ runner\.temp \}\}\/uni-bin\/uni/);
 });

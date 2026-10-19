@@ -19,26 +19,40 @@ Mergify requires both (`.mergify.yml`, `land_conditions`), so a PR that changes 
 1. It checks out `pull_request.head.sha` (on a push to `main`, `github.sha`), never the synthetic
    merge commit, fresh on every run. Nothing under `.uni/` is cached or restored.
 2. It installs uni v0.9.4 from the release asset, checked against the sha256 written in the
-   workflow. A wrong checksum or a failed download fails the job.
+   workflow. A wrong checksum or a failed download fails the job. Every step then calls uni by
+   that absolute path (`$RUNNER_TEMP/uni-bin/uni`), never through `PATH`.
 3. It refuses a tree that is not that commit, is not clean, or carries committed uni state
    (`.uni/evidence/`, `.uni/decisions/`, a registry snapshot).
 4. It asks GitHub for an OIDC token with audience `uni-cli`, in a step of its own, and masks it.
 5. It runs `uni verify --json uni/intents/delivery.uni` with the token in `UNI_IDENTITY_TOKEN`
    and without the variables that could mint another one (`ACTIONS_ID_TOKEN_REQUEST_URL`,
    `ACTIONS_ID_TOKEN_REQUEST_TOKEN`).
-6. It accepts only when all of these hold, read from that run's stdout:
+6. It accepts only when all of these hold, read from that run's stdout, captured in a variable
+   and required to be exactly one JSON value:
    - uni exited 0 and `decision` is `Accepted`, `trust_boundary_changed` is `false`;
    - every claim is `Valid` and has its proof in `evidence`;
    - every proof has `commit_sha` equal to the head commit and `workspace_dirty` false;
    - every proof was made by an actor with `assurance` `verified`, `source` `oidc`, an id from
-     `https://token.actions.githubusercontent.com`, distinct from the executor (this is how uni
-     itself derives A3 and an independent actor; `uni verify --json` in 0.9.4 does not print
-     `assurance` or `commit` at the top level);
+     `https://token.actions.githubusercontent.com`, distinct from the executor;
    - after the run, `HEAD` is still the head commit and `git status --porcelain` is empty;
    - `uni report --json` agrees: `Accepted`, `A3`, `independent_actor` true, identity
      `VERIFIED`.
 
-Any other outcome fails the job. No step is `continue-on-error`.
+Any other outcome fails the job. No step is `continue-on-error`, every script runs with
+`set -euo pipefail`, and every command substitution ends in `|| fail`: a command that fails (a
+`git status`, a `git rev-parse`, uni itself) never reads as an empty, clean answer.
+
+### Why the job derives A3 and the commit itself
+
+uni 0.9.4 prints no `commit`, `assurance` or `independent_actor` field in `uni verify --json`
+(its keys are `intent`, `decision`, `reason`, `claims`, `evidence`, `trust_boundary_changed`),
+and `uni report --json` has `assurance` and `independent_actor` but no `commit`; only
+`.uni/decisions/last.json` holds all three. So the job reads them from the evidence of the run it
+just made: the commit from each proof's `commit_sha` (with `workspace_dirty` false), A3 and
+independence from each proof's `actor` and `executor`, by uni's own rule (`assurance_for`,
+`independence` and `identity_assurance` in `crates/uni-decision/src/lib.rs` of uni v0.9.4: A3
+means every actor is verified and no actor is its own executor). `uni report --json` must then
+agree, as an extra check that can only refuse, never accept on its own.
 
 ## Reading a `uni` refusal
 
@@ -133,3 +147,12 @@ The PR that adds these checks touches `.github/` and `.mergify.yml`, which the r
 before it exclude from automatic landing, so the owner merges it by hand, once. `uni-ratchet`
 does not run on that PR: `pull_request_target` takes the workflow from `main`, where it does not
 exist yet. From the next PR on, both checks run and Mergify requires them.
+
+Pull requests already open when the bootstrap PR merges:
+
+- They have no `uni-ratchet` check until their next event (a push, a label, a reopen, an edit of
+  the base): the workflow runs on events, it does not judge old ones. Until then Mergify does not
+  queue them, since the check it requires is missing.
+- A branch cut before the merge has no `uni` job in its `ci.yml`. The ratchet compares it with
+  `main` and refuses it (`judge_changed: the uni job removed`), and it has no `uni` check either.
+  Updating the branch from `main` fixes both; until then Mergify does not queue it.
