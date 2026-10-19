@@ -30,7 +30,7 @@
 // Authorization and audit happen in server/tools/worktree-tools.mjs before these functions run.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +74,17 @@ const GIT_TIMEOUT_MS = 30_000;
 const NETWORK_TIMEOUT_MS = 120_000;
 
 const fail = (error, detail) => ({ ok: false, error, ...(detail !== undefined ? { detail } : {}) });
+
+// A UNIQUE violation on the live-worktree indexes (store v9), read from SQLite's own message
+// ("UNIQUE constraint failed: worktrees.project_id, worktrees.host, worktrees.branch" or
+// "...: worktrees.host, worktrees.path"). Returns the refusal it stands for, null for any other error.
+export function liveWorktreeConflict(error) {
+  const message = String(error?.message ?? '');
+  if (!/UNIQUE constraint failed: worktrees\./.test(message)) return null;
+  if (/worktrees\.branch\b/.test(message)) return 'branch_exists';
+  if (/worktrees\.path\b/.test(message)) return 'path_exists';
+  return null;
+}
 const iso = ms => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 
 // ---------------------------------------------------------------------------------------------
@@ -801,16 +812,20 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
         && baseCommit !== await revParse(repoPath, `refs/remotes/origin/${defaultName}`, env)) return fail('base_not_allowed');
 
       const path = join(root, project.name, branch.replaceAll('/', '-'));
-      try { await lstat(path); return fail('path_exists'); } catch { /* free */ }
+      // The path is claimed by creating the (empty) directory itself: mkdir without `recursive` is
+      // atomic and fails with EEXIST for every session but one. A look-then-create would let two
+      // sessions whose branches differ only in their separators (a/b-c, a-b/c) both pass, and both
+      // `git worktree add` into the same empty directory.
       await mkdir(dirname(path), { recursive: true });
+      try { await mkdir(path); } catch (error) { return error?.code === 'EEXIST' ? fail('path_exists') : fail('git_failed', 'mkdir'); }
 
       const added = await runGit(repoPath, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, '--', path, baseCommit],
         { timeoutMs: NETWORK_TIMEOUT_MS, maxBytes: 64 * 1024, env });
       if (added.code !== 0) {
-        if (await refExists(repoPath, `refs/heads/${branch}`, env) && !(await lstat(path).catch(() => null))) {
-          // Someone else created the branch between our check and the add.
-          return fail('branch_exists', 'local');
-        }
+        // Git refuses a branch another session just created; whatever it refused, the directory
+        // taken above is ours and is empty again (rmdir never removes a populated one).
+        await rmdir(path).catch(() => {});
+        if (await refExists(repoPath, `refs/heads/${branch}`, env)) return fail('branch_exists', 'local');
         return fail('git_failed', 'worktree add');
       }
 
@@ -818,7 +833,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
       const at = now();
       const row = { id, workspace_id: workspace.id, project_id: project.name, host: rt.host, path, branch,
         base_ref: baseRef, base_commit: baseCommit, issue_ref: issue?.ref ?? null, created_at: at, updated_at: at };
-      let recorded;
+      let recorded; let conflict = null;
       try {
         recorded = await write(repo => {
           // Re-read inside the transaction: a concurrent workspace_close wins.
@@ -826,7 +841,10 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
           repo.insertWorktree(row);
           return true;
         });
-      } catch {
+      } catch (error) {
+        // The v9 partial UNIQUE indexes (worktrees_live_branch, worktrees_live_path) are the last
+        // word on exclusivity: whichever fired is a refusal of the same kind as the checks above.
+        conflict = liveWorktreeConflict(error);
         recorded = null;
       }
       if (!recorded) {
@@ -834,6 +852,7 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
         // the base (a conditional ref delete, never a forced branch deletion).
         await runGit(repoPath, ['worktree', 'remove', '--', path], { env });
         await runGit(repoPath, ['update-ref', '-d', `refs/heads/${branch}`, baseCommit], { env });
+        if (conflict) return fail(conflict, 'store');
         return fail(recorded === false ? 'workspace_closed' : 'store_unavailable');
       }
       await withTrack(rt, id, () => ({ head: baseCommit, written: {} })).catch(() => {});

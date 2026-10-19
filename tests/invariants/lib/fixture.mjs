@@ -186,7 +186,7 @@ export async function gitRuntime(t, { ledger, now, gh }) {
     const response = await handler(def.inputSchema.parse(args));
     return JSON.parse(response.content[0].text);
   };
-  return { rt, call, coordinator: rt.coordinator(), origin };
+  return { rt, call, coordinator: rt.coordinator(), origin, base, projectsRoot, stateDir: join(base, 'state') };
 }
 
 // A recording `gh` stub for github_create_pr on memolabs-dev/demo: default branch main, no open

@@ -173,8 +173,13 @@ export function delegationTargetRefusal(delegation, host, targets, homes = DEFAU
 // initial: {locks, families} saved by onChange before a restart (hub durable state). Implicit
 // per-call locks, uploads and the last-call table are never saved: they belong to calls the
 // restart ended.
+// reload (optional): () => {ok:true, data} | {ok:false}, the durable read of that document (hub
+// state read('locks')). When given it replaces `initial`, and a failed read FAILS CLOSED: every
+// lock, unlock, check and implicit lock answers locks_state_unavailable (never an empty table)
+// until a later read succeeds. A document that is simply absent reads {ok:true, data:null}, which
+// is also how the owner resets the table (remove the file).
 export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = DEFAULT_HOMES,
-  newId = () => `lk_${randomBytes(12).toString('base64url')}`, initial = null, onChange = () => {} } = {}) {
+  newId = () => `lk_${randomBytes(12).toString('base64url')}`, initial = null, onChange = () => {}, reload = null } = {}) {
   if (typeof verifyWorkspace !== 'function') throw new Error('verifyWorkspace required');
   const locks = new Map();    // id -> lock
   const uploads = new Map();  // upload_id -> {host, path, workspaceId, at}
@@ -192,17 +197,43 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
   };
   const startedAt = now();
   const str = (v, max) => typeof v === 'string' && v.length <= max;
-  for (const l of Array.isArray(initial?.locks) ? initial.locks.slice(0, LOCK_LIMITS.total) : []) {
-    if (!l || !LOCK_ID_RE.test(l.id ?? '') || !['mac', 'vps'].includes(l.host) || !LOCK_KINDS.includes(l.kind) || !str(l.key, 4096) || !str(l.shown, 4096)) continue;
-    if (!WS_RE.test(l.workspaceId ?? '') || !str(l.principal, 130) || !Number.isFinite(l.taken) || !Number.isFinite(l.expires) || l.expires <= now()) continue;
-    locks.set(l.id, { id: l.id, host: l.host, kind: l.kind, key: l.key, shown: l.shown, workspaceId: l.workspaceId, principal: l.principal,
-      session: CLIENT_SESSION_RE.test(l.session ?? '') ? l.session : null, project: str(l.project, 80) ? l.project : null,
-      reason: str(l.reason, LOCK_LIMITS.reason) ? l.reason : null, taken: l.taken, expires: l.expires });
-  }
-  for (const pair of Array.isArray(initial?.families) ? initial.families.slice(-1024) : []) {
-    if (Array.isArray(pair) && WS_RE.test(pair[0] ?? '') && WS_RE.test(pair[1] ?? '')) families.set(pair[0], pair[1]);
-  }
+  let unavailable = false;
+  const adopt = saved => {
+    locks.clear();
+    families.clear();
+    for (const l of Array.isArray(saved?.locks) ? saved.locks.slice(0, LOCK_LIMITS.total) : []) {
+      if (!l || !LOCK_ID_RE.test(l.id ?? '') || !['mac', 'vps'].includes(l.host) || !LOCK_KINDS.includes(l.kind) || !str(l.key, 4096) || !str(l.shown, 4096)) continue;
+      if (!WS_RE.test(l.workspaceId ?? '') || !str(l.principal, 130) || !Number.isFinite(l.taken) || !Number.isFinite(l.expires) || l.expires <= now()) continue;
+      locks.set(l.id, { id: l.id, host: l.host, kind: l.kind, key: l.key, shown: l.shown, workspaceId: l.workspaceId, principal: l.principal,
+        session: CLIENT_SESSION_RE.test(l.session ?? '') ? l.session : null, project: str(l.project, 80) ? l.project : null,
+        reason: str(l.reason, LOCK_LIMITS.reason) ? l.reason : null, taken: l.taken, expires: l.expires });
+    }
+    for (const pair of Array.isArray(saved?.families) ? saved.families.slice(-1024) : []) {
+      if (Array.isArray(pair) && WS_RE.test(pair[0] ?? '') && WS_RE.test(pair[1] ?? '')) families.set(pair[0], pair[1]);
+    }
+  };
+  // True while the saved table cannot be read. Each call retries the read, so service comes back
+  // by itself once the document is valid again.
+  const refused = () => {
+    if (!reload) return false;
+    if (unavailable) {
+      let again;
+      try { again = reload(); } catch { again = { ok: false }; }
+      if (!again?.ok) return true;
+      adopt(again.data);
+      unavailable = false;
+    }
+    return false;
+  };
+  if (reload) {
+    let first;
+    try { first = reload(); } catch { first = { ok: false }; }
+    if (first?.ok) adopt(first.data); else unavailable = true;
+  } else adopt(initial);
+  const stateUnavailable = () => fail('locks_state_unavailable', { detail: 'the saved operator locks cannot be read: no lock is granted or checked until they can. Remedy: fix <state dir>/locks.json, or remove it to reset every lock (removal frees all held locks)',
+    next_step: 'tell the owner: locks.json in the hub state directory is unreadable or corrupt' });
   const changed = () => {
+    if (unavailable) return;
     try { onChange({ locks: [...locks.values()].filter(l => !l.implicit), families: [...families.entries()] }); } catch { /* journaled by the state module */ }
   };
 
@@ -238,6 +269,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
 
   // operator_lock and operator_unlock, answered by the hub.
   async function handle(op, args, { principal, clientSession }) {
+    if (refused()) return stateUnavailable();
     sweep();
     const caller = session(clientSession);
     if (!WS_RE.test(args?.workspace_id ?? '')) return fail('workspace_required', { detail: 'pass the workspace_id from workspace_open' });
@@ -305,6 +337,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
 
   // The gate of one T1 to T3 call. {ok:true} or a refusal.
   function check(op, args, { principal, clientSession }) {
+    if (refused()) return stateUnavailable();
     sweep();
     const caller = session(clientSession);
     const remote = isRemotePrincipal(principal);
@@ -346,6 +379,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
   // when ANOTHER workspace's lock overlaps. Never counted in the per-workspace limit, never
   // verified with the runtime (they last one call). Returns {ok, ids, release()} or a refusal.
   function acquireImplicit(host, targets, { principal, clientSession, workspaceId, ttlMs = 3_600_000 }) {
+    if (refused()) return stateUnavailable();
     sweep();
     const caller = session(clientSession);
     const hostLocks = [...locks.values()].filter(l => l.host === host);
@@ -377,13 +411,14 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
 
   // For sessions_overview: this principal's locks (with `you`), and the last call per tag.
   function overview(principal, clientSession) {
+    const unreadable = refused();
     sweep();
     const caller = session(clientSession);
     const mine = [...locks.values()].filter(l => l.principal === principal.id).sort((a, b) => a.taken - b.taken);
     const calls = {};
     for (const [s, at] of lastCall) calls[sessionTag(s)] = new Date(at).toISOString();
     return { locks: mine.slice(0, LOCK_LIMITS.listed).map(l => describe(l, caller)), locks_truncated: mine.length > LOCK_LIMITS.listed,
-      locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
+      ...(unreadable ? { locks_state: 'unavailable' } : {}), locks_since: new Date(startedAt).toISOString(), last_call_at: calls };
   }
 
   // What one call touches, with the uploads this table knows (implicit locks, D-R14).
@@ -409,6 +444,6 @@ export function mergeOverview(data, view) {
   const shown = new Set(data.sessions.flatMap(s => [s.workspace_id, ...(Array.isArray(s.children) ? s.children.map(c => c.workspace_id) : [])]));
   const list = view.locks.map(({ lock_id, host, kind, target, workspace_id, session_tag, you, reason, expires_at }) => ({ lock_id, workspace_id,
     session_tag, ...(you !== undefined ? { you } : {}), ...(shown.has(workspace_id) ? {} : { host, kind, target, reason, expires_at }) }));
-  return { ...data, sessions, operator_locks: list, ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),
+  return { ...data, sessions, operator_locks: list, ...(view.locks_state ? { locks_state: view.locks_state } : {}), ...(view.locks_truncated ? { operator_locks_truncated: true } : {}),
     locks_since: view.locks_since };
 }
