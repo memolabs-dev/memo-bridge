@@ -518,6 +518,13 @@ was made, and the next call goes on from there.
   --install`); ChatGPT can run it through `operator_run` on the Mac with the owner's approval.
   Proposal T-A3c: the Mac runtime enrolls the repositories `project_create` made itself (append to
   both files, same checks), and re-reads them on change instead of once at start.
+  **Done by T-A3c (memo-bridge#216):** `project_create` on the Mac enrolls a private repository it
+  created or verified (`server/projects/mac-enroll.mjs`: only the two owner-policy files this
+  runtime reads, only trusted files, under a lock, atomic, at most 50; step `enrolled_on_mac` or
+  `enrollment_found`, journal `project_enrolled`), and the runtime re-reads `remote.json` when it
+  changes, so the project is ready at once. `owner_steps: enroll_on_mac` now appears only when that
+  enrollment was refused, with `enrollment_error`. Repositories created outside `project_create`
+  still need the installer.
 - G-2, public on the VPS: the VPS runner's registry, clones and `remote.json` `projects` come from
   lab-infra (`memo_runner_pilot_repos`, `memo_bridge_remote_projects`, identical, max 50), and the
   deployed coordinator's pre-filter reads the `PUBLIC_ALLOWLIST` literal of
@@ -559,9 +566,10 @@ template files and their agreement with memo-bridge's workflow and the fleet pol
    `ff63ce8d43971bdf368892569f35d9f2147f5a4f`, or the `memolabs-dev/.github` main head at the time
    when it is later than that.
 4. ChatGPT, Memo Bridge connector, Refresh. "Crée un projet privé <name>" -> `project_create`
-   (expected: `repo_created`, `cloned`, `registry_row_added`, `owner_steps: enroll_on_mac`).
-5. Enrollment (G-1): the `enroll_on_mac` command it returns, in a terminal or through
-   `operator_run` on the Mac with his approval. The agent restarts with the project enrolled.
+   (expected: `repo_created`, `cloned`, `registry_row_added`, `enrolled_on_mac`,
+   `ready_for_batch_create: true`; since T-A3c, #216).
+5. Enrollment (G-1): automatic since T-A3c. Only when step 4 answers `enrollment_error`, the
+   `enroll_on_mac` command it returns, in a terminal; the agent restarts with the project enrolled.
 6. Same conversation or a new one: "crée la tâche : <one small change>" -> `batch_create`, then a
    worker chat ("travaille sur l'issue 1 de <name>") -> claim, Mac worktree, `jobs_submit test`,
    PR -> Mergify merges it (`gh pr view 1 -R memolabs-dev/<name> --json mergedBy`).

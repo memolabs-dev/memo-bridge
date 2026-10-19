@@ -9,7 +9,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
-import { parseRemotePolicy } from '../bridge/write-gate.mjs';
+import { parseRemotePolicy, remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { isProjectOwner, registerProjectTools } from '../server/tools/project-tools.mjs';
 import { validateProjectArgs } from '../server/projects/create.mjs';
 import { addRegistryRow, insertRow, registryRows } from '../server/projects/registry-writer.mjs';
@@ -97,7 +97,7 @@ function stubCredentials({ error = null } = {}) {
 }
 
 async function setup(t, { principal = CHAT, host = 'mac', policy = { projects: ['alpha'] }, gh = fakeGh(), credentials = stubCredentials(),
-  enrolled = [] } = {}) {
+  enrolled = [], remoteFile = false } = {}) {
   const root = await temp(t, 'mb-project-root-');
   const home = await temp(t, 'mb-project-home-');
   await writeFile(join(root, 'PROJECTS.md'), REGISTRY);
@@ -109,14 +109,22 @@ async function setup(t, { principal = CHAT, host = 'mac', policy = { projects: [
   await mkdir(join(home, '.local', 'share', 'memo-bridge', 'owner-policy'), { recursive: true, mode: 0o700 });
   await writeFile(policyFile, JSON.stringify({ schema: 'memolabs.owner-private-repos.v1', owner_sub: OWNER_SUB, repos: enrolled }));
   await chmod(policyFile, 0o600);
+  // #216: with the Mac runtime's own remote.json, project_create enrolls and the runtime rereads it.
+  const remoteConfig = join(home, '.local', 'share', 'memo-bridge', 'owner-policy', 'remote.json');
+  if (remoteFile) {
+    await writeFile(remoteConfig, JSON.stringify({ version: 1, oidc: { owner_sub: OWNER_SUB }, remote_writes: 'enabled',
+      session_binding: 'enforce', mac_runtime_routing: 'enabled', ...policy }), { mode: 0o600 });
+  }
+  const env = { PATH: process.env.PATH, HOME: home, MEMO_BRIDGE_GOVERNANCE_ROOT: `/x/governance/${'f'.repeat(40)}`,
+    ...(remoteFile ? { MEMO_BRIDGE_REMOTE_CONFIG: remoteConfig } : {}) };
   const journal = [];
   const clones = [];
-  const runtime = { principal, host, stateDir: home, githubCredentials: credentials, remotePolicy: () => remotePolicy,
+  const runtime = { principal, host, stateDir: home, githubCredentials: credentials, remotePolicy: () => (remoteFile ? remotePolicyFromEnv(env) : remotePolicy),
     authorize: op => principal.capabilities.has(CAPABILITIES.GITHUB_WRITE) && op === 'project_create',
     audit: async (op, outcome, code, ids = {}) => { journal.push({ op, outcome, code, issue: ids.issue ?? null }); } };
   let handler;
   registerProjectTools({ registerTool: (name, config, fn) => { handler = fn; } }, () => runtime, {
-    root, gh: gh.gh, env: { PATH: process.env.PATH, HOME: home, MEMO_BRIDGE_GOVERNANCE_ROOT: `/x/governance/${'f'.repeat(40)}` },
+    root, gh: gh.gh, env,
     privatePolicyFile: policyFile, waitRepoMs: 200, pollMs: 1, wait: async () => {},
     addRow: (r, row) => addRegistryRow(r, row, { lock, backupDir: join(home, 'backups'), waitMs: 200 }),
     clone: async (spec, path) => {
@@ -128,7 +136,7 @@ async function setup(t, { principal = CHAT, host = 'mac', policy = { projects: [
     } });
   const call = async args => JSON.parse((await handler(args)).content[0].text);
   const registry = async () => registryRows(await readFile(join(root, 'PROJECTS.md'), 'utf8')).rows.map(r => `${r.name}:${r.path}`);
-  return { root, home, lock, call, journal, clones, gh, credentials, registry };
+  return { root, home, lock, call, journal, clones, gh, credentials, registry, policyFile, remoteConfig };
 }
 
 test('A2: creates the repository from the template, settings, Mac clone, one registry row in order, owner steps', async t => {
@@ -205,6 +213,38 @@ test('A2: ready for batch_create once enrolled on the Mac; a public VPS project 
   assert.equal(pub.ready_for_batch_create, false);
   assert.deepEqual(pub.owner_steps.map(s => s.step), ['register_on_vps', 'allow_in_ledger_prefilter', 'deploy']);
   assert.match(pub.owner_steps[0].change, /memo_runner_pilot_repos and to memo_bridge_remote_projects/);
+});
+
+test('#216: a private Mac project is enrolled by project_create itself and ready at once; never a public or untrusted one', async t => {
+  const f = await setup(t, { remoteFile: true });
+  const out = await f.call({ name: 'relay-v2' });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(out.steps, ['repo_created', 'settings_applied', 'cloned', 'registry_row_added', 'enrolled_on_mac']);
+  assert.equal(out.ready_for_batch_create, true, JSON.stringify(out));
+  assert.equal(out.owner_steps, undefined);
+  assert.deepEqual(JSON.parse(await readFile(f.policyFile, 'utf8')).repos, ['memolabs-dev/relay-v2']);
+  assert.deepEqual(JSON.parse(await readFile(f.remoteConfig, 'utf8')).projects, ['alpha', 'relay-v2']);
+  assert.ok(f.journal.some(e => e.op === 'project_enrolled' && e.outcome === 'ok' && e.issue === 'memolabs-dev/relay-v2'),
+    JSON.stringify(f.journal));
+  // Again: already enrolled, nothing rewritten.
+  const again = await f.call({ name: 'relay-v2' });
+  assert.equal(again.ready_for_batch_create, true);
+  assert.equal(again.steps.at(-1), 'enrollment_found');
+  // A public VPS project is never enrolled on the Mac.
+  const p = await setup(t, { remoteFile: true });
+  const pub = await p.call({ name: 'open-relay', visibility: 'public' });
+  assert.equal(pub.ok, true, JSON.stringify(pub));
+  assert.equal(pub.steps.includes('enrolled_on_mac'), false);
+  assert.deepEqual(JSON.parse(await readFile(p.remoteConfig, 'utf8')).projects, ['alpha']);
+  // An untrusted policy file is left alone, and the owner step stays.
+  const u = await setup(t, { remoteFile: true });
+  await chmod(u.remoteConfig, 0o644);
+  const refused = await u.call({ name: 'relay-v2' });
+  assert.equal(refused.ok, true, JSON.stringify(refused));
+  assert.equal(refused.ready_for_batch_create, false);
+  assert.equal(refused.enrollment_error, 'enroll_policy_untrusted');
+  assert.deepEqual(refused.owner_steps.map(s => s.step), ['enroll_on_mac']);
+  assert.deepEqual(JSON.parse(await readFile(u.remoteConfig, 'utf8')).projects, ['alpha']);
 });
 
 test('A2: owner only, on the Mac only; every refusal is journaled and touches nothing', async t => {

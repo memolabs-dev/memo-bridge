@@ -214,6 +214,16 @@ test('AC-P5-09 allowlist: a remote principal creates worktrees only for allowlis
   }
 });
 
+test('#216 a project added to remote.json while the runtime runs gets worktrees without a restart', async t => {
+  const f = await fixture(t, { principal: CHAT, policy: { projects: ['other'] } });
+  const ws = await f.addWorkspace();
+  assert.equal((await f.call('worktree_create', { workspace_id: ws, issue: ISSUE })).error, 'project_not_allowed');
+  // What project_create's enrollment does (server/projects/mac-enroll.mjs): the same file, one more project.
+  await writeFile(process.env.MEMO_BRIDGE_REMOTE_CONFIG, JSON.stringify({ projects: ['other', 'demo'] }));
+  const created = await f.call('worktree_create', { workspace_id: ws, issue: ISSUE });
+  assert.equal(created.ok, true, JSON.stringify(created));
+});
+
 test('worktree_push with client_request_id: a retry returns the first push and pushes nothing new', async t => {
   const f = await fixture(t);
   const { id, path, branch } = await f.ready();
