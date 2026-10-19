@@ -454,6 +454,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   async function releaseHeld(args, outcome, summary, meta = null) {
     const held = await heldClaim(args, { requireActive: false });
     if (held.error) return held.error;
+    // A row closed because another holder took the Issue over: the lease is gone, nothing to release.
+    if (held.claim.state === 'released' && held.claim.outcome === 'lost') return fail('stale_lease');
     if (held.claim.state === 'released') {
       const cancelled = await cancelJobs(held.workspace.id, held.issue.ref);
       return { ok: true, issue: held.issue.ref, released: true, ...publicOutcome(held.claim.outcome),
@@ -828,6 +830,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const workspace = ws.workspace;
       const local = await read(repo => ({
         held: repo.claimsOf(workspace.id, 'claimed'),
+        // Rows closed because another holder took the Issue over: the session must still be told.
+        superseded: repo.claimsOf(workspace.id, 'released').filter(c => c.outcome === 'lost'),
         all: repo.claimsOf(workspace.id),
         worktrees: repo.listWorktrees({ workspace_id: workspace.id, status: 'active', limit: RECOVER.worktrees }),
         jobs: repo.listJobs({ workspace_id: workspace.id, limit: RECOVER.jobs })
@@ -835,6 +839,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       // claimsOf orders by updated_at ascending: reconcile the most recent ones.
       const held = local.held.slice(-RECOVER.claims).reverse();
       const claims = await Promise.all(held.map(c => reconcile(workspace, c)));
+      for (const c of local.superseded.slice(-Math.max(0, RECOVER.claims - claims.length)).reverse()) {
+        claims.push({ issue: c.issue_ref, claim_id: c.claim_id, local_fence: c.fence_sha, local_expires_at: c.expires_at,
+          state: 'lost', ledger_state: 'superseded' });
+      }
       // Checkpoints of every Issue this workspace ever claimed, from any workspace: another
       // machine's pushed commit is exactly what a resuming session needs.
       const issues = [...new Set(local.all.slice(-20).map(c => c.issue_ref))];
@@ -956,13 +964,14 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
           if (repo.getWorkspace(ws.workspace.id)?.status !== 'active') return false;
           // The ledger just granted this lease, so any other mirror row still 'claimed' on the
           // Issue is superseded, and the store allows one claimed row per Issue (v9): close those
-          // rows before inserting. An earlier holder's row is closed as 'expired'. This
+          // rows before inserting. An earlier holder's row is closed as 'lost' (that holder must hear stale_lease, never an
+          // idempotent success; see releaseHeld and workspace_recover). This
           // workspace's own earlier row is closed as 'cancelled' and reconciled with the ledger
           // below, like any other lease this workspace gives up.
           for (const stale of repo.claimsOfIssue(issue.ref, 200)) {
             if (stale.state !== 'claimed' || stale.claim_id === receipt.claim_id) continue;
             const own = stale.workspace_id === ws.workspace.id;
-            repo.updateClaim(stale.claim_id, { state: 'released', outcome: own ? 'cancelled' : 'expired', updated_at: at }, stale.fence_sha);
+            repo.updateClaim(stale.claim_id, { state: 'released', outcome: own ? 'cancelled' : 'lost', updated_at: at }, stale.fence_sha);
             if (own) ownStale.push(stale);
           }
           repo.insertClaim({ claim_id: receipt.claim_id, workspace_id: ws.workspace.id, issue_ref: issue.ref,

@@ -82,10 +82,9 @@ test('one holder: a second workspace is refused, then takes over after expiry wi
   const old = { workspace_id: a, issue: DROP, claim_id: first.claim_id, fence: first.fence };
   assert.equal((await coordinator.taskRenew(old)).error, 'stale_lease');
   assert.equal((await coordinator.taskCheckpoint({ ...old, branch: 'main', commit: 'b'.repeat(40) })).error, 'stale_lease');
-  // v9: the takeover closed a's mirror row as expired, so a late release is an idempotent no-op that says so.
-  const late = await coordinator.taskRelease({ ...old, outcome: 'failed' });
-  assert.deepEqual([late.ok, late.released, late.outcome], [true, true, 'expired']);
-  assert.equal((await coordinator.taskStatus({ issue: DROP })).lease.epoch, 2, 'the late release never touched the new lease');
+  assert.equal((await coordinator.taskRelease({ ...old, outcome: 'failed' })).error, 'stale_lease');
+  // The superseded holder's completion is refused too, and its summary is not stored.
+  assert.equal((await coordinator.taskComplete({ ...old, summary: 'zombie summary' })).error, 'stale_lease');
   // Knowing the new holder's claim and fence is not enough from another workspace.
   assert.equal((await coordinator.taskRenew({ workspace_id: a, issue: DROP, claim_id: second.claim_id, fence: second.fence })).error,
     'unknown_claim');
@@ -739,8 +738,9 @@ test('workspace_recover against the canonical ledger: held, then expired, then l
   assert.equal((await coordinator.workspaceRecover({ workspace_id: a })).claims[0].state, 'expired');
   const b = await ws();
   assert.equal((await coordinator.taskClaim({ workspace_id: b, issue: DROP })).ok, true);
-  // v9: b's claim closed a's mirror row as expired, so a has nothing left to reconcile.
-  assert.deepEqual((await coordinator.workspaceRecover({ workspace_id: a })).claims, []);
+  const lost = await coordinator.workspaceRecover({ workspace_id: a });
+  assert.equal(lost.claims[0].state, 'lost');
+  assert.match(lost.next_actions.join('\n'), /no longer held by this workspace: do not write/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -860,6 +860,25 @@ test('v9: a lease that expired on this host is reclaimed by another workspace of
   assert.equal(rows.filter(r => r.state === 'claimed').length, 1);
   assert.equal(rows.find(r => r.state === 'claimed').claim_id, second.claim_id);
   const old = rows.find(r => r.claim_id === first.claim_id);
-  assert.deepEqual([old.state, old.outcome], ['released', 'expired']);
+  assert.deepEqual([old.state, old.outcome], ['released', 'lost']);
   assert.deepEqual((await coordinator.workspaceStatus({ workspace_id: a })).claims, []);
+});
+
+test('v9: a zombie task_complete after a takeover is refused and its summary is never stored', async t => {
+  let at = Date.parse('2026-10-14T16:00:00Z');
+  const clock = () => at;
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { now: clock, ledger: memoryLedger(clock) });
+  t.after(() => store.close());
+  const open = async () => (await coordinator.workspaceOpen({ project: 'drop', client_type: 'claude-code' })).workspace.workspace_id;
+  const a = await open(); const b = await open();
+  const first = await coordinator.taskClaim({ workspace_id: a, issue: DROP, ttl_seconds: 60 });
+  at += 61_000;
+  const second = await coordinator.taskClaim({ workspace_id: b, issue: DROP, ttl_seconds: 60 });
+  assert.equal(second.ok, true, JSON.stringify(second));
+  const done = await coordinator.taskComplete({ workspace_id: a, issue: DROP, claim_id: first.claim_id, fence: first.fence, summary: 'zombie summary' });
+  assert.equal(done.ok, false, JSON.stringify(done));
+  assert.equal(done.error, 'stale_lease');
+  const rows = await store.transaction(repo => repo.claimsOfIssue(DROP), { write: false });
+  assert.ok(rows.every(r => !String(r.outcome ?? '').includes('zombie summary')));
+  assert.deepEqual(rows.map(r => [r.claim_id, r.state]).sort(), [[first.claim_id, 'released'], [second.claim_id, 'claimed']].sort());
 });
