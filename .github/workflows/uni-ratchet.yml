@@ -1,0 +1,75 @@
+# Check 2 of the delivery gate (docs/UNI_DELIVERY.md; spec "Check 2 : uni-ratchet", Vault
+# 1-Projects/home-assurance/2026-10-19-livraison-design.md): a pull request may change the judge
+# of pull requests only by making it stronger. scripts/uni-ratchet.mjs names every loosening in
+# one PR comment and fails; only the owner can loosen a rule, by hand.
+#
+# pull_request_target runs this file and the script from the base branch with a write token, so
+# it never checks out or runs PR code: it reads the base and head trees, the PR's file list and
+# its label history through the API, as data, and reads the contracts through `uni compile`
+# (analysis only). PR data reaches the shell through env, never through ${{ }} in the script.
+# Frozen whole by the ratchet itself. No YAML anchors, aliases or merge keys in this file.
+name: uni-ratchet
+
+on:
+  pull_request_target:
+    # edited: a new base branch is a new judge to compare against. labeled / unlabeled: the
+    # ratchet reads who lifted a hold-merge.
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, edited]
+
+permissions: {}
+
+concurrency:
+  group: uni-ratchet-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  uni-ratchet:
+    name: uni-ratchet
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # git trees and blobs of base and head
+      contents: read
+      # the one marked comment (issues/comments endpoints on a pull request)
+      pull-requests: write
+      # the label history of the PR (issues/{n}/events)
+      issues: read
+    env:
+      # uni v0.9.4, release asset digest read from the GitHub release API on 2026-10-19.
+      UNI_URL: https://github.com/memolabs-dev/uni-protocol/releases/download/v0.9.4/uni-x86_64-unknown-linux-gnu.tar.gz
+      UNI_SHA256: cdfdaa1a8c91973343089a22c7868c27679a705aa247e58b9e7e76f277e52c9f
+    steps:
+      # The base only, never the PR head: the rules that judge the PR are main's.
+      - name: Check out the base commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install uni v0.9.4 (checksum pinned, for uni compile)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/uni-bin"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/uni.tar.gz" "$UNI_URL"
+          (cd "$dir" && printf '%s  uni.tar.gz\n' "$UNI_SHA256" | sha256sum -c --strict -)
+          tar -xzf "$dir/uni.tar.gz" -C "$dir" uni
+          rm -f "$dir/uni.tar.gz"
+          test "$("$dir/uni" --version)" = "uni 0.9.4"
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: Compare the PR's judge with the base's
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA" || { echo "::error::the checkout is not the base $BASE_SHA"; exit 1; }
+          node scripts/uni-ratchet.mjs --repo "$REPO" --pr "$PR" --base "$BASE_SHA" --head "$HEAD_SHA"
