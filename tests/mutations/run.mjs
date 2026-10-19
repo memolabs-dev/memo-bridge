@@ -34,7 +34,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defaultGovernanceRoot } from '../../server/coordinator/issue-lease.mjs';
-import { patchPaths } from './patches.mjs';
+import { assignMutants, patchPaths } from './patches.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPORTER = pathToFileURL(join(HERE, 'count-reporter.mjs')).href;
@@ -45,17 +45,12 @@ const DEFAULT_TEST_TIMEOUT_MS = 180_000;
 
 // Ruling 4: a mutant <name>.patch targets tests/invariants/<prefix>.test.mjs for the LONGEST test
 // basename <prefix> such that <name> starts with "<prefix>-". Every invariant is a key (possibly
-// with no mutant); a patch with no target throws. Reused by the ratchet.
+// with no mutant); a patch with no target throws. The rule itself is assignMutants
+// (tests/mutations/patches.mjs), which the ratchet reuses.
 export function mutantsByInvariant(dir, { invariantsDir = join(dir, '..', 'invariants') } = {}) {
-  const invariants = readdirSync(invariantsDir).filter(n => n.endsWith(TEST_SUFFIX)).map(n => n.slice(0, -TEST_SUFFIX.length)).sort();
-  const map = new Map(invariants.map(n => [n, []]));
-  for (const file of readdirSync(dir).filter(n => n.endsWith('.patch')).sort()) {
-    const name = file.slice(0, -'.patch'.length);
-    const target = invariants.filter(inv => name.startsWith(`${inv}-`) && name.length > inv.length + 1)
-      .sort((a, b) => b.length - a.length)[0];
-    if (!target) throw new Error(`${file}: no tests/invariants/<prefix>${TEST_SUFFIX} for it (name a mutant <invariant>-<suffix>.patch)`);
-    map.get(target).push(file);
-  }
+  const invariants = readdirSync(invariantsDir).filter(n => n.endsWith(TEST_SUFFIX)).map(n => n.slice(0, -TEST_SUFFIX.length));
+  const { map, orphans } = assignMutants(invariants, readdirSync(dir));
+  if (orphans.length) throw new Error(`${orphans[0]}: no tests/invariants/<prefix>${TEST_SUFFIX} for it (name a mutant <invariant>-<suffix>.patch)`);
   return map;
 }
 

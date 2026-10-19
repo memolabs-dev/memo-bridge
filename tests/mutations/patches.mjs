@@ -122,3 +122,39 @@ export function patchPaths(text) {
   if (!files.length) throw new Error('the patch names no file');
   return [...new Set(files.flatMap(f => f.paths))];
 }
+
+// What a mutant does, without where it lands: the `# test:` header lines, each file's header
+// (paths, modes, renames; never the `index` blob ids or similarity scores, which move with the
+// code) and the -/+ lines of its hunks in order. Context lines, @@ line numbers and the other
+// comment lines are left out, so a patch re-anchored on moved code keeps its signature; a changed
+// `# test:` pattern, target file or -/+ line does not. Throws when the patch cannot be read.
+export function patchSignature(text) {
+  const { preamble, files } = parsePatch(text);
+  if (!files.length) throw new Error('the patch names no file');
+  const signature = preamble.filter(line => line.startsWith('# test:')).map(line => line.trimEnd());
+  for (const file of files) {
+    signature.push(...file.header.filter(line => !/^(index|similarity index|dissimilarity index) /.test(line)));
+    if (file.body[0] === 'GIT binary patch') signature.push(...file.body);
+    else signature.push(...file.body.filter(line => line.startsWith('-') || line.startsWith('+')));
+  }
+  return signature;
+}
+
+const TEST_SUFFIX = '.test.mjs';
+
+// Ruling 4: a mutant <name>.patch targets tests/invariants/<prefix>.test.mjs for the LONGEST
+// invariant <prefix> such that <name> starts with "<prefix>-". Takes invariant names (without
+// .test.mjs) and patch file names; returns { map: Map<invariant, patch[]>, orphans: patch[] }.
+export function assignMutants(invariants, patchFiles) {
+  const names = [...invariants].sort();
+  const map = new Map(names.map(n => [n, []]));
+  const orphans = [];
+  for (const file of [...patchFiles].filter(n => n.endsWith('.patch')).sort()) {
+    const name = file.slice(0, -'.patch'.length);
+    const target = names.filter(inv => name.startsWith(`${inv}-`) && name.length > inv.length + 1)
+      .sort((a, b) => b.length - a.length)[0];
+    if (target) map.get(target).push(file); else orphans.push(file);
+  }
+  return { map, orphans };
+}
+export const invariantName = file => (file.endsWith(TEST_SUFFIX) ? file.slice(0, -TEST_SUFFIX.length) : null);
