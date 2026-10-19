@@ -99,7 +99,11 @@ async function fixture(t, { principal = OWNER } = {}) {
     const claim = { claim_id: randomBytes(16).toString('hex'), workspace_id: workspaceId, issue_ref: issue,
       fence_sha: randomBytes(20).toString('hex'), epoch: 1, expires_at: new Date(Date.now() + expiresInMs).toISOString(),
       updated_at: Date.now() };
-    await rt.store().transaction(r => r.insertClaim(claim));
+    // v9: one claimed row per Issue in the store; a newer holder supersedes the earlier mirror row.
+    await rt.store().transaction(r => {
+      for (const c of r.claimsOfIssue(issue)) if (c.state === 'claimed') r.updateClaim(c.claim_id, { state: 'released', outcome: 'expired', updated_at: Date.now() }, c.fence_sha);
+      r.insertClaim(claim);
+    });
     return claim;
   };
   const events = () => rt.store().transaction(r => r.listEvents({ limit: 500 }), { write: false })

@@ -949,11 +949,22 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       } else {
         return result;
       }
-      let recorded;
+      let recorded; const ownStale = [];
       try {
         recorded = await write((repo, at) => {
           // Re-read inside the transaction: a concurrent workspace_close must win.
           if (repo.getWorkspace(ws.workspace.id)?.status !== 'active') return false;
+          // The ledger just granted this lease, so any other mirror row still 'claimed' on the
+          // Issue is superseded, and the store allows one claimed row per Issue (v9): close those
+          // rows before inserting. An earlier holder's row is closed as 'expired'. This
+          // workspace's own earlier row is closed as 'cancelled' and reconciled with the ledger
+          // below, like any other lease this workspace gives up.
+          for (const stale of repo.claimsOfIssue(issue.ref, 200)) {
+            if (stale.state !== 'claimed' || stale.claim_id === receipt.claim_id) continue;
+            const own = stale.workspace_id === ws.workspace.id;
+            repo.updateClaim(stale.claim_id, { state: 'released', outcome: own ? 'cancelled' : 'expired', updated_at: at }, stale.fence_sha);
+            if (own) ownStale.push(stale);
+          }
           repo.insertClaim({ claim_id: receipt.claim_id, workspace_id: ws.workspace.id, issue_ref: issue.ref,
             fence_sha: receipt.fence_sha, epoch: receipt.epoch, expires_at: receipt.expires_at, updated_at: at });
           return true;
@@ -970,8 +981,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       // One workspace works on one task. Changing target gives the abandoned lease back in the
       // same movement, so a pivot never leaves the previous task locked (A028). Same shape as
       // workspace_close: release at the ledger, then reconcile the local mirror.
-      const others = (await read(repo => repo.claimsOf(ws.workspace.id, 'claimed')))
-        .filter(claim => claim.claim_id !== receipt.claim_id);
+      const others = [...ownStale, ...(await read(repo => repo.claimsOf(ws.workspace.id, 'claimed')))
+        .filter(claim => claim.claim_id !== receipt.claim_id)];
       const released = []; const lost = []; const unreleased = []; const abandonedJobs = [];
       for (const claim of others) {
         const outcome = await releaseRecorded(ws.workspace, claim, 'cancelled');

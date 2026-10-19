@@ -302,6 +302,8 @@ async function auditFixture(t) {
       status: 'active', created_at: T0, updated_at: T0 });
     repo.insertClaim({ claim_id: 'c'.repeat(32), workspace_id: WS_ALICE, issue_ref: ISSUE, fence_sha: 'f'.repeat(40), epoch: 1,
       expires_at: '2026-10-13T12:10:00Z', updated_at: T0 });
+    // v9: one claimed row per Issue; Bob's later claim supersedes Alice's mirror row.
+    repo.updateClaim('c'.repeat(32), { state: 'released', outcome: 'expired', updated_at: T0 }, 'f'.repeat(40));
     repo.insertClaim({ claim_id: 'd'.repeat(32), workspace_id: WS_BOB, issue_ref: ISSUE, fence_sha: 'e'.repeat(40), epoch: 2,
       expires_at: '2026-10-13T13:10:00Z', updated_at: T0 });
     repo.insertCheckpoint({ issue_ref: ISSUE, claim_id: 'c'.repeat(32), workspace_id: WS_ALICE, fence_sha: 'f'.repeat(40),
