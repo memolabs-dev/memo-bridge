@@ -1,0 +1,14 @@
+# test: with clocks 30 s apart, holder and reclaimer never both write
+diff --git a/server/coordinator/issue-lease.mjs b/server/coordinator/issue-lease.mjs
+index 669f690..4cc435d 100644
+--- a/server/coordinator/issue-lease.mjs
++++ b/server/coordinator/issue-lease.mjs
+@@ -18,7 +18,7 @@ export const LEASE_TTL = Object.freeze({ min: 60, max: 1800, default: 300 });
+ // Clock margin. The Mac and the VPS each judge a lease against their own wall clock, which can
+ // differ by up to 30 s. A holder stops writing 60 s before expires_at and nobody reclaims before
+ // expires_at + 60 s, so a holder and a reclaimer never both write, whichever clock runs ahead.
+-export const CLOCK_MARGIN_MS = 60_000;
++export const CLOCK_MARGIN_MS = 0;
+ export const writableUntil = expiresAt => Date.parse(expiresAt) - CLOCK_MARGIN_MS;
+ export const reclaimableAfter = expiresAt => Date.parse(expiresAt) + CLOCK_MARGIN_MS;
+ // The last CLOCK_MARGIN_MS of a lease still held at `at`: renewing and releasing stay allowed,

@@ -1,0 +1,13 @@
+# test: store inserts of one branch
+diff --git a/server/coordinator/store.mjs b/server/coordinator/store.mjs
+index d05d1f6..b87fe1f 100644
+--- a/server/coordinator/store.mjs
++++ b/server/coordinator/store.mjs
+@@ -274,7 +274,6 @@ function migrateV9(db, now = Date.now()) {
+   ]) refused.push(...dupes(sql, ...columns).map(d => ({ table: 'worktrees', ...d })));
+   if (refused.length) throw Object.assign(new Error('state_duplicate_live_rows'), { rows: refused });
+   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS claims_live_issue ON claims(issue_ref) WHERE state = 'claimed';
+-CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_branch ON worktrees(project_id, host, branch) WHERE status = 'active';
+ CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_path ON worktrees(host, path) WHERE status = 'active';`);
+ }
+ 

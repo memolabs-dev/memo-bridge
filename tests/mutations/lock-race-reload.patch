@@ -1,0 +1,14 @@
+# test: a held lock survives a hub restart
+diff --git a/bridge/operator-locks.mjs b/bridge/operator-locks.mjs
+index 37e108b..f654727 100644
+--- a/bridge/operator-locks.mjs
++++ b/bridge/operator-locks.mjs
+@@ -228,7 +228,7 @@ export function createOperatorLocks({ now = Date.now, verifyWorkspace, homes = D
+   if (reload) {
+     let first;
+     try { first = reload(); } catch { first = { ok: false }; }
+-    if (first?.ok) adopt(first.data); else unavailable = true;
++    if (first?.ok) adopt(null); else unavailable = true;
+   } else adopt(initial);
+   const stateUnavailable = () => fail('locks_state_unavailable', { detail: 'the saved operator locks cannot be read: no lock is granted or checked until they can. Remedy: fix <state dir>/locks.json, or remove it to reset every lock (removal frees all held locks)',
+     next_step: 'tell the owner: locks.json in the hub state directory is unreadable or corrupt' });
