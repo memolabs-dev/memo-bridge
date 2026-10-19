@@ -13,7 +13,7 @@ import { REPATRIATED_ANNOTATIONS, REPATRIATED_DESCRIPTIONS, REPATRIATED_OPERATOR
 import { NOTIFICATION_ANNOTATIONS, NOTIFICATION_DESCRIPTIONS, NOTIFICATION_SCHEMAS, NOTIFICATION_TOOLS } from './operator-notifications.mjs';
 
 export const OPERATOR_HOSTS = Object.freeze(['mac', 'vps']);
-export const OPERATOR_TOOLS = Object.freeze(['operator_policy', 'operator_state', 'operator_list', 'operator_read',
+export const OPERATOR_TOOLS = Object.freeze(['operator_policy', 'operator_preflight', 'operator_state', 'operator_list', 'operator_read',
   'operator_search', 'operator_logs', 'operator_service_status', 'operator_freeze_status', 'operator_audit_verify',
   'operator_job_status', 'approval_status',
   'operator_edit', 'operator_upload_init', 'operator_upload_chunk', 'operator_upload_complete', 'operator_move', 'operator_copy',
@@ -54,6 +54,7 @@ export const SINCE_RE = /^(?:\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?|-\
 
 export const OPERATOR_SCHEMAS = Object.freeze({
   operator_policy: z.object({ host, ref }),
+  operator_preflight: z.object({ host, ref, path, intent: z.literal('edit').optional().describe('Only edit operations are planned. Default edit; never executes a write.') }),
   operator_state: z.object({ host, ref }),
   operator_list: z.object({ host, ref, path,
     depth: z.number().int().min(1).max(5).optional().describe('Levels below path, 1 to 5. Default 1.'),
@@ -151,6 +152,7 @@ export const OPERATOR_SCHEMAS = Object.freeze({
 });
 
 const DESCRIPTIONS = Object.freeze({
+  operator_preflight: 'Use this before editing a machine file to determine the approved workflow for that path: ordinary edit, project worktree or reviewed administration. A plan never changes files, grants access or permits retrying a refused action through another tool.',
   operator_policy: 'Use this when the owner asks what Memo Bridge may do on the Mac or the VPS («qu\'est-ce que tu as le droit de faire sur le VPS ?»): tiers, read and write roots, declared units and containers, approvals, frozen or not. Read-only.',
   operator_state: 'Use this when the owner asks how a machine is doing («le VPS va bien ?», "is the Mac full?"): uptime, load, memory, disk, failed units, docker summary. Do not use for one service (operator_service_status). Read-only.',
   operator_list: 'Use this when the owner wants to see what is in a folder on the Mac or the VPS («qu\'y a-t-il dans ~/Downloads ?»). Up to 5 levels, 1000 entries; secret paths never listed. Do not use for a project worktree (worktree_list_files). Read-only.',
@@ -183,6 +185,7 @@ const DESCRIPTIONS = Object.freeze({
 
 // Annotations per tool: T0 read-only; delete, move, run, service and script destructive.
 const ANNOTATIONS = Object.freeze({
+  operator_preflight: readonly,
   operator_edit: writes, operator_upload_init: writes, operator_upload_chunk: writes, operator_upload_complete: writes,
   operator_copy: writes, operator_chmod: writes, operator_move: destructive, operator_delete: destructive,
   operator_run: destructive, operator_service: destructive, operator_script: destructive,

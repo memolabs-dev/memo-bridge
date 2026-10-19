@@ -106,6 +106,7 @@ export const OPERATOR_OPERATION_CAPABILITY = Object.freeze({
   operator_job_status: CAPABILITIES.OPERATOR_READ,
   approval_status: CAPABILITIES.OPERATOR_READ,
   operator_policy: CAPABILITIES.OPERATOR_READ,
+  operator_preflight: CAPABILITIES.OPERATOR_READ,
   operator_state: CAPABILITIES.OPERATOR_READ,
   operator_list: CAPABILITIES.OPERATOR_READ,
   operator_read: CAPABILITIES.OPERATOR_READ,
