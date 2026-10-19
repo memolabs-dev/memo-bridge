@@ -38,7 +38,7 @@ import { projectInfo } from '../catalog.mjs';
 import { memolabsRoot } from '../memolabs-root.mjs';
 import { COMMIT_RE, validBranch } from '../coordinator/checkpoints.mjs';
 import { PUSH_CREDENTIAL, credentialsRequired } from '../coordinator/credentials.mjs';
-import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { inExpiryWindow, leaseExpiring, parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { createGitHubCredentials } from '../integrations/github-app.mjs';
 import { ownsWorkspace, workerFor } from '../coordinator/policy.mjs';
 import { runOnce } from '../coordinator/store.mjs';
@@ -648,6 +648,8 @@ export function createWorktreeRunner(rt, { env: explicitEnv, credentials: explic
   async function verifiedClaim(row, workspace) {
     const held = await liveClaim(row, workspace);
     if (held.error) return held;
+    // The last 60 s of a lease are a clock margin: no write until task_renew (issue-lease.mjs).
+    if (inExpiryWindow(held.claim.expires_at, now())) return { error: leaseExpiring() };
     const verified = await rt.ledger.verify(parseIssueRef(row.issue_ref), workerFor(workspace), held.claim.claim_id, held.claim.fence_sha);
     if (!verified?.ok) return { error: verified?.error ? fail(verified.error, verified.detail) : fail('ledger_unavailable') };
     return held;

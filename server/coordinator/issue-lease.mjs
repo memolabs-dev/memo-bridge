@@ -11,7 +11,22 @@ import { LEDGER_REPO, createGitHubCredentials } from '../integrations/github-app
 
 export const ISSUE_REF_RE = /^([A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38})\/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,7})$/;
 export const OUTCOMES = Object.freeze(['completed', 'blocked', 'failed', 'cancelled']);
+// What task_release may record: `completed` is written by task_complete only.
+export const RELEASE_OUTCOMES = Object.freeze(['blocked', 'failed', 'cancelled']);
 export const LEASE_TTL = Object.freeze({ min: 60, max: 1800, default: 300 });
+
+// Clock margin. The Mac and the VPS each judge a lease against their own wall clock, which can
+// differ by up to 30 s. A holder stops writing 60 s before expires_at and nobody reclaims before
+// expires_at + 60 s, so a holder and a reclaimer never both write, whichever clock runs ahead.
+export const CLOCK_MARGIN_MS = 60_000;
+export const writableUntil = expiresAt => Date.parse(expiresAt) - CLOCK_MARGIN_MS;
+export const reclaimableAfter = expiresAt => Date.parse(expiresAt) + CLOCK_MARGIN_MS;
+// The last CLOCK_MARGIN_MS of a lease still held at `at`: renewing and releasing stay allowed,
+// writes (commit, push, pull request, checkpoint, complete) are refused. After expires_at the
+// ordinary no_live_claim / stale_lease refusals apply.
+export const inExpiryWindow = (expiresAt, at) => at >= writableUntil(expiresAt) && at < Date.parse(expiresAt);
+export const leaseExpiring = () => ({ ok: false, error: 'lease_expiring',
+  detail: `fewer than ${CLOCK_MARGIN_MS / 1000} s of lease left: no write until it is renewed`, next_step: 'task_renew' });
 const SHA_RE = /^[0-9a-f]{40}$/;
 const CLAIM_RE = /^[0-9a-f]{32}$/;
 const WORKER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/;

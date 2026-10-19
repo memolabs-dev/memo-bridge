@@ -107,7 +107,7 @@ test('[sqlite] AC-09: refuses synced, repository, relative and shared locations'
 test('[sqlite] REQ-002: WAL, busy timeout, foreign keys and schema version are applied', async t => {
   const store = openSqliteStore({ dir: await tempStateDir(t) });
   t.after(() => store.close());
-  assert.equal(SCHEMA_VERSION, 8);
+  assert.equal(SCHEMA_VERSION, 9);
   assert.deepEqual(store.settings(), { journal_mode: 'wal', busy_timeout: 5000, foreign_keys: 1, schema_version: SCHEMA_VERSION });
 });
 
@@ -142,4 +142,129 @@ test('[sqlite] readers are not blocked by a writer holding the lock in another c
   release();
   await held;
   await reader.transaction(repo => repo.insertWorkspace(workspace('ws_after_unlock')));
+});
+
+// v9: the store itself refuses a second live claim per Issue and a second active worktree per
+// branch or path of one host. Rows in state released/removed never block reuse.
+const worktree = (id, extra = {}) => ({ id, workspace_id: 'ws_1', project_id: 'drop', host: 'mac', path: `/wt/${id}`,
+  branch: `feat/${id}`, base_ref: 'main', base_commit: 'a'.repeat(40), issue_ref: null, created_at: T, updated_at: T, ...extra });
+const FUTURE = '2099-01-01T00:00:00+00:00';
+const PAST = '2000-01-01T00:00:00+00:00';
+
+test('v9: a second live claim on the same Issue is refused by the store', async t => {
+  const store = openSqliteStore({ dir: await tempStateDir(t) });
+  t.after(() => store.close());
+  await store.transaction(repo => { repo.insertWorkspace(workspace('ws_1')); repo.insertClaim(claim('c1', fence(1))); });
+  await assert.rejects(store.transaction(repo => repo.insertClaim(claim('c2', fence(2)))), /UNIQUE/i);
+  const rows = await store.transaction(repo => repo.claimsOfIssue('memolabs-dev/drop#7'), { write: false });
+  assert.deepEqual(rows.map(r => [r.claim_id, r.state]), [['c1', 'claimed']]);
+  // Once the first claim is released the Issue can be claimed again.
+  await store.transaction(repo => repo.updateClaim('c1', { state: 'released', outcome: 'cancelled', updated_at: T }, fence(1)));
+  await store.transaction(repo => repo.insertClaim(claim('c3', fence(3))));
+});
+
+test('v9: a second active worktree on the same branch or path is refused; a removed one does not block reuse', async t => {
+  const store = openSqliteStore({ dir: await tempStateDir(t) });
+  t.after(() => store.close());
+  await store.transaction(repo => { repo.insertWorkspace(workspace('ws_1')); repo.insertWorktree(worktree('w1')); });
+  await assert.rejects(store.transaction(repo => repo.insertWorktree(worktree('w2', { path: '/wt/other', branch: 'feat/w1' }))), /UNIQUE/i);
+  await assert.rejects(store.transaction(repo => repo.insertWorktree(worktree('w3', { branch: 'feat/other', path: '/wt/w1' }))), /UNIQUE/i);
+  // Same branch name in another project or on another host is a different key.
+  await store.transaction(repo => {
+    repo.insertWorktree(worktree('w4', { project_id: 'cuesheet', branch: 'feat/w1' }));
+    repo.insertWorktree(worktree('w5', { host: 'vps', branch: 'feat/w1', path: '/wt/w1' }));
+  });
+  await store.transaction(repo => repo.updateWorktree('w1', { status: 'removed', removed_at: T, updated_at: T }));
+  await store.transaction(repo => repo.insertWorktree(worktree('w6', { branch: 'feat/w1', path: '/wt/w1' })));
+  const active = await store.transaction(repo => repo.listWorktrees({ status: 'active' }), { write: false });
+  assert.equal(active.length, 3);
+});
+
+// A v8 store as an older server left it: no partial unique indexes, user_version 8.
+async function v8Store(t, seed) {
+  const dir = await tempStateDir(t);
+  const first = openSqliteStore({ dir });
+  await first.transaction(repo => repo.insertWorkspace(workspace('ws_1')));
+  await first.close();
+  const raw = new DatabaseSync(join(dir, 'coordinator.sqlite'));
+  raw.exec('DROP INDEX IF EXISTS claims_live_issue; DROP INDEX IF EXISTS worktrees_live_branch; DROP INDEX IF EXISTS worktrees_live_path;');
+  seed(raw);
+  raw.exec('PRAGMA user_version = 8');
+  raw.close();
+  return dir;
+}
+const rawClaim = (raw, id, { issue = 'memolabs-dev/drop#7', epoch = 1, expires = FUTURE, state = 'claimed', at = T } = {}) =>
+  raw.prepare(`INSERT INTO claims (claim_id, workspace_id, issue_ref, fence_sha, epoch, expires_at, state, updated_at)
+    VALUES (?, 'ws_1', ?, ?, ?, ?, ?, ?)`).run(id, issue, fence(epoch), epoch, expires, state, at);
+const rawWorktree = (raw, id, { branch, path, status = 'active' }) =>
+  raw.prepare(`INSERT INTO worktrees (id, workspace_id, project_id, host, path, branch, base_ref, base_commit, status, created_at, updated_at)
+    VALUES (?, 'ws_1', 'drop', 'mac', ?, ?, 'main', ?, ?, ?, ?)`).run(id, path, branch, 'a'.repeat(40), status, T, T);
+const userVersion = dir => {
+  const raw = new DatabaseSync(join(dir, 'coordinator.sqlite'));
+  try { return Number(raw.prepare('PRAGMA user_version').get().user_version); } finally { raw.close(); }
+};
+
+test('v9: a v8 store with an expired and a live claim on one Issue migrates and closes the expired row', async t => {
+  const dir = await v8Store(t, raw => {
+    rawClaim(raw, 'old', { epoch: 1, expires: PAST });
+    rawClaim(raw, 'live', { epoch: 2, expires: FUTURE });
+  });
+  const store = openSqliteStore({ dir });
+  t.after(() => store.close());
+  assert.equal(store.settings().schema_version, 9);
+  const old = await store.transaction(repo => repo.getClaim('old'), { write: false });
+  assert.deepEqual([old.state, old.outcome], ['released', 'expired']);
+  assert.equal((await store.transaction(repo => repo.getClaim('live'), { write: false })).state, 'claimed');
+  await assert.rejects(store.transaction(repo => repo.insertClaim(claim('third', fence(3)))), /UNIQUE/i);
+});
+
+test('v9: duplicate expired claims keep only the newest by epoch', async t => {
+  const dir = await v8Store(t, raw => {
+    rawClaim(raw, 'e1', { epoch: 1, expires: PAST });
+    rawClaim(raw, 'e3', { epoch: 3, expires: PAST });
+    rawClaim(raw, 'e2', { epoch: 2, expires: PAST });
+  });
+  const store = openSqliteStore({ dir });
+  t.after(() => store.close());
+  const rows = await store.transaction(repo => repo.claimsOfIssue('memolabs-dev/drop#7'), { write: false });
+  assert.deepEqual(rows.map(r => [r.claim_id, r.state]).sort(), [['e1', 'released'], ['e2', 'released'], ['e3', 'claimed']]);
+});
+
+test('v9: a v8 store with two unexpired claims on one Issue refuses to migrate and stays v8', async t => {
+  const dir = await v8Store(t, raw => { rawClaim(raw, 'a', { epoch: 1 }); rawClaim(raw, 'b', { epoch: 2 }); });
+  let error;
+  try { openSqliteStore({ dir }); } catch (e) { error = e; }
+  assert.equal(error?.message, 'state_duplicate_live_rows');
+  assert.equal(error.rows.length, 1);
+  assert.equal(error.rows[0].table, 'claims');
+  assert.deepEqual([...error.rows[0].ids].sort(), ['a', 'b']);
+  assert.equal(userVersion(dir), 8);
+  const raw = new DatabaseSync(join(dir, 'coordinator.sqlite'));
+  t.after(() => raw.close());
+  assert.deepEqual(raw.prepare("SELECT claim_id, state FROM claims ORDER BY claim_id").all().map(r => [r.claim_id, r.state]),
+    [['a', 'claimed'], ['b', 'claimed']]);
+  assert.equal(raw.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'claims_live_issue'").get().n, 0);
+});
+
+test('v9: a v8 store with two active worktrees on one branch or path refuses to migrate and stays v8', async t => {
+  for (const [label, seed] of [
+    ['branch', raw => { rawWorktree(raw, 'w1', { branch: 'feat/x', path: '/wt/1' }); rawWorktree(raw, 'w2', { branch: 'feat/x', path: '/wt/2' }); }],
+    ['path', raw => { rawWorktree(raw, 'w1', { branch: 'feat/a', path: '/wt/1' }); rawWorktree(raw, 'w2', { branch: 'feat/b', path: '/wt/1' }); }]
+  ]) {
+    const dir = await v8Store(t, seed);
+    let error;
+    try { openSqliteStore({ dir }); } catch (e) { error = e; }
+    assert.equal(error?.message, 'state_duplicate_live_rows', label);
+    assert.equal(error.rows[0].table, 'worktrees', label);
+    assert.deepEqual([...error.rows[0].ids].sort(), ['w1', 'w2'], label);
+    assert.equal(userVersion(dir), 8, label);
+  }
+  // A removed duplicate is not a live row: it migrates.
+  const dir = await v8Store(t, raw => {
+    rawWorktree(raw, 'w1', { branch: 'feat/x', path: '/wt/1' });
+    rawWorktree(raw, 'w2', { branch: 'feat/x', path: '/wt/1', status: 'removed' });
+  });
+  const store = openSqliteStore({ dir });
+  t.after(() => store.close());
+  assert.equal(store.settings().schema_version, 9);
 });

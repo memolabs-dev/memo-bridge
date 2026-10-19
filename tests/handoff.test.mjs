@@ -31,7 +31,8 @@ async function held(coordinator, label = 'A') {
 }
 
 test('AC1, AC4: a handoff without a commit is returned in full by workspace_recover, task_status and the next task_next brief', async t => {
-  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { ledger: ledger() });
+  const sharedLedger = ledger();
+  const { store, coordinator } = coordinatorOn(await tempStateDir(t), { ledger: sharedLedger });
   t.after(() => store.close());
   const a = await held(coordinator, 'A');
   const recorded = await coordinator.taskCheckpoint({ ...a, handoff: FULL });
@@ -46,7 +47,8 @@ test('AC1, AC4: a handoff without a commit is returned in full by workspace_reco
   assert.ok(recover.next_actions.some(x => x.includes('handoff')), 'next_actions points to the handoff');
   assert.equal((await coordinator.taskStatus({ issue: ISSUE })).handoff.goal, FULL.goal);
 
-  // Another conversation picks the same task up: its brief starts from the handoff.
+  // Another conversation picks the same task up once A's lease has run out: its brief starts from the handoff.
+  sharedLedger.expire();
   const b = await held(coordinator, 'B');
   const next = await coordinator.taskNext({ workspace_id: b.workspace_id });
   assert.equal(next.already_held, true);

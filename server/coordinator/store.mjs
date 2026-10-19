@@ -14,7 +14,10 @@ import { SOURCE_SCHEMA, sourceRepository } from './source-store.mjs';
 
 // v5: context memory across conversations (server/coordinator/memory-store.mjs), additive.
 // v6: structured handoffs and learning counters (server/coordinator/continuity-store.mjs), additive.
-export const SCHEMA_VERSION = 8;
+// v9: partial UNIQUE indexes on live rows (one claimed row per Issue, one active worktree per
+// branch and per path of a host), so the store itself refuses what two parallel sessions of one
+// host must never share.
+export const SCHEMA_VERSION = 9;
 const DB_FILE = 'coordinator.sqlite';
 
 export function defaultStateDir(env = process.env) {
@@ -242,6 +245,39 @@ function migrateV4(db) {
   db.exec('CREATE INDEX IF NOT EXISTS events_request ON events(request_id)');
 }
 
+// v9: the SQLite mirror is shared by every workspace of a host, so a live row must be unique.
+// Duplicates left by an older server are settled before the indexes exist: claim rows whose
+// lease already ran out are closed ('released', outcome 'expired') keeping the newest by epoch
+// then updated_at; anything still unexpired, and every duplicate active worktree, is refused
+// (state_duplicate_live_rows, error.rows = [{ table, key, ids }]) and the transaction rolls
+// back, leaving the store at v8 with its rows intact.
+function migrateV9(db, now = Date.now()) {
+  const refused = [];
+  const dupes = (sql, ...columns) => db.prepare(sql).all().map(r => ({ key: columns.map(c => r[c]).join('|'), ids: String(r.ids).split('\u0001') }));
+  const claimIssues = db.prepare("SELECT issue_ref FROM claims WHERE state = 'claimed' GROUP BY issue_ref HAVING COUNT(*) > 1").all();
+  for (const { issue_ref: issue } of claimIssues) {
+    const rows = db.prepare("SELECT claim_id, epoch, expires_at, updated_at FROM claims WHERE state = 'claimed' AND issue_ref = ?").all(issue)
+      .map(r => ({ ...r, epoch: Number(r.epoch), updated_at: Number(r.updated_at) }));
+    // An unparseable expiry is treated as unexpired: refuse rather than guess.
+    const live = rows.filter(r => !(Date.parse(r.expires_at) <= now));
+    if (live.length > 1) { refused.push({ table: 'claims', key: issue, ids: live.map(r => r.claim_id) }); continue; }
+    const keep = live[0] ?? [...rows].sort((a, b) => b.epoch - a.epoch || b.updated_at - a.updated_at || (a.claim_id < b.claim_id ? 1 : -1))[0];
+    for (const r of rows) {
+      if (r.claim_id === keep.claim_id) continue;
+      db.prepare("UPDATE claims SET state = 'released', outcome = 'expired', updated_at = ? WHERE claim_id = ?").run(now, r.claim_id);
+    }
+  }
+  const sep = '\u0001';
+  for (const [columns, sql] of [
+    [['project_id', 'host', 'branch'], `SELECT project_id, host, branch, GROUP_CONCAT(id, '${sep}') AS ids FROM worktrees WHERE status = 'active' GROUP BY project_id, host, branch HAVING COUNT(*) > 1`],
+    [['host', 'path'], `SELECT host, path, GROUP_CONCAT(id, '${sep}') AS ids FROM worktrees WHERE status = 'active' GROUP BY host, path HAVING COUNT(*) > 1`]
+  ]) refused.push(...dupes(sql, ...columns).map(d => ({ table: 'worktrees', ...d })));
+  if (refused.length) throw Object.assign(new Error('state_duplicate_live_rows'), { rows: refused });
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS claims_live_issue ON claims(issue_ref) WHERE state = 'claimed';
+CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_branch ON worktrees(project_id, host, branch) WHERE status = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS worktrees_live_path ON worktrees(host, path) WHERE status = 'active';`);
+}
+
 // The idempotency key of a mutating call: sha256(principal|op|client_request_id), the same
 // derivation the hub uses, so a retry through either path finds the first result.
 export const CLIENT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -458,6 +494,7 @@ function migrate(db) {
       if (current < 6) db.exec(CONTINUITY_SCHEMA);
       if (current < 7) migrateV7(db);
       if (current < 8) db.exec(SOURCE_SCHEMA);
+      if (current < 9) migrateV9(db);
       if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('state_foreign_key_violation');
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');

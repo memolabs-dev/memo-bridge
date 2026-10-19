@@ -63,7 +63,8 @@ export const SUPERVISOR_DEFAULTS = Object.freeze({
 const SUPERVISOR_DEFAULTS_DISK = Object.freeze({ min_free_disk_running_gib: DEFAULT_RUNNER_CONFIG.min_free_disk_running_gib,
   max_unmeasured_readings: DEFAULT_RUNNER_CONFIG.max_unmeasured_readings });
 const TRANSIENT = new Set(['ledger_unavailable', 'ledger_outcome_unknown', 'lease_race_lost']);
-const RELEASE_OUTCOME = { succeeded: 'completed', cancelled: 'cancelled', interrupted: 'cancelled' };
+// A succeeded job proves the job ran, not that the task is done: only task_complete records `completed`.
+const RELEASE_OUTCOME = { succeeded: 'cancelled', cancelled: 'cancelled', interrupted: 'cancelled' };
 
 /**
  * rt: the runtime (store, ledger, host, now). executor: the systemd executor. resources: a
@@ -319,7 +320,7 @@ export function createSupervisor(rt, { executor, resources = createResourceReade
       await write((repo, t) => {
         const ids = { workspace_id: workspace.id, issue: issue.ref };
         if (result.ok) {
-          repo.updateClaim(claim.claim_id, { state: 'released', outcome: `${outcome}: job ${job.id} ${job.status}`,
+          repo.updateClaim(claim.claim_id, { state: 'released', outcome: `${outcome}: job ${job.id} ${job.status}${job.status === 'succeeded' ? ' (done requires task_complete)' : ''}`,
             fence_sha: result.receipt?.fence_sha ?? claim.fence_sha, updated_at: t }, claim.fence_sha);
           event(repo, job.id, t, 'released', { outcome });
           journal(repo, t, 'task_release', 'ok', null, ids);

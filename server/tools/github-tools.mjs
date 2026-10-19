@@ -16,7 +16,7 @@ import { z } from 'zod/v4';
 import { workerFor } from '../coordinator/index.mjs';
 import { ownsWorkspace } from '../coordinator/policy.mjs';
 import { validBranch } from '../coordinator/checkpoints.mjs';
-import { parseIssueRef } from '../coordinator/issue-lease.mjs';
+import { inExpiryWindow, leaseExpiring, parseIssueRef } from '../coordinator/issue-lease.mjs';
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
 import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
 import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
@@ -38,7 +38,7 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const LABEL_RE = /^[^,\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]{1,50}$/;
 // Refusals of github_create_pr are journaled as 'denied'; anything else that fails is 'error'.
 const DENIED = new Set(['forbidden', 'workspace_closed', 'worktree_not_active', 'wrong_host', 'claim_required',
-  'stale_lease', 'lease_held', 'issue_changed', 'lease_denied', 'repo_not_allowed', 'repo_not_registered',
+  'stale_lease', 'lease_held', 'lease_expiring', 'issue_changed', 'lease_denied', 'repo_not_allowed', 'repo_not_registered',
   'default_branch_refused', 'branch_not_pushed', 'unknown_workspace', 'unknown_worktree', 'project_not_allowed',
   'head_not_pushed_by_workspace', 'session_mismatch', 'workspace_other_session', 'session_required', 'path_protected']);
 
@@ -247,6 +247,7 @@ async function createPr(rt, github, args, ids, { remotePolicy, meta } = {}) {
       const claim = repo.claimsOf(workspace.id, 'claimed')
         .find(c => c.issue_ref === worktree.issue_ref && Date.parse(c.expires_at) > now);
       if (!claim) return { error: fail('claim_required') };
+      if (inExpiryWindow(claim.expires_at, now)) return { error: leaseExpiring() };
       return { workspace, worktree, claim };
     }, { write: false });
   } catch {

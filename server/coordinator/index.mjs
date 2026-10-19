@@ -29,7 +29,7 @@ import { createLearning, learningThresholds as thresholdsFromEnv } from './learn
 import { CHILD_RULES, DELEGATION_ID_RE, DELEGATION_LIMITS, DELEGATION_REFUSALS, DELEGATION_TTL, callerChild, childState,
   currentFenceFor, endDelegations, endReason, newDelegationId, parseBrief, parseReport, parseScope, pasteSentence as delegationSentence, publicDelegation,
   publicReport, scopesOverlap } from './delegation.mjs';
-import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
+import { LEASE_TTL, RELEASE_OUTCOMES, defaultGovernanceRoot, inExpiryWindow, leaseExpiring, parseIssueRef, reclaimableAfter } from './issue-lease.mjs';
 import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
   isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
   from './batches.mjs';
@@ -48,7 +48,7 @@ const WS_RE = /^ws_[A-Za-z0-9_-]{16}$/;
 const CLAIM_RE = /^[0-9a-f]{32}$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}$/;
-const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'workspace_closed', 'project_mismatch',
+const DENIED = new Set(['forbidden', 'stale_lease', 'lease_held', 'lease_expiring', 'workspace_closed', 'project_mismatch',
   'repo_not_allowed', 'issue_not_ready', 'issue_changed', 'lease_race_lost', 'lease_denied', 'host_not_remote_enabled',
   'project_not_allowed', 'session_mismatch', 'workspace_other_session', 'session_required',
   // Context memory: content refusals and conflicts (server/coordinator/memory.mjs).
@@ -110,6 +110,8 @@ const IN_FLIGHT_MAX = 1000;
 const REQUESTS_SHOWN = 10;
 // workspace_recover bounds: ledger status calls are slow (python + gh), so only the most
 // recent held claims are reconciled.
+// The last `count` rows; none when the budget is spent (slice(-0) would return them all).
+export const lastRows = (rows, count) => (count > 0 ? rows.slice(-count) : []);
 const RECOVER = Object.freeze({ claims: 10, checkpoints: 10, jobs: 10, worktrees: 50, actions: 20, handoffs: 2 });
 // tasks_list bounds: projects scanned, repositories per search query, search calls per listing.
 // With App tokens (the VPS runner) a token covers one repository, so the search runs once per
@@ -451,9 +453,14 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     return stopped.map(j => j.job_id);
   }
 
-  async function releaseHeld(args, outcome, summary, meta = null) {
+  // `guarded`: the last 60 s of the lease refuse the call (task_complete). Giving a claim back
+  // (task_release) is never blocked by the safety window.
+  async function releaseHeld(args, outcome, summary, meta = null, { guarded = false } = {}) {
     const held = await heldClaim(args, { requireActive: false });
     if (held.error) return held.error;
+    if (guarded && held.claim.state === 'claimed' && inExpiryWindow(held.claim.expires_at, now())) return leaseExpiring();
+    // A row closed because another holder took the Issue over: the lease is gone, nothing to release.
+    if (held.claim.state === 'released' && held.claim.outcome === 'lost') return fail('stale_lease');
     if (held.claim.state === 'released') {
       const cancelled = await cancelJobs(held.workspace.id, held.issue.ref);
       return { ok: true, issue: held.issue.ref, released: true, ...publicOutcome(held.claim.outcome),
@@ -828,6 +835,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const workspace = ws.workspace;
       const local = await read(repo => ({
         held: repo.claimsOf(workspace.id, 'claimed'),
+        // Rows closed because another holder took the Issue over: the session must still be told.
+        superseded: repo.claimsOf(workspace.id, 'released').filter(c => c.outcome === 'lost'),
         all: repo.claimsOf(workspace.id),
         worktrees: repo.listWorktrees({ workspace_id: workspace.id, status: 'active', limit: RECOVER.worktrees }),
         jobs: repo.listJobs({ workspace_id: workspace.id, limit: RECOVER.jobs })
@@ -835,6 +844,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       // claimsOf orders by updated_at ascending: reconcile the most recent ones.
       const held = local.held.slice(-RECOVER.claims).reverse();
       const claims = await Promise.all(held.map(c => reconcile(workspace, c)));
+      for (const c of lastRows(local.superseded, RECOVER.claims - claims.length).reverse()) {
+        claims.push({ issue: c.issue_ref, claim_id: c.claim_id, local_fence: c.fence_sha, local_expires_at: c.expires_at,
+          state: 'lost', ledger_state: 'superseded' });
+      }
       // Checkpoints of every Issue this workspace ever claimed, from any workspace: another
       // machine's pushed commit is exactly what a resuming session needs.
       const issues = [...new Set(local.all.slice(-20).map(c => c.issue_ref))];
@@ -936,6 +949,21 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (remote && !origin) return fail('project_origin_unknown');
       const worker = workerFor(ws.workspace);
       let receipt; let recovered = false;
+      // Clock margin: the ledger judges expiry with the clock of the machine it runs on, which
+      // may run ahead of the holder's. Another holder's lease stays theirs until expires_at +
+      // 60 s on this machine's clock, whatever the ledger reads, and the ledger is not asked to
+      // grant it before. When the ledger cannot say who holds the Issue the claim fails closed:
+      // it could otherwise grant a lease that expired seconds ago.
+      const current = await ledger.status(issue);
+      if (!current?.ok) {
+        // A definitive refusal (repo_not_allowed...) is passed on; anything uncertain fails closed.
+        return current?.error && !UNCERTAIN.has(current.error) ? current : fail('ledger_unavailable', 'nothing was claimed');
+      }
+      const lease = current.receipt;
+      // An unreadable expiry is held too: only a finite time already past the margin lets go.
+      if (lease?.state === 'claimed' && lease.worker !== worker && !(now() >= reclaimableAfter(lease.expires_at))) {
+        return fail('lease_held', 'the previous lease is live, expired less than 60 s ago, or has no readable expiry');
+      }
       const result = await ledger.claim(issue, worker, ttl);
       if (result.ok) {
         receipt = result.receipt;
@@ -949,11 +977,23 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       } else {
         return result;
       }
-      let recorded;
+      let recorded; const ownStale = [];
       try {
         recorded = await write((repo, at) => {
           // Re-read inside the transaction: a concurrent workspace_close must win.
           if (repo.getWorkspace(ws.workspace.id)?.status !== 'active') return false;
+          // The ledger just granted this lease, so any other mirror row still 'claimed' on the
+          // Issue is superseded, and the store allows one claimed row per Issue (v9): close those
+          // rows before inserting. An earlier holder's row is closed as 'lost' (that holder must hear stale_lease, never an
+          // idempotent success; see releaseHeld and workspace_recover). This
+          // workspace's own earlier row is closed as 'cancelled' and reconciled with the ledger
+          // below, like any other lease this workspace gives up.
+          for (const stale of repo.claimsOfIssue(issue.ref, 200)) {
+            if (stale.state !== 'claimed' || stale.claim_id === receipt.claim_id) continue;
+            const own = stale.workspace_id === ws.workspace.id;
+            repo.updateClaim(stale.claim_id, { state: 'released', outcome: own ? 'cancelled' : 'lost', updated_at: at }, stale.fence_sha);
+            if (own) ownStale.push(stale);
+          }
           repo.insertClaim({ claim_id: receipt.claim_id, workspace_id: ws.workspace.id, issue_ref: issue.ref,
             fence_sha: receipt.fence_sha, epoch: receipt.epoch, expires_at: receipt.expires_at, updated_at: at });
           return true;
@@ -970,8 +1010,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       // One workspace works on one task. Changing target gives the abandoned lease back in the
       // same movement, so a pivot never leaves the previous task locked (A028). Same shape as
       // workspace_close: release at the ledger, then reconcile the local mirror.
-      const others = (await read(repo => repo.claimsOf(ws.workspace.id, 'claimed')))
-        .filter(claim => claim.claim_id !== receipt.claim_id);
+      const others = [...ownStale, ...(await read(repo => repo.claimsOf(ws.workspace.id, 'claimed')))
+        .filter(claim => claim.claim_id !== receipt.claim_id)];
       const released = []; const lost = []; const unreleased = []; const abandonedJobs = [];
       for (const claim of others) {
         const outcome = await releaseRecorded(ws.workspace, claim, 'cancelled');
@@ -1018,7 +1058,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     },
 
     async taskRelease(args, meta) {
-      if (!OUTCOMES.includes(args.outcome)) return fail('invalid_input', 'outcome');
+      if (!RELEASE_OUTCOMES.includes(args.outcome)) return fail('invalid_input', 'outcome');
       return releaseHeld(args, args.outcome, null, meta);
     },
 
@@ -1026,7 +1066,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     async taskComplete(args, meta) {
       const summary = cleanText(args.summary, SUMMARY_MAX, { multiline: true });
       if (summary === undefined) return fail('invalid_input', 'summary');
-      return releaseHeld(args, 'completed', summary, meta);
+      return releaseHeld(args, 'completed', summary, meta, { guarded: true });
     },
 
     // The checkpoint is a write boundary: the ledger verifies the fence immediately before it.
@@ -1046,6 +1086,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (note === undefined || (note && !withCommit)) return fail('invalid_input', 'note');
       const held = await heldClaim(args);
       if (held.error) return held.error;
+      if (inExpiryWindow(held.claim.expires_at, now())) return leaseExpiring();
       // Git first (it can be slow), then the ledger verify, then the insert at once.
       let check = null;
       if (withCommit) {
