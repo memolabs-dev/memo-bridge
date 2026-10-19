@@ -4,11 +4,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mutantsByInvariant } from './mutations/run.mjs';
+import { patchPaths } from './mutations/patches.mjs';
 
 const RUN = join(dirname(fileURLToPath(import.meta.url)), 'mutations', 'run.mjs');
 
@@ -204,4 +205,49 @@ test('mutantsByInvariant maps a patch to the longest invariant prefix and fails 
   rmSync(join(root, 'mutations/fence.patch'));
   write(root, { 'mutations/claimrace-a.patch': '' });
   assert.throws(() => mutantsByInvariant(join(root, 'mutations')), /claimrace-a\.patch/);
+});
+
+// Ruling 17a: an error thrown by production code is a broken program, not a caught behaviour.
+// Only an assertion (AssertionError, code ERR_ASSERTION) in a test the baseline passed kills.
+test('a mutant that makes production code throw a TypeError is an error, not a kill', t => {
+  const r = harness(toy(t, { 'toy-throw.patch': patch('value is one', { file: 'server/wait.mjs', from: WAIT,
+    to: "export const wait = () => { throw new TypeError('boom'); };" }) }));
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /ERROR.*toy-throw.*no test that passed in the baseline failed on an assertion.*TypeError/);
+  assert.doesNotMatch(r.stdout, /killed/);
+});
+
+// Ruling 17b: the paths a patch names are checked before git apply runs, so a patch can never
+// write through the node_modules link (or anywhere else) into the original repository.
+test('a patch naming node_modules/ is refused before git apply and writes nothing', t => {
+  const toyRepo = toy(t, { 'toy-deps.patch': patch('value is one', { file: 'node_modules/pkg/index.mjs', from: 'export const x = 1;', to: 'export const x = 2;' }) });
+  write(toyRepo.repo, { 'node_modules/pkg/index.mjs': 'export const x = 1;\n' });
+  const r = harness(toyRepo);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /toy-deps\.patch: changes files outside server\/ and bridge\/: node_modules\/pkg\/index\.mjs \(named by the patch, refused before git apply\)/);
+  assert.equal(readFileSync(join(toyRepo.repo, 'node_modules/pkg/index.mjs'), 'utf8'), 'export const x = 1;\n');
+});
+
+test('a patch whose paths cannot be read is refused before git apply', t => {
+  const quoted = `${header('value is one')}diff --git "a/server/v\\303\\251.mjs" "b/server/v\\303\\251.mjs"\n--- "a/server/v\\303\\251.mjs"\n+++ "b/server/v\\303\\251.mjs"\n@@ -1 +1 @@\n-a\n+b\n`;
+  const r = harness(toy(t, { 'toy-quoted.patch': quoted }));
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /toy-quoted\.patch: cannot read the paths of the patch.*quoted/);
+});
+
+test('patchPaths reads every committed mutant, counts hunk lines, and refuses what it cannot read', () => {
+  const dir = join(dirname(RUN));
+  for (const file of readdirSync(dir).filter(n => n.endsWith('.patch'))) {
+    const paths = patchPaths(readFileSync(join(dir, file), 'utf8'));
+    assert.ok(paths.length && paths.every(p => /^(server|bridge)\//.test(p)), `${file}: ${paths}`);
+  }
+  // A removed line that starts with "-- " is hunk content, not the header of another file.
+  const tricky = 'diff --git a/server/a.mjs b/server/a.mjs\n--- a/server/a.mjs\n+++ b/server/a.mjs\n@@ -1,2 +1 @@\n--- a/README.md\n+++ b/README.md\n';
+  assert.throws(() => patchPaths(tricky), /hunk ends early/);
+  assert.throws(() => patchPaths('--- a/server/a.mjs\n+++ b/server/a.mjs\n@@ -1 +1,2 @@\n-a\n b\n+c\n'), /more lines than its @@ header/);
+  const ok = 'diff --git a/server/a.mjs b/server/a.mjs\n--- a/server/a.mjs\n+++ b/server/a.mjs\n@@ -1,2 +1 @@\n--- a/README.md\n-x\n+y\n';
+  assert.deepEqual(patchPaths(ok), ['server/a.mjs']);
+  assert.deepEqual(patchPaths('--- a/server/b.mjs\t2026-01-01\n+++ b/server/b.mjs\n@@ -1 +1 @@\n-a\n+b\n'), ['server/b.mjs']);
+  assert.throws(() => patchPaths('# test: x\nno diff here\n'), /names no file/);
+  assert.throws(() => patchPaths('diff --git a/server/a.mjs b/server/a.mjs\n--- a/server/a.mjs\n+++ b/server/a.mjs\n@@ -1,3 +1,3 @@\n a\n'), /ends early/);
 });
