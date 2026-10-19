@@ -59,3 +59,20 @@ export async function raceInserts(workers, issue) {
   workers.forEach((w, i) => w.child.send({ type: 'insert_claim', issue, claim_id: String(i + 1).padStart(32, 'a'), fence: String(i + 1).padStart(40, 'b') }));
   return Promise.all(workers.map(w => w.next('inserted')));
 }
+
+// Every worker claims its own Issue (`issues[i]`) on the git project, then all of them call worktree_create at
+// once with `argsFor(i)`. Resolves to the worktree_create results in worker order.
+export async function raceWorktrees(workers, { projectsRoot, worktreesRoot, issues, argsFor }) {
+  workers.forEach((w, i) => w.child.send({ type: 'worktree_prepare', projectsRoot, worktreesRoot, issue: issues[i], ttl: 600 }));
+  const prepared = await Promise.all(workers.map(w => w.next('prepared')));
+  const failed = prepared.filter(p => !p.claim?.ok);
+  if (failed.length) throw new Error(`claims failed: ${JSON.stringify(failed)}`);
+  workers.forEach((w, i) => w.child.send({ type: 'worktree_create', args: argsFor(i) }));
+  return (await Promise.all(workers.map(w => w.next('created')))).map(m => m.result);
+}
+
+// Every worker inserts an active worktree row straight through the store; `rowFor(i)` gives its { branch, path }.
+export async function raceWorktreeInserts(workers, rowFor) {
+  workers.forEach((w, i) => w.child.send({ type: 'insert_worktree', id: `wt_${String(i + 1).padStart(16, 'x')}`, ...rowFor(i) }));
+  return Promise.all(workers.map(w => w.next('inserted_worktree')));
+}
