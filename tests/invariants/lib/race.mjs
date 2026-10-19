@@ -9,6 +9,7 @@ const WORKER = fileURLToPath(new URL('./worker.mjs', import.meta.url));
 
 function startWorker(stateDir, githubState, clockOffsetMs, project) {
   const child = fork(WORKER, [stateDir, githubState, String(clockOffsetMs), project], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  child.on('error', () => {});
   let stderr = '';
   child.stderr.on('data', chunk => { if (stderr.length < 4096) stderr += chunk; });
   const messages = []; const waiters = [];
@@ -33,12 +34,14 @@ export async function startWorkers(stateDir, githubState, count, { clockOffsetMs
   return { workers, ready };
 }
 
-// Idempotent: a worker that already exited is not waited for.
+// Idempotent: a worker that already exited is not waited for. A worker that does not exit within 5 s
+// (a stuck store.close()) is killed, so it cannot hang the file.
 export async function stopWorkers(workers) {
   await Promise.all(workers.map(w => new Promise(resolve => {
     if (w.child.exitCode !== null || w.child.signalCode !== null) return resolve();
     w.child.once('exit', resolve);
-    try { w.child.send({ type: 'exit' }); } catch { w.child.kill('SIGKILL'); }
+    setTimeout(() => w.child.kill('SIGKILL'), 5000).unref();
+    if (w.child.connected) w.child.send({ type: 'exit' }); else w.child.kill('SIGKILL');
   })));
 }
 
@@ -50,3 +53,9 @@ export async function raceClaims(workers, issue, ttl) {
 
 // The rows of one Issue in a store (newest first), read through a transaction.
 export const claimRows = (store, issue) => store.transaction(repo => repo.claimsOfIssue(issue, 200), { write: false });
+
+// Every worker inserts a 'claimed' row for `issue` straight through the store; resolves to the outcomes.
+export async function raceInserts(workers, issue) {
+  workers.forEach((w, i) => w.child.send({ type: 'insert_claim', issue, claim_id: String(i + 1).padStart(32, 'a'), fence: String(i + 1).padStart(40, 'b') }));
+  return Promise.all(workers.map(w => w.next('inserted')));
+}

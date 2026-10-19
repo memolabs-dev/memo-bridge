@@ -9,7 +9,11 @@
 // messages in  { type: 'claim', issue, ttl }                                 -> { type: 'claimed', claim }
 //              { type: 'renew', issue, claim_id, fence, ttl }                -> { type: 'renewed', renew }
 //              { type: 'write', op, args }                                   -> { type: 'wrote', result }
+//              { type: 'insert_claim', issue, claim_id, fence }              -> { type: 'inserted', ok, error?, code? }
 //              { type: 'exit' }
+// `insert_claim` bypasses the coordinator and the ledger: it inserts a 'claimed' row for this worker's
+// workspace straight through the store repository, in one write transaction, as production does. It is how
+// a test reaches the store's own UNIQUE live-claim index.
 // `write` runs a coordinator operation named by `op` (task_checkpoint, task_complete, task_release,
 // task_renew) for this worker's own workspace; `args.workspace_id` is filled in when absent.
 import { createIssueLeaseClient } from '../../../server/coordinator/issue-lease.mjs';
@@ -40,6 +44,16 @@ process.on('message', async message => {
     const method = OPS[message.op];
     const result = method ? await coordinator[method]({ workspace_id, ...message.args }) : { ok: false, error: 'unknown_op' };
     process.send({ type: 'wrote', result });
+  }
+  if (message.type === 'insert_claim') {
+    const at = new Date().toISOString();
+    try {
+      await store.transaction(repo => repo.insertClaim({ claim_id: message.claim_id, workspace_id, issue_ref: message.issue,
+        fence_sha: message.fence, epoch: 1, expires_at: new Date(Date.now() + 600_000).toISOString(), updated_at: at }));
+      process.send({ type: 'inserted', ok: true });
+    } catch (error) {
+      process.send({ type: 'inserted', ok: false, error: String(error?.message ?? error), code: error?.code ?? error?.errcode ?? null });
+    }
   }
   if (message.type === 'exit') {
     await store.close();
