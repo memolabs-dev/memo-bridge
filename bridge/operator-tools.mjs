@@ -16,7 +16,7 @@ import { lstat, open, readdir, statfs } from 'node:fs/promises';
 import { cpus, freemem, loadavg, totalmem, uptime } from 'node:os';
 import { join } from 'node:path';
 import { CONTAINER_RE, UNIT_RE, policySummary } from './operator-policy.mjs';
-import { createDenylist, resolveOperatorPath, catalogProjects } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath, catalogProjects, lexicalPath } from './operator-paths.mjs';
 import { untrusted } from './operator-output.mjs';
 
 export const LIMITS = Object.freeze({
@@ -26,6 +26,9 @@ export const LIMITS = Object.freeze({
   logLinesDefault: 200, commandTimeoutMs: 15_000, commandMaxBytes: 4 * 1024 * 1024
 });
 // Skipped while walking, as SentinelX does (research §3): big, never what the owner looks for.
+// Paths with an existing, independently reviewed administrator maintenance process.
+// This is routing metadata, NEVER a permission grant or an executable command.
+export const REVIEWED_ROOT_MAINTENANCE = Object.freeze(['/usr/local/bin/lab-backup']);
 export const NOISE_DIRS = Object.freeze(new Set(['.git', 'node_modules', '.venv', 'venv', '__pycache__', '.cache', '.next',
   '.pnpm-store', '.tox', '.mypy_cache', '.pytest_cache', 'DerivedData']));
 export const SAFE_ENV = Object.freeze({ PATH: '/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin:/usr/local/bin', LANG: 'C.UTF-8',
@@ -108,7 +111,8 @@ export function decodeSlice(buf, { atStart }) {
 // deps: run (argv runner), projects (D11 guard source), platform, now, guard (freeze status),
 // chain (audit chain), statfsImpl, resolve (path resolver; tests).
 export function createOperatorTools(policy, { run = runArgv, projects = catalogProjects(policy.repositories),
-  platform = process.platform, now = Date.now, guard = null, chain = null, statfsImpl = statfs } = {}) {
+  platform = process.platform, now = Date.now, guard = null, chain = null, statfsImpl = statfs,
+  maintenanceFiles = REVIEWED_ROOT_MAINTENANCE } = {}) {
   const denylist = createDenylist(policy);
   const resolve = (raw, access = 'r') => resolveOperatorPath(policy, raw, { access, denylist, projects });
 
@@ -204,6 +208,36 @@ export function createOperatorTools(policy, { run = runArgv, projects = catalogP
   return {
     async operator_policy() {
       return { ok: true, host: policy.host, policy: policySummary(policy), frozen: guard ? guard.status() : null };
+    },
+
+    async operator_preflight({ path, intent = 'edit' }) {
+      // Inspect before attempting a write: no error-shaped surprise for known out-of-scope paths.
+      // The host agent still enforces all policy checks when the real operation is submitted.
+      if (intent !== 'edit') return fail('invalid_arguments');
+      if (!lexicalPath(path, policy)) return { ok: true, host: policy.host, route: 'invalid_path', authorized: false };
+      const result = await resolveOperatorPath(policy, path, { access: 'rw', denylist, projects });
+      if (result.ok) return { ok: true, host: policy.host, route: 'operator_edit',
+        authorized: true, requires: ['workspace', 'path_lock'], note: 'Operating-system permissions are checked again at write time.' };
+      if (result.error === 'use_dev_flow') return { ok: true, host: policy.host, route: 'project_worktree',
+        authorized: false, project: result.project, branch: result.branch,
+        requires: ['task_claim', 'worktree_create', 'tests', 'pull_request'] };
+      if (result.error === 'path_not_allowed') {
+        // Checking the *read* path still applies both denylist passes and symlink resolution.
+        const readable = await resolveOperatorPath(policy, path, { access: 'r', denylist, projects });
+        if (readable.ok && policy.host === 'vps' && policy.maxTierName === 'root' && policy.rootHelper
+          && maintenanceFiles.includes(readable.path)) {
+          return { ok: true, host: policy.host, route: 'reviewed_root_maintenance', authorized: false,
+            requires: ['versioned_source_change', 'single_use_owner_approval', 'root_helper', 'global_lock',
+              'validated_patch_and_rollback', 'isolated_restore_test'],
+            note: 'Only an independently approved T3 maintenance action may make this exact change; this plan grants no write permission.' };
+        }
+        return { ok: true, host: policy.host, route: 'owner_policy_review', authorized: false,
+          requires: ['explicit_owner_review'], note: 'No available write operation is authorized for this path.' };
+      }
+      // Never recommend an alternative technique for secret, symlink, immutable or otherwise denied paths.
+      return { ok: true, host: policy.host, route: 'stop', authorized: false, reason:
+        ['path_secret', 'git_internal', 'repository_guard_unavailable', 'not_found',
+          'permission_denied', 'invalid_path'].includes(result.error) ? result.error : 'policy_denied' };
     },
 
     async operator_state() {
