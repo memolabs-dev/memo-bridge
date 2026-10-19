@@ -317,3 +317,108 @@ test('a Mac that cannot answer leaves the local refusal standing, and a malforme
   assert.deepEqual(bad.calls, [['vps', 'github_issues'], ['vps', 'github_issues'], ['vps', 'github_issues']]);
   assert.deepEqual(bad.audit, []);
 });
+
+// Issue #218: placement of a call that names no host must not wait for the hand-exported VPS
+// catalog snapshot. When the VPS registry does not know the project at all, the hub asks the Mac
+// runtime's own projects_list for that exact name; a real (not metadata-only) Mac row places the
+// call on the Mac, which still checks its registry, policy and enrolment. Any doubt keeps the VPS.
+function liveMac({ vpsListing = () => ({ ok:true, projects:[] }), macListing = null, mac = 'runtime' } = {}) {
+  const registry = new Set();
+  const calls = [];
+  const audit = [];
+  const requestAgent = async (host, op, envelope) => {
+    calls.push([host, op]);
+    const args = envelope.args ?? {};
+    if (host === 'vps' && op === 'projects_list') return vpsListing(args.search);
+    if (host === 'vps') return { ok:false, error:'project_not_allowed' };
+    if (mac === 'offline') return { ok:false, error:'host_offline' };
+    if (mac === 'probe') return { ok:false, error:'unsupported_op' };
+    if (mac === 'throws') throw new Error('agent gone');
+    if (op === 'project_create') { registry.add(args.name); return { ok:true, project:args.name, enrolled:true }; }
+    if (op === 'projects_list') return macListing ? macListing(args.search)
+      : { ok:true, projects:[...registry].filter(name => name.includes(args.search ?? '')).map(name => ({ name, available:true, kind:'repo' })) };
+    const project = args.project ?? /\/([^#]+)#/.exec(args.issue ?? '')?.[1];
+    if (!registry.has(project)) return { ok:false, error:'project_not_allowed' };
+    if (op === 'workspace_open') return { ok:true, workspace:{ workspace_id:'ws_freshEFGH012345', host:'mac' } };
+    return { ok:true, claim_id:'c1', implicit_workspace:{ workspace_id:'ws_implicitFG1234', project, opened:true } };
+  };
+  return { calls, audit, requestAgent, registry };
+}
+async function liveRouter(t, hosts) {
+  const dir = await mkdtemp(join(tmpdir(), 'mac-host-live-'));
+  t.after(() => rm(dir, { recursive:true, force:true }));
+  return createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent:hosts.requestAgent,
+    audit:event => hosts.audit.push(event) });
+}
+test('after project_create on the Mac, a task_claim with no host reaches the Mac without any catalog snapshot', async t => {
+  const hosts = liveMac();
+  const route = await liveRouter(t, hosts);
+  const session = 'b'.repeat(32);
+  // Before the project exists anywhere, nothing changes: the VPS answers, as before.
+  const before = await route.call('vps','task_claim',{ args:{ issue:'memolabs-dev/freelance-growth#1' }, principal, clientSession:session });
+  assert.equal(before.error, 'project_not_allowed');
+  assert.deepEqual(hosts.calls, [['vps','projects_list'], ['mac','projects_list'], ['vps','task_claim']]);
+  // project_create runs on the Mac; the VPS snapshot is never refreshed in this test.
+  hosts.calls.length = 0;
+  assert.equal((await route.call('vps','project_create',{ args:{ name:'freelance-growth', visibility:'private' }, principal })).ok, true);
+  const claimed = await route.call('vps','task_claim',{ args:{ issue:'memolabs-dev/freelance-growth#1' }, principal, clientSession:session });
+  assert.equal(claimed.ok, true);
+  assert.deepEqual(hosts.calls, [['mac','project_create'], ['vps','projects_list'], ['mac','projects_list'], ['mac','task_claim']]);
+  // The implicit workspace the Mac opened is bound to this conversation like any other.
+  assert.equal(route.bindingsCount(), 1);
+  hosts.calls.length = 0;
+  assert.equal((await route.call('vps','task_next',{ args:{ project:'freelance-growth' }, principal, clientSession:session })).ok, true);
+  assert.deepEqual(hosts.calls, [['mac','task_next']]);
+  assert.deepEqual(hosts.audit.filter(e => e.event === 'project_placed_on_mac_live').map(e => [e.op, e.project, e.principal]),
+    [['task_claim', 'freelance-growth', 'oidc:owner123']]);
+});
+test('workspace_open with no host on a project only the live Mac registers opens on the Mac, annotated', async t => {
+  const hosts = liveMac();
+  hosts.registry.add('freelance-growth');
+  const route = await liveRouter(t, hosts);
+  const out = await route.call('vps','workspace_open',{ args:{ project:'freelance-growth' }, principal });
+  assert.equal(out.ok, true);
+  assert.equal(out.workspace.host, 'mac');
+  assert.deepEqual(out.placement, { host:'mac', inferred:true, reason:'project_registered_on_mac' });
+  assert.deepEqual(hosts.calls, [['vps','projects_list'], ['mac','projects_list'], ['mac','workspace_open']]);
+  assert.equal(route.bindingsCount(), 1);
+});
+test('the live Mac lookup only runs on an empty VPS answer, and any doubt keeps the VPS', async t => {
+  // The VPS registers the project, or refuses to list: the Mac is never asked.
+  for (const vpsListing of [name => ({ ok:true, projects:[{ name, available:true }] }), () => ({ ok:false, error:'forbidden' })]) {
+    const hosts = liveMac({ vpsListing });
+    hosts.registry.add('freelance-growth');
+    const route = await liveRouter(t, hosts);
+    await route.call('vps','task_next',{ args:{ project:'freelance-growth' }, principal });
+    assert.deepEqual(hosts.calls, [['vps','projects_list'], ['vps','task_next']]);
+    assert.deepEqual(hosts.audit, []);
+  }
+  // The Mac cannot answer, or answers something that is not exactly one real row.
+  const doubtful = [
+    { mac:'offline' }, { mac:'probe' }, { mac:'throws' },
+    { macListing: () => ({ ok:false, error:'forbidden' }) },
+    { macListing: () => ({ ok:true }) },
+    { macListing: name => ({ ok:true, projects:[{ name, metadata_only:true, source_host:'mac' }] }) },
+    { macListing: name => ({ ok:true, projects:[{ name, available:true }, { name, available:true }] }) },
+    { macListing: name => ({ ok:true, projects:[{ name:`${name}-other`, available:true }] }) },
+  ];
+  for (const options of doubtful) {
+    const hosts = liveMac(options);
+    hosts.registry.add('freelance-growth');
+    const route = await liveRouter(t, hosts);
+    const out = await route.call('vps','workspace_open',{ args:{ project:'freelance-growth' }, principal });
+    assert.equal(out.placement, undefined, JSON.stringify(options));
+    assert.deepEqual(hosts.calls.at(-1), ['vps','workspace_open'], JSON.stringify(options));
+    assert.equal(route.bindingsCount(), 0);
+    assert.deepEqual(hosts.audit, []);
+  }
+});
+test('without the opt-in the live Mac lookup never happens', async t => {
+  const hosts = liveMac();
+  hosts.registry.add('freelance-growth');
+  const dir = await mkdtemp(join(tmpdir(), 'mac-host-live-off-'));
+  t.after(() => rm(dir, { recursive:true, force:true }));
+  const route = createWorkspaceHostRouter({ stateDir:dir, requestAgent:hosts.requestAgent });
+  await route.call('vps','task_claim',{ args:{ issue:'memolabs-dev/freelance-growth#1' }, principal });
+  assert.deepEqual(hosts.calls, [['vps','task_claim']]);
+});
