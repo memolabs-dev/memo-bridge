@@ -1,0 +1,119 @@
+# Trusted registry for uni/intents/delivery.uni. The contract only names these entries; the
+# commands live here. Every verifier decides by exit code alone (no expect / expect_not).
+# MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 turns a missing memolabs-dev/.github checkout into a failure
+# instead of a skip: a silent observer never looks green. The checkout is found through the
+# environment (MEMO_BRIDGE_GOVERNANCE_ROOT in CI, $MEMOLABS_ROOT/PROJECTS.md locally), never a path
+# written here. In uni 0.9.4 a `*` in `files` matches one whole path segment and `**` several.
+#
+# Why each `run` goes through a temporary file: uni 0.9.4 pipes a verifier's stdout and stderr and
+# reads them only once the process has exited (crates/uni-verify run_shell: wait_timeout, then
+# wait_with_output). A verifier that prints more than the pipe buffer (64 KiB on macOS) blocks on
+# write and is killed at its timeout: `pnpm test` did, observed on 2026-10-19. The wrapper keeps
+# the full output in a file, hands uni its last 2000 bytes (the summary), and exits with the
+# command's own status; if mktemp fails it exits 1, so the verifier still fails closed.
+
+[verifiers."suite.pnpm"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 pnpm test >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  ".agent/**",
+  ".github/**",
+  "bridge/**",
+  "deploy/**",
+  "docs/**",
+  "plugin/**",
+  "scripts/**",
+  "server/**",
+  "standalone/**",
+  "templates/**",
+  "tests/**",
+  ".gitignore",
+  ".mergify.yml",
+  "AGENTS.md",
+  "README.md",
+  "SECURITY.md",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+]
+timeout = 1800
+
+[verifiers."invariant.claim-exclusive"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/claim-race.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  "tests/invariants/claim-race.test.mjs",
+  "tests/invariants/lib/**",
+  "server/**",
+  "bridge/**",
+  "package.json",
+  "pnpm-lock.yaml",
+]
+timeout = 900
+
+[verifiers."invariant.fence-monotonic"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/fence.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  "tests/invariants/fence.test.mjs",
+  "tests/invariants/lib/**",
+  "server/**",
+  "bridge/**",
+  "package.json",
+  "pnpm-lock.yaml",
+]
+timeout = 900
+
+[verifiers."invariant.clock-skew"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/clock-skew.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  "tests/invariants/clock-skew.test.mjs",
+  "tests/invariants/lib/**",
+  "server/**",
+  "bridge/**",
+  "package.json",
+  "pnpm-lock.yaml",
+]
+timeout = 900
+
+[verifiers."invariant.worktree-exclusive"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/worktree-race.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  "tests/invariants/worktree-race.test.mjs",
+  "tests/invariants/lib/**",
+  "server/**",
+  "bridge/**",
+  "package.json",
+  "pnpm-lock.yaml",
+]
+timeout = 900
+
+[verifiers."invariant.lock-exclusive"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node --test tests/invariants/lock-race.test.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  "tests/invariants/lock-race.test.mjs",
+  "tests/invariants/lib/**",
+  "server/**",
+  "bridge/**",
+  "package.json",
+  "pnpm-lock.yaml",
+]
+timeout = 900
+
+[verifiers."invariant.mutants-killed"]
+run = 'o=$(mktemp) || exit 1; MEMO_BRIDGE_REQUIRE_GOVERNANCE=1 node tests/mutations/run.mjs >"$o" 2>&1; s=$?; tail -c 2000 "$o"; rm -f "$o"; exit $s'
+files = [
+  "tests/mutations/**",
+  "tests/invariants/**",
+  "server/**",
+  "bridge/**",
+  "package.json",
+  "pnpm-lock.yaml",
+]
+timeout = 2400
+
+# GitHub Actions OIDC: the only issuer whose token may lift a proof to A3. Keys are pinned beside
+# the registry and never fetched at verification time (copied from uni's
+# examples/identity-github-actions, checked against GitHub's live JWKS on 2026-10-19).
+[identities."https://token.actions.githubusercontent.com"]
+source = "oidc"
+jwks_file = ".uni/identity/github.jwks.json"
+audiences = ["uni-cli"]
+algorithms = ["RS256"]
