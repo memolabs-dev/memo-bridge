@@ -24,14 +24,19 @@ PRs land when **all** of the following hold on the exact head:
 - Target `main`, non-draft, same repository.
 - Author `memo-labs-automation[bot]` or `guillaume-flambard`.
 - Not labeled `hold-merge` or `needs-human-review`.
-- No sensitive path: `.github/`, `.mergify.yml`, `CODEOWNERS`, the root `AGENTS.md`, root
-  environment files (narrowed to the gate itself by the owner on 2026-10-17; `deploy/` and
-  `infra/` land on green CI). Code under `server/`, `bridge/`, `plugin/`, `scripts/`, `tests/` and the manifests lands
-  on green CI like anything else.
-- GitHub Actions `test (22)` and `test (24)` succeeded.
+- No root environment file (`-files ~= ^\.env`).
+- GitHub Actions `test (22)`, `test (24)`, `uni` and `uni-ratchet` succeeded.
 - Serialized queue `memo-labs-autoloop` (`batch_size: 1`, `max_parallel_checks: 1`), squash.
 
-A PR that touches a sensitive path is not merged. Mergify posts no comment on it (checked on
+**Delivery gate (spec 2026-10-19, `1-Projects/home-assurance/2026-10-19-livraison-design.md` in
+the Vault, sections "Check 1", "Check 2" and "Mergify"; runbook `docs/UNI_DELIVERY.md`).** `uni`
+proves the exact head commit against `uni/intents/delivery.uni` at A3, and `uni-ratchet` refuses
+any change that loosens the judge of pull requests. With both required, `.github/`,
+`.mergify.yml`, `CODEOWNERS` and the root `AGENTS.md` are no longer excluded: they land on these
+checks like code. Before the gate (2026-10-17 to the bootstrap PR) the `-files` condition also
+excluded those paths, so the bootstrap PR that wires the gate is merged by the owner, once.
+
+A PR that touches a sensitive path (now: a root `.env` file) is not merged. Mergify posts no comment on it (checked on
 #156): the "Mergify Merge Queue" check of the PR lists the unmet `-files` condition, and the
 daily stuck-PR report (autoloop T-O1) lists it for the owner.
 Labelling such PRs through `pull_request_rules` needs Mergify Workflow Automation, which is not
@@ -64,4 +69,5 @@ Global human-readable rule is recorded in the Vault note `~/Vault/4-Tools/Memo L
 
 - https://docs.mergify.com/merge-protections/auto-merge/
 - https://docs.mergify.com/configuration/conditions/
+- `docs/UNI_DELIVERY.md`: reading a `uni` or `uni-ratchet` refusal, rotating GitHub's OIDC keys
 - https://github.com/memolabs-dev/.github/blob/main/docs/landing-contract.md
