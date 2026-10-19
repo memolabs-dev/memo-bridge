@@ -11,6 +11,8 @@ import { LEDGER_REPO, createGitHubCredentials } from '../integrations/github-app
 
 export const ISSUE_REF_RE = /^([A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38})\/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,7})$/;
 export const OUTCOMES = Object.freeze(['completed', 'blocked', 'failed', 'cancelled']);
+// What task_release may record: `completed` is written by task_complete only.
+export const RELEASE_OUTCOMES = Object.freeze(['blocked', 'failed', 'cancelled']);
 export const LEASE_TTL = Object.freeze({ min: 60, max: 1800, default: 300 });
 const SHA_RE = /^[0-9a-f]{40}$/;
 const CLAIM_RE = /^[0-9a-f]{32}$/;

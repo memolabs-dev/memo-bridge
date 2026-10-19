@@ -57,7 +57,7 @@ test('happy path: claim, heartbeat, checkpoint, release, all through the canonic
   assert.equal(cp.ok, true, JSON.stringify(cp));
   assert.equal(cp.durability, 'unverified');
 
-  const done = await coordinator.taskRelease({ ...held, fence: beat.fence, outcome: 'completed' });
+  const done = await coordinator.taskRelease({ ...held, fence: beat.fence, outcome: 'cancelled' });
   assert.equal(done.ok, true, JSON.stringify(done));
   assert.equal((await coordinator.taskStatus({ issue: DROP })).lease.state, 'released');
   assert.equal((await coordinator.taskStatus({ issue: DROP })).checkpoints.length, 1);
@@ -334,7 +334,7 @@ test('a claim whose outcome was lost is recovered, not orphaned', { skip: skipWi
   assert.equal(claim.ok, true, JSON.stringify(claim));
   assert.equal(claim.recovered, true);
   ctl.lose.clear();
-  const done = await coordinator.taskRelease({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence, outcome: 'completed' });
+  const done = await coordinator.taskRelease({ workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence, outcome: 'cancelled' });
   assert.equal(done.ok, true, JSON.stringify(done));
   assert.equal((await real.status(parseRef(DROP))).receipt.state, 'released');
 });
@@ -393,6 +393,17 @@ test('task_complete releases with outcome completed and keeps the summary with t
     { ok: true, issue: DROP, released: true, outcome: 'completed', summary }, 'repeating reports the recorded completion');
   const ops = (await journal(store, { issue: DROP })).map(e => `${e.op}:${e.outcome}`).reverse();
   assert.deepEqual(ops, ['task_claim:ok', 'task_complete:ok', 'task_complete:ok']);
+});
+
+test('task_release refuses outcome completed: only task_complete writes it', { skip: skipWithoutLedger }, async t => {
+  const { coordinator, ws } = await setup(t);
+  const a = await ws();
+  const claim = await coordinator.taskClaim({ workspace_id: a, issue: DROP });
+  const held = { workspace_id: a, issue: DROP, claim_id: claim.claim_id, fence: claim.fence };
+  assert.deepEqual(await coordinator.taskRelease({ ...held, outcome: 'completed' }),
+    { ok: false, error: 'invalid_input', detail: 'outcome' });
+  assert.equal((await coordinator.taskStatus({ issue: DROP })).lease.state, 'claimed', 'the claim is untouched');
+  assert.equal((await coordinator.taskComplete(held)).outcome, 'completed', 'task_complete still records it');
 });
 
 test('task_complete without summary, and with a dead fence, follows task_release', { skip: skipWithoutLedger }, async t => {

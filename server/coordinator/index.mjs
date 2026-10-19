@@ -29,7 +29,7 @@ import { createLearning, learningThresholds as thresholdsFromEnv } from './learn
 import { CHILD_RULES, DELEGATION_ID_RE, DELEGATION_LIMITS, DELEGATION_REFUSALS, DELEGATION_TTL, callerChild, childState,
   currentFenceFor, endDelegations, endReason, newDelegationId, parseBrief, parseReport, parseScope, pasteSentence as delegationSentence, publicDelegation,
   publicReport, scopesOverlap } from './delegation.mjs';
-import { LEASE_TTL, OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
+import { LEASE_TTL, RELEASE_OUTCOMES, defaultGovernanceRoot, parseIssueRef } from './issue-lease.mjs';
 import { BATCH_ID_RE, BATCH_LABEL_COLOR, BATCH_MAX, BATCH_SCAN, NEXT_ON, TASK_STATES, batchLabel, batchLabelText, claimOrder,
   isClaimable, issueBody, newBatchId, parseTaskBody, pasteSentence, priorityOf, taskState, validateBatchTasks, workerInstructions }
   from './batches.mjs';
@@ -1018,7 +1018,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     },
 
     async taskRelease(args, meta) {
-      if (!OUTCOMES.includes(args.outcome)) return fail('invalid_input', 'outcome');
+      if (!RELEASE_OUTCOMES.includes(args.outcome)) return fail('invalid_input', 'outcome');
       return releaseHeld(args, args.outcome, null, meta);
     },
 
