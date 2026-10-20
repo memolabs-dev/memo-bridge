@@ -7,8 +7,14 @@ const ISSUE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9][0-9]{0,8}$/;
 const WORKTREE = /^wt_[A-Za-z0-9_-]{16}$/;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9_./-]{0,199}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const FIELDS = new Set(['project_id', 'issue_ref', 'worktree_id', 'branch', 'base_sha', 'head_sha', 'pr_number', 'ci_state', 'landing_state']);
+const FIELDS = new Set(['project_id', 'issue_ref', 'worktree_id', 'branch', 'base_sha', 'head_sha', 'pr_number', 'ci_state', 'landing_state', 'deployment_state']);
 const CI = new Set(['unknown', 'pending', 'success', 'failed']);
+const DEPLOYMENT = Object.freeze({
+  unknown: new Set(['unknown', 'pending', 'verified', 'not_required']),
+  pending: new Set(['unknown', 'pending', 'verified', 'not_required']),
+  verified: new Set(['verified', 'not_required']),
+  not_required: new Set(['not_required', 'verified'])
+});
 const LANDING = Object.freeze({
   open: new Set(['open', 'queued', 'blocked', 'landed', 'closed']),
   queued: new Set(['open', 'queued', 'blocked', 'landed', 'closed']),
@@ -32,6 +38,7 @@ function validFields(patch) {
     if (k === 'pr_number') return nullable(v, x => Number.isSafeInteger(x) && x > 0);
     if (k === 'ci_state') return CI.has(v);
     if (k === 'landing_state') return has(LANDING, v);
+    if (k === 'deployment_state') return DEPLOYMENT[v] !== undefined;
     return false;
   });
 }
@@ -70,6 +77,7 @@ export async function recordSourceChange(store, { id, patch, event_id = null, ex
       pr_number: prior?.pr_number ?? null,
       ci_state: prior?.ci_state ?? 'unknown',
       landing_state: prior?.landing_state ?? 'open',
+      deployment_state: prior?.deployment_state ?? 'unknown',
       ...patch,
       source_at: observed_at ?? prior?.source_at ?? null,
       revision: (prior?.revision ?? 0) + 1,
@@ -79,6 +87,7 @@ export async function recordSourceChange(store, { id, patch, event_id = null, ex
     if (prior && !LANDING[prior.landing_state].has(next.landing_state)) return fail('invalid_transition');
     if (prior?.landing_state === 'landed' &&
         (next.head_sha !== prior.head_sha || next.ci_state !== prior.ci_state)) return fail('invalid_transition');
+    if (prior && has(patch, 'deployment_state') && !DEPLOYMENT[prior.deployment_state ?? 'unknown'].has(next.deployment_state)) return fail('invalid_transition');
     const changed = !prior || Object.keys(next).some(k =>
       !['revision', 'updated_at', 'created_at'].includes(k) && next[k] !== prior[k]);
     if (!changed) {
