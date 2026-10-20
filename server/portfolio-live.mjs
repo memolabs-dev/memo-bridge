@@ -14,20 +14,21 @@ export async function livePortfolio({projects,github,allowedProjects=null,limit=
   const repo=resolved.repo;
   let resultIssue, resultPR;
   try{[resultIssue,resultPR]=await Promise.all([
-   github.issues(repo,{state:'open',limit}),github.pullRequests(repo,{state:'open',limit})
+   github.portfolioPages ? github.portfolioPages(repo,{kind:'issues'}) : github.issues(repo,{state:'open',limit}),
+   github.portfolioPages ? github.portfolioPages(repo,{kind:'pulls'}) : github.pullRequests(repo,{state:'open',limit})
   ])}catch{errors.push({project:project.name,repo:repo.full,error:'github_unavailable'});continue}
   if(!resultIssue?.ok||!resultPR?.ok){errors.push({project:project.name,repo:repo.full,error:resultIssue?.error??resultPR?.error??'github_unavailable'});continue}
-  if(resultIssue.count>=limit||resultPR.count>=limit)errors.push({project:project.name,repo:repo.full,error:'possibly_truncated'});
-  for(const i of resultIssue.issues??[]){
+  if(!github.portfolioPages && (resultIssue.count>=limit||resultPR.count>=limit))errors.push({project:project.name,repo:repo.full,error:'possibly_truncated'});
+  for(const i of (resultIssue.items??resultIssue.issues)??[]){
    const labels=i.labels??[];
    const priority=['p0','p1','p2'].find(p=>labels.includes('priority:'+p))??null;
    issues.push({repo:repo.full,number:i.number,title:i.title,url:i.url,state:i.state,priority,
     ready:labels.includes('agent:ready'),blocked:labels.includes('blocked')||labels.includes('status:blocked'),
     claimed:labels.includes('agent:claimed'),created_at:i.created_at??i.updated_at,labels});
   }
-  for(const p of resultPR.pull_requests??[])prs.push({repo:repo.full,number:p.number,title:p.title,url:p.url,
+  for(const p of (resultPR.items??resultPR.pull_requests)??[])prs.push({repo:repo.full,number:p.number,title:p.title,url:p.url,
    state:p.state,draft:p.draft,created_at:p.updated_at,merged_at:null});
-  observed.push({project:project.name,repo:repo.full,issue_count:resultIssue.count,pr_count:resultPR.count});
+  observed.push({project:project.name,repo:repo.full,issue_count:(resultIssue.items??resultIssue.issues??[]).length,pr_count:(resultPR.items??resultPR.pull_requests??[]).length});
  }
  return {...rankPortfolio({issues,prs,errors}),observed_projects:observed,
   unobserved_projects:candidates.length-observed.length,scope:'registered_available_repositories_only'};
