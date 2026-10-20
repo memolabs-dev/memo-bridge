@@ -1,0 +1,10 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {planFromTaskList,claimRecommended} from '../server/portfolio-scheduler-live.mjs';
+const now=Date.parse('2026-10-20T09:00:00Z');
+const task=(issue,project,priority)=>({issue,project,priority,labels:['agent:ready'],created_at:'2026-10-18T08:00:00Z',title:issue});
+const data={ok:true,observed_at:'2026-10-20T08:50:00Z',tasks:[task('org/a#1','a','p0'),task('org/b#2','b','p1')]};
+test('adapts current tasks_list to ranked work, avoids already claimed tasks',()=>{const r=planFromTaskList(data,{activeIssues:['org/a#1']},{now});assert.equal(r.next.issue,'org/b#2');assert.equal(r.plan.requiresLiveClaim,true)});
+test('cannot assign work on stale task observation',()=>{const r=planFromTaskList({...data,observed_at:'2026-10-19T08:00:00Z'},{},{now});assert.equal(r.next,null);assert.equal(r.complete,false)});
+test('live ledger is final authority when task_next returns another issue',async()=>{const r=planFromTaskList(data,{},{now});const c=await claimRecommended(r,{taskNext:async()=>({ok:true,issue:'org/a#9'})});assert.equal(c.same_as_recommendation,false)});
+test('claim permission denial never invokes ledger',async()=>{let invoked=false;const r=planFromTaskList(data,{},{now});const c=await claimRecommended(r,{projectAllowed:()=>false,taskNext:async()=>{invoked=true;return{ok:true}}});assert.equal(c.error,'project_not_allowed');assert.equal(invoked,false)});
+test('missing observations do not imply work is current',()=>{const r=planFromTaskList({ok:true,tasks:data.tasks},{},{now});assert.equal(r.next,null)});
