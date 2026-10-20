@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {recommendWork,jobPlanRecommendation} from '../server/portfolio-scheduler.mjs';
+const now=Date.parse('2026-10-20T08:00:00Z');
+const t=(issue,priority,project='memo-bridge')=>({issue,priority,project,ready:true,updated_at:'2026-10-20T07:00:00Z',created_at:'2026-10-18T00:00:00Z'});
+test('global p0 first; already claimed or PR-in-progress skipped',()=>{const r=recommendWork([t('a', 'p0'),t('b','p0'),t('c','p1')],{now,activeIssues:['a'],openPrIssues:['b']});assert.equal(r.next.issue,'c');assert.equal(r.deferred.length,2)});
+test('stale data prevents claim recommendations',()=>{const r=recommendWork([t('a','p0')],{now:now+86400000});assert.equal(r.next,null);assert.equal(r.complete,false)});
+test('capacity balances distinct projects first',()=>{const r=recommendWork([t('a','p0'),t('b','p1'),t('c','p1','drop')],{now});assert.deepEqual(jobPlanRecommendation(r,2).tasks.map(x=>x.issue),['a','c'])});
+test('no agent starts from unprioritized or blocked issue',()=>{const r=recommendWork([t('a',null),t('b','p0')],{now,blockedIssues:['b']});assert.equal(r.next,null)});
+test('never claims automatically',()=>{const r=jobPlanRecommendation({ready:[t('a','p0')]});assert.equal(r.requiresLiveClaim,true)});
