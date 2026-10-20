@@ -16,6 +16,7 @@ import { closeSync, openSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { runGit } from './worktrees.mjs';
+import { classifyWorktree, lifecycleDecision } from './workspace-lifecycle.mjs';
 
 export const DEFAULT_GRACE_MS = 6 * 60 * 60_000;
 export const LOCK_STALE_MS = 2 * 60 * 60_000;
@@ -118,7 +119,7 @@ async function archive(wt, archiveDir, slug, env) {
 
 // Reap one repository. `deps.prForBranch(slug, branch)` returns { number, state, headRefOid } or null.
 export async function reapRepository(repoPath, deps, options = {}) {
-  const { apply = false, now = Date.now(), graceMs = DEFAULT_GRACE_MS, archiveDir, env = process.env } = options;
+  const { apply = false, now = Date.now(), graceMs = DEFAULT_GRACE_MS, archiveDir, env = process.env, policy } = options;
   const report = [];
   const remote = await runGit(repoPath, ['remote', 'get-url', 'origin'], { env, readOnly: true });
   const slug = remote.code === 0 ? githubSlug(out(remote)) : null;
@@ -130,7 +131,12 @@ export async function reapRepository(repoPath, deps, options = {}) {
   let removedAny = false;
   for (const wt of worktrees) {
     const entry = { repo: slug, path: wt.path, branch: wt.branch };
-    if (wt.prunable) { report.push({ ...entry, action: 'prune', reason: 'missing_directory' }); removedAny = true; continue; }
+    if (wt.prunable) {
+      const mode = policy === undefined ? 'ephemeral' : classifyWorktree({ project: slug, branch: wt.branch, policy }).mode;
+      if (mode !== 'ephemeral') report.push({ ...entry, action: 'keep', reason: 'prunable_requires_explicit_ephemeral_policy', mode });
+      else { report.push({ ...entry, action: 'prune', reason: 'missing_directory', mode }); removedAny = true; }
+      continue;
+    }
     const status = await runGit(wt.path, ['status', '--porcelain'], { env, readOnly: true });
     if (status.code !== 0) {
       report.push({ ...entry, action: 'keep', reason: (await brokenGitdir(wt.path)) ? 'broken_gitdir' : 'status_failed' });
@@ -144,8 +150,9 @@ export async function reapRepository(repoPath, deps, options = {}) {
       inUse: [...cwds].some(cwd => inside(resolve(wt.path), resolve(cwd))),
       newest: await newestMtime(wt.path), now, graceMs
     });
-    const row = { ...entry, ...decision, ...(pr ? { pr: pr.number } : {}) };
-    if (decision.action === 'keep' || !apply) { report.push(row); continue; }
+    const guarded = policy === undefined ? decision : lifecycleDecision({ classification: classifyWorktree({ project: slug, branch: wt.branch, policy }), cleanup: decision });
+    const row = { ...entry, ...guarded, ...(pr ? { pr: pr.number } : {}) };
+    if (guarded.action === 'keep' || !apply) { report.push(row); continue; }
     // Re-check HEAD right before acting: the state may have moved since the decision.
     const head = await runGit(wt.path, ['rev-parse', 'HEAD'], { env, readOnly: true });
     if (out(head) !== wt.head) { report.push({ ...row, action: 'keep', reason: 'head_moved' }); continue; }
@@ -166,7 +173,7 @@ export async function reapRepository(repoPath, deps, options = {}) {
     }
     report.push({ ...row, action: dirty ? 'archived_and_removed' : 'removed' });
   }
-  if (apply && removedAny) await runGit(repoPath, ['worktree', 'prune'], { env });
+  if (apply && removedAny && policy === undefined) await runGit(repoPath, ['worktree', 'prune'], { env });
   return report;
 }
 
