@@ -276,6 +276,28 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
         mergeable_checked: Math.min(LIMITS.mergeableLookups, pulls.filter(p => p.state === 'open').length) };
     },
 
+    // Exhaustive bounded listing for portfolio only. Fail closed on page caps and read errors.
+    async portfolioPages(repo, { kind, state = 'open', maxPages = 20 } = {}) {
+      if (!['issues', 'pulls'].includes(kind) || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 50) {
+        return fail('invalid_input');
+      }
+      const entries = [];
+      for (let page = 1; page <= maxPages; page++) {
+        const res = await read(repo, `repos/${repo.full}/${kind}`, {
+          state, sort: 'updated', direction: 'desc', per_page: 100, page
+        });
+        if (!res.ok) return { ...res, page };
+        if (!Array.isArray(res.data)) return fail('github_unavailable', 'unexpected response');
+        entries.push(...res.data);
+        if (res.data.length < 100) {
+          return { ok: true, items: kind === 'issues'
+            ? entries.filter(i => !i.pull_request).map(compactIssue)
+            : entries.map(compactPull), pages: page, complete: true };
+        }
+      }
+      return { ok: false, error: 'page_limit_reached', pages: maxPages, complete: false };
+    },
+
     async workflowRuns(repo, { branch, limit = LIMITS.list.default } = {}) {
       const res = await read(repo, `repos/${repo.full}/actions/runs`, { branch, per_page: limit, page: 1 });
       if (!res.ok) return res;
