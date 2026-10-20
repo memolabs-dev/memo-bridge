@@ -12,6 +12,8 @@
 //   principal the branch head on GitHub must be a commit worktree_push sent from this worktree;
 // - writes check the D8 session binding; github_create_pr takes client_request_id.
 import { join } from 'node:path';
+import { listProjects } from '../catalog.mjs';
+import { livePortfolio } from '../portfolio-live.mjs';
 import { z } from 'zod/v4';
 import { workerFor } from '../coordinator/index.mjs';
 import { ownsWorkspace } from '../coordinator/policy.mjs';
@@ -24,7 +26,7 @@ import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRef
   from '../../bridge/write-gate.mjs';
 
 export const GITHUB_TOOLS = Object.freeze(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
-  'github_create_pr']);
+  'github_create_pr', 'portfolio_overview']);
 
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -112,7 +114,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     : Number.isInteger(value) && value >= LIMITS.list.min && value <= LIMITS.list.max ? value : undefined);
 
   server.registerTool('github_issues', {
-    description: 'Use this when the owner asks about the Issues of a repository («les issues ouvertes de cuesheet»): number, title, state, labels, author, url, newest first. For claimable work prefer tasks_list. Read-only.',
+    description: 'Use this to list GitHub Issues for a repo. Use tasks_list for claimable work.',
     inputSchema: z.object({
       repo: repoArg,
       state: z.enum(['open', 'closed', 'all']).optional().describe('"open" (default), "closed" or "all".'),
@@ -131,7 +133,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_pull_requests', {
-    description: 'Use this when the owner asks about pull requests («mes PR ouvertes sur stasis», «la PR est mergée ?»): number, title, state, draft, head, url, mergeable. Read-only.',
+    description: 'Use this to list GitHub PRs, drafts and merge status.',
     inputSchema: z.object({
       repo: repoArg,
       state: z.enum(['open', 'closed', 'all']).optional().describe('"open" (default), "closed" or "all".'),
@@ -147,7 +149,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_workflows', {
-    description: 'Use this when the owner asks whether CI passed on a repository or branch («la CI est verte ?»): recent GitHub Actions runs with status and conclusion. Read-only.',
+    description: 'Use this to list GitHub Actions runs for a repo or branch.',
     inputSchema: z.object({
       repo: repoArg,
       branch: z.string().max(200).optional().describe('e.g. "main".'),
@@ -162,7 +164,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_checks', {
-    description: 'Use this to check the CI of one branch or commit, e.g. the branch of the PR you opened: check runs and combined status, pending and failing summary. Read-only.',
+    description: 'Use this to check CI for a commit or branch.',
     inputSchema: z.object({
       repo: repoArg,
       ref: z.string().max(200).describe('Branch or full SHA, e.g. "agent/12-a1b2".')
@@ -174,8 +176,35 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     return github.checks(repo, ref);
   }));
 
+  server.registerTool('portfolio_overview', {
+    description: 'Use this for global Issue and PR priorities. Scoped, read-only.',
+    inputSchema: z.object({limit: limitArg}),
+    annotations: read
+  }, async (args = {}) => {
+    const op='portfolio_overview';
+    const rt=getRuntime();
+    if (!rt.authorize(op)) {
+      await rt.audit(op,'denied','forbidden');
+      return result(fail('forbidden'));
+    }
+    try {
+      const listed=await listProjects({},rt.catalogOptions??{});
+      const remote=isRemotePrincipal(rt.principal);
+      const policy=remotePolicyNow();
+      if(remote && !policy?.configured) return result(fail('project_not_allowed'));
+      const allowed=remote ? (listed.projects??[]).filter(p=>
+        !remoteProjectRefusal(rt.principal,p.name,policy,{host:rt.host})).map(p=>p.name) : null;
+      const limit=limitOf(args.limit);
+      if(limit===undefined)return result(fail('invalid_input','limit'));
+      const snapshot=await livePortfolio({projects:listed.projects,github:githubOf(rt),allowedProjects:allowed,limit});
+      return result({ok:true,...snapshot});
+    } catch {
+      return result(fail('portfolio_unavailable'));
+    }
+  });
+
   server.registerTool('github_create_pr', {
-    description: 'Use this after worktree_push to open the pull request into the default branch; adds "Closes #<n>" unless close_issue is false. Returns the open PR if one exists. Never merges: Mergify lands green PRs, gate files wait for the owner. Then task_complete.',
+    description: 'Use this after worktree_push to open a PR, never merge. Use close_issue false for partial work.',
     inputSchema: z.object({
       workspace_id: z.string().max(40).describe('Workspace id returned by workspace_open (ws_…).'),
       worktree_id: z.string().max(60).describe('wt_... id of the pushed worktree.'),

@@ -45,7 +45,7 @@ export const REMOTE_TOOLS_READ = Object.freeze([
   'worktrees_list', 'worktree_status', 'worktree_list_files', 'worktree_read_file', 'worktree_diff',
   'jobs_list', 'job_status', 'job_events', 'job_results',
   'host_capabilities',
-  'github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
+  'github_issues', 'github_pull_requests', 'github_workflows', 'github_checks', 'portfolio_overview',
   'audit_events', 'audit_operation',
   'source_changes_list', 'source_change_status', 'source_change_history',
   'memory_search', 'memory_get', 'memory_list'

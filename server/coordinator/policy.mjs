@@ -78,6 +78,7 @@ export const OPERATION_CAPABILITY = Object.freeze({
   github_pull_requests: CAPABILITIES.READ,
   github_workflows: CAPABILITIES.READ,
   github_checks: CAPABILITIES.READ,
+  portfolio_overview: CAPABILITIES.READ,
   github_create_pr: CAPABILITIES.GITHUB_WRITE,
   // Audit
   audit_events: CAPABILITIES.READ,
