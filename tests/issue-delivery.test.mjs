@@ -1,0 +1,17 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {assessIssueDelivery,lifecycleTransition} from '../server/issue-delivery.mjs';
+const issue={number:12,state:'open',ready:true};
+const open={number:45,linked_issues:[12],state:'open'};
+const merged={...open,state:'closed',merged_at:'2026-10-20T01:00:00Z',merge_commit_sha:'abc',html_url:'https://github.com/acme/test/pull/45'};
+const proof={verified:true,merge_commit_sha:'abc',receipt_ref:'release:12',environment:'production'};
+const acceptance={passed:true,evidence_ref:'test:123'};
+test('open PR stays open',()=>assert.equal(assessIssueDelivery({issue,prs:[open]}).stage,'pr_open'));
+test('merged is not deployed',()=>{const r=assessIssueDelivery({issue,prs:[merged]});assert.equal(r.stage,'merged');assert.equal(r.closeAllowed,false)});
+test('CI does not count as deployment',()=>assert.equal(assessIssueDelivery({issue,prs:[{...merged,ci:'success'}]}).closeAllowed,false));
+test('verified production plus acceptance supports closure',()=>{const r=assessIssueDelivery({issue,prs:[merged],deployment:proof,acceptance});assert.equal(r.stage,'deployed_verified');assert.equal(r.closeAllowed,true)});
+test('wrong SHA or missing receipt blocks closure',()=>assert.equal(assessIssueDelivery({issue,prs:[merged],deployment:{...proof,merge_commit_sha:'other'},acceptance}).closeAllowed,false));
+test('partial PR does not close issue',()=>assert.equal(assessIssueDelivery({issue,prs:[{...merged,partial:true}],deployment:proof,acceptance}).closeAllowed,false));
+test('explicit non-deploy policy requires acceptance',()=>{const policy={type:'no_deployment',verified:true,source_ref:'policy:v1'};assert.equal(assessIssueDelivery({issue,prs:[merged],policy,acceptance}).closeAllowed,true);assert.equal(assessIssueDelivery({issue,prs:[merged],policy}).closeAllowed,false)});
+test('closed issue does not invent deployment',()=>assert.equal(assessIssueDelivery({issue:{...issue,state:'closed'},prs:[merged]}).reason,'closed_observed_not_deployment_proof'));
+test('reversions and jumps need review',()=>{assert.equal(lifecycleTransition('merged','ready').allowed,false);assert.equal(lifecycleTransition('ready','done').allowed,false)});
