@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { matchProjects, creationGate } from '../server/project-capabilities.mjs';
+const projects=[{name:'alpha',status:'active',available:true},{name:'beta',status:'lab',available:false,metadata_only:true}];
+const now=Date.parse('2026-10-20T08:00:00Z');
+const verified=[{project:'alpha',purpose:'clinical reference validator',capabilities:['clinical reference validation'],verified_at:'2026-10-19T08:00:00Z',evidence:{kind:'repository',ref:'sha:abc'}}];
+test('reuse verified project first',()=>{const rows=matchProjects(projects,verified,'clinical reference validation',{now});assert.equal(rows[0].project,'alpha');assert.equal(creationGate(rows).decision,'inspect_existing_first')});
+test('metadata only is never promoted to verified capabilities',()=>{const rows=matchProjects(projects,[{project:'beta',purpose:'clinical reference validation',capabilities:['clinical reference validation'],verified_at:'2026-10-19T08:00:00Z'}],'clinical reference validation',{now});assert.equal(rows.find(x=>x.project==='beta').state,'unverified');assert.notEqual(creationGate(rows).decision,'inspect_existing_first')});
+test('stale evidence is not considered current',()=>{const rows=matchProjects(projects,verified,'clinical reference validation',{now:now+20*86400000});assert.equal(rows[0].state,'stale');assert.equal(creationGate(rows).decision,'verify_candidates')});
+test('empty match never authorizes a new project',()=>assert.equal(creationGate(matchProjects(projects,[],'brand new thing',{now})).decision,'verify_registry_and_source_engine'));
