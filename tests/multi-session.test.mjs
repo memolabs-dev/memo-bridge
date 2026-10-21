@@ -19,7 +19,7 @@ import { createHub } from '../bridge/hub.mjs';
 import { createAgent } from '../bridge/agent.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
 import { REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
-import { MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, STOP_CODES } from '../server/instructions.mjs';
+import { MERGE_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, STOP_CODES } from '../server/instructions.mjs';
 import { REMOTE_TOOLS_READ, REMOTE_OPERATOR_TOOLS } from '../server/registry.mjs';
 import { OWNER, coordinatorOn, journal, tempStateDir } from './helpers/coordinator-fixture.mjs';
 import { memoryLedger } from './helpers/memory-ledger.mjs';
@@ -461,6 +461,24 @@ test('host default: vps when the Mac is not connected; root, script and dangerou
 
 // ---------------------------------------------------------------------------------------------
 // Instructions (D-MS9)
+
+// Owner decision 2026-10-21 (~/memolabs/AGENTS.md rule 9): the agent lands its own PR; Mergify
+// keeps the repositories where it merges on its own. No merge tool is added to the server.
+test('MS-R12: the instructions tell the agent to land its own PR by the merge rule, never to leave it unmerged', () => {
+  for (const text of [MULTI_SESSION_INSTRUCTIONS, REMOTE_INSTRUCTIONS]) {
+    assert.ok(text.includes(MERGE_INSTRUCTIONS));
+    assert.doesNotMatch(text, /Mergify lands green PRs: never merge/);
+  }
+  for (const part of ['your own PR', 'gh pr merge <n> --match-head-commit <sha>', 'never --admin', 'required CI green',
+    'exact head SHA', 'draft', 'hold-merge', 'no conflict', 'T2/T3', 'independent review', 'memo-bridge, cuesheet', 'let it'])
+    assert.ok(MERGE_INSTRUCTIONS.includes(part), part);
+  assert.equal(/[\u2013\u2014]/.test(MERGE_INSTRUCTIONS), false, 'no dashes');
+  const stdio = readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8');
+  assert.match(stdio, /you land your own PR yourself/);
+  const skill = readFileSync(new URL('../plugin/skills/memo-bridge-operations/SKILL.md', import.meta.url), 'utf8');
+  for (const part of ['--match-head-commit', 'hold-merge', '`--admin`', 'memo-bridge, cuesheet']) assert.ok(skill.includes(part), `skill: ${part}`);
+  assert.equal(/landing contract merges when CI is green/.test(skill), false);
+});
 
 test('MS-R11: the instructions, the skill and the docs carry the start sequence and the stop codes', () => {
   const rules = ['workspace_open', 'sessions_overview', 'task_next', 'task_claim', 'operator_lock', 'operator_unlock', 'global',

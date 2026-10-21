@@ -5,6 +5,16 @@
 // what to do so that it never has to discover them through refusals.
 export const STOP_CODES = Object.freeze(['stale_lease', 'locked_by_other_session', 'workspace_other_session', 'session_required']);
 
+// Owner decision 2026-10-21 (~/memolabs/AGENTS.md rule 9, Vault 4-Tools/Memo Labs Automatic
+// Landing.md): he never merges, so a PR left for him stays blocked. The agent lands its own PR.
+// Memo Bridge gains no merge tool: the merge goes through gh, outside these tools.
+export const MERGE_INSTRUCTIONS = 'Land your own PR, never another session\'s. Where Mergify already merges on its own ' +
+  '(memo-bridge, cuesheet), let it, and merge yourself only a PR it sets aside. Otherwise merge it yourself with ' +
+  '`gh pr merge <n> --match-head-commit <sha>` and the repository\'s merge method, never --admin, once all of these hold on ' +
+  'that exact head SHA: required CI green, neither draft nor labelled hold-merge, no conflict, and for a T2/T3 change ' +
+  '(infra, deployment, auth, secrets, migrations, CI) an independent review done and its blocking points fixed. Merging is ' +
+  'not deploying: deployment follows the project\'s own rules.';
+
 // Rule (0), owner 2026-10-14 21:37 ("il doit comprendre mon intention", "toujours comprendre avant"),
 // written down earlier in his Vault: 4-Tools/memory/stay-on-the-named-project.md (a named project
 // bounds the session), feedback-holistic-before-repo.md (understand who owns what before building),
@@ -15,7 +25,7 @@ export const MULTI_SESSION_INSTRUCTIONS = 'The owner talks to you as if you sat 
   'only when two readings lead to really different work; never widen the scope beyond the project he named. Code work is ' +
   'one chain: an Issue he names, task_claim; a change with no Issue, batch_create one task then task_claim it; "the next ' +
   'task", task_next; then worktree_create, read and write files, jobs_submit test until green, worktree_commit, ' +
-  'worktree_push, github_create_pr, task_complete. Mergify lands green PRs: never merge. Other conversations of the owner work at the same time ' +
+  'worktree_push, github_create_pr, task_complete. ' + MERGE_INSTRUCTIONS + ' Other conversations of the owner work at the same time ' +
   '(sessions_overview): never touch their task, branch, worktree or lock. An operator call locks what it touches for that ' +
   'call; take operator_lock (global for root calls and scripts) only for a long multi-step change, then operator_unlock. ' +
   `Stop and tell the owner on ${STOP_CODES.join(', ')}: never retry another way. A refusal with next_step says the one thing to do.`;

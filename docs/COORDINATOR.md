@@ -11,7 +11,7 @@ It follows the ownership decided on 2026-10-13 (Vault `1-Projects/memo-labs-os.m
 | Which session works, under which identity | this module | workspaces; the worker identity is derived by the server |
 | Proof that work can be resumed elsewhere | this module | Git-verified checkpoints |
 | Who did what | this module writes the journal; `audit_events` and `audit_operation` (`server/tools/audit-tools.mjs`) read it | append-only audit journal |
-| Merge | `memolabs-dev/.github` landing contract | none: agents never merge |
+| Merge | Mergify where it merges on its own (memo-bridge, cuesheet); elsewhere the agent, with `gh pr merge <n> --match-head-commit <sha>` once required CI is green on that SHA, no draft, no `hold-merge`, no conflict, and an independent review for T2/T3 (owner decision 2026-10-21) | none: no merge tool; `MERGE_INSTRUCTIONS` tells agents the rule |
 
 The Mac runner that does the work of a claimed task (worktrees, files, jobs, push, pull requests) is described in `docs/RUNNER.md`.
 

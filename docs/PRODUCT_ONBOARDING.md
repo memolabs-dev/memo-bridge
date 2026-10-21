@@ -10,7 +10,7 @@ A green CI result on a PR is **not** proof that an agent may run jobs or merge t
 3. **VPS runner local registry** — a separately reviewed, local checkout and canonical registry entry are needed before `workspace_open`, `worktree_create` or `jobs_submit` can operate on a new project. Update through the existing lab-infra deployment process, not by hand-editing production files.
 4. **Lease allowlist** — `PUBLIC_ALLOWLIST` in `memolabs-dev/.github/scripts/issue_preflight.py` is maintained under a separate PR. Exact origin `memolabs-dev/<name>` and allowlist membership are prerequisites for claiming tasks.
 5. **GitHub App** — check that the `memo-labs-automation` GitHub App installation explicitly includes both repositories and has minimally scoped contents/PR permissions. A personal CLI token working on the Mac does not prove App access on the VPS. Do not print tokens.
-6. **Landing contract** — only `memo-labs/landing` may merge a PR after verifying its **exact HEAD SHA**, required checks, review policy, branch protections and absence of `hold-merge`. `github_create_pr` and this onboarding script never merge.
+6. **Landing contract** — a PR merges only after its **exact HEAD SHA**, required checks, review policy, branch protections and absence of `hold-merge` are verified: by Mergify once it is verified on the repository, otherwise by the agent that opened it (`gh pr merge <n> --match-head-commit <sha>`, never `--admin`, owner decision 2026-10-21). `github_create_pr` and this onboarding script never merge.
 
 ## Read-only preflight
 
