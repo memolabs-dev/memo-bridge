@@ -176,7 +176,7 @@ export function publicJob(j) {
     ...(j.release_on_finish ? { release_on_finish: true } : {})
   };
 }
-function publicEvent(e) {
+export function publicEvent(e) {
   return { seq: e.seq, at: iso(e.at), kind: e.kind, detail: parseDetail(e.detail) };
 }
 
@@ -243,6 +243,9 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
   const queueCap = maxQueue ?? exec.maxQueue ?? MAX_QUEUE;
   const limit = maxJobs ?? (exec.queueing ? 1 : maxJobsFromEnv(env));
   const reconcile = (repo, job, at) => reconcileJob(repo, job, at, { executor: exec });
+  // A read-only runtime (#252) never reconciles: it reads the status as recorded, and
+  // reconciliation stays with writers and the runner (docs/READER_CONTRACT.md).
+  const reconciling = rt.readOnly !== true;
 
   async function denied(op, ids = {}) {
     await rt.audit(op, 'denied', 'forbidden', ids);
@@ -267,7 +270,7 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
   const requestIds = ctx => { const id = requestMeta(ctx?.meta).request_id; return id ? { request_id: id } : {}; };
 
   // Load a job and check that the caller's principal owns its workspace.
-  async function ownedJob(op, jobId, { reconcile: refresh = true } = {}) {
+  async function ownedJob(op, jobId, { reconcile: refresh = reconciling } = {}) {
     if (!JOB_ID_RE.test(jobId ?? '')) return { error: fail('invalid_input', 'job_id') };
     const found = await (refresh ? write : read)((repo, at) => {
       const job = repo.getJob(jobId);
@@ -503,11 +506,11 @@ export function createJobService(rt, { runnerPath = DEFAULT_RUNNER_PATH, nodePat
         if (!ownsWorkspace(rt.principal, workspace)) return denied(op, { workspace_id: args.workspace_id });
         workspaceIds = [workspace.id];
       }
-      const jobs = await write((repo, at) => {
+      const jobs = await (reconciling ? write : read)((repo, at) => {
         workspaceIds ??= repo.listWorkspaces({ principal: rt.principal.id, limit: MAX_LIST }).map(w => w.id);
         // Reconcile first, then filter: a job read as running may in fact be interrupted.
         return workspaceIds.flatMap(id => repo.listJobs({ workspace_id: id, limit: MAX_LIST }))
-          .map(job => reconcile(repo, job, at))
+          .map(job => (reconciling ? reconcile(repo, job, at) : job))
           .filter(job => !args.status || job.status === args.status)
           .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1))
           .slice(0, max);

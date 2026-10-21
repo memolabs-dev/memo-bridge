@@ -77,8 +77,10 @@ const AUDIT_TOOLS = ['audit_events', 'audit_operation'];
 const MEMORY_TOOLS = ['memory_save', 'memory_search', 'memory_get', 'memory_list'];
 const SOURCE_TOOLS = ['source_changes_list', 'source_change_status', 'source_change_history', 'project_context', 'source_reconcile'];
 const PROJECT_TOOLS = ['project_create'];
+// Reader contract v1 (#252, docs/READER_CONTRACT.md), stdio only.
+const READER_TOOLS = ['reader_activity', 'reader_job_events'];
 const EXPECTED = [...BASE_TOOLS, ...OBSERVER_TOOLS, ...COORDINATOR_TOOLS, ...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS,
-  ...GITHUB_TOOLS, ...AUDIT_TOOLS, ...MEMORY_TOOLS, ...SOURCE_TOOLS, ...PROJECT_TOOLS].sort();
+  ...GITHUB_TOOLS, ...AUDIT_TOOLS, ...MEMORY_TOOLS, ...SOURCE_TOOLS, ...PROJECT_TOOLS, ...READER_TOOLS].sort();
 
 const client = new Client({ name: 'memo-bridge-smoke', version: '0.2.0' });
 const transport = new StdioClientTransport({

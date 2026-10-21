@@ -34,7 +34,7 @@ Phase 3 adds a Mac runner (`docs/RUNNER.md`). It runs over the local stdio trans
 | `runner:execute` | Run the `test`, `build` or `lint` recipe the repository itself declares, in one of its worktrees; cancel such a job. | `jobs_submit`, `job_cancel` |
 | `github:write` | Open a pull request from a pushed worktree branch. | `github_create_pr` |
 
-The local owner principal (`local:<OS user>`) holds all of them. Reads of worktrees, files, jobs, hosts, GitHub and the journal need `coordinator:read`.
+The local owner principal (`local:<OS user>`) holds all of them. A stdio process started with `--read-only` (or `MEMO_BRIDGE_READ_ONLY`) holds none of them: it runs as `reader:<OS user>` with `coordinator:read` and `coordinator:audit`, opens the store with `SQLITE_OPEN_READONLY`, refuses every write tool with `read_only` and journals nothing (`docs/READER_CONTRACT.md`). Reads of worktrees, files, jobs, hosts, GitHub and the journal need `coordinator:read`.
 
 What the file and Git tools never do (these guarantees hold for the tools themselves; jobs are covered below):
 - **No shell.** (Development tools. The operator tools differ: `operator_run` takes an argv and never a shell line, and only `operator_script` at T3 runs a shell, through a root helper, see below.) Every process Memo Bridge starts is started with `execFile`/`spawn` and a fixed argument array. The model chooses a recipe name, never a command; the command comes from the repository's manifests (`server/runners/recipes.mjs`).

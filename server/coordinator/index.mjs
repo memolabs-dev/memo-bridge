@@ -337,7 +337,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   privatePolicyFile = process.env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE,
   searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
   remotePolicy: remotePolicyOption = () => remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
-  learningThresholds = thresholdsFromEnv() }) {
+  learningThresholds = thresholdsFromEnv(), readOnly = false }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   // A function (the runtime's, rereading remote.json when it changes, #216) or a fixed policy (tests).
   const currentRemotePolicy = typeof remotePolicyOption === 'function' ? remotePolicyOption : () => remotePolicyOption;
@@ -360,15 +360,18 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     op, outcome, code: code ?? null,
     via: principalVia, client_type: principalClientType, request_id: meta.request_id ?? null
   });
-  // Writes always journal their outcome; reads journal only refusals.
+  // Writes always journal their outcome; reads journal only refusals. A read-only coordinator
+  // (#252) journals nothing: its store refuses every write.
   const journal = (op, result, ids, meta = {}) => {
+    if (readOnly) return Promise.resolve();
     const failed = result?.ok === false;
     if (!WRITES.has(op) && !(failed && DENIED.has(result.error))) return Promise.resolve();
     const outcome = failed ? (DENIED.has(result.error) ? 'denied' : 'error') : 'ok';
     return store.transaction(repo => audit(repo, op, outcome, failed ? result.error : null, ids, meta)).catch(() => {});
   };
   // One extra journal row (session checks, rebinds); never throws.
-  const note = (op, outcome, code, ids, meta) => store.transaction(repo => audit(repo, op, outcome, code, ids, meta)).catch(() => {});
+  const note = (op, outcome, code, ids, meta) => (readOnly ? Promise.resolve()
+    : store.transaction(repo => audit(repo, op, outcome, code, ids, meta)).catch(() => {}));
   // GitHub Projects view (server/integrations/project-sync.mjs): fire and forget, never
   // awaited, so it can neither fail nor slow an operation. A failure is one journal row,
   // project_sync_failed with a short code.
@@ -1617,6 +1620,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   // Learning review bookkeeping (#38), called by server/tools/learning-hook.mjs after a tool call:
   // not a tool, never authorizes anything, never throws. Returns the block to add, or null.
   api.learningTick = async (info = {}, rawMeta = null) => {
+    if (readOnly) return null;
     try { return await learning.tick(info ?? {}, requestMeta(rawMeta)); } catch { return null; }
   };
 

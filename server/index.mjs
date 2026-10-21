@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod/v4';
 import { collectHost, listHosts } from './probe.mjs';
 import { listProjects, projectInfo, projectGitStatus, auditProjectRegistry } from './catalog.mjs';
-import { CAPABILITIES } from './coordinator/policy.mjs';
+import { CAPABILITIES, readOnlyRequested } from './coordinator/policy.mjs';
 import { getRuntime } from './runtime.mjs';
 import { runnerInfo } from './runners/hosts.mjs';
 import { sandboxMode } from './runners/sandbox.mjs';
@@ -21,6 +21,8 @@ import { SOURCE_TOOLS, registerSourceTools } from './tools/source-tools.mjs';
 import { CONTEXT_TOOLS, registerContextTools } from './tools/context-tools.mjs';
 import { SOURCE_RECONCILE_TOOLS, registerSourceReconcileTools } from './tools/source-reconcile-tools.mjs';
 import { PROJECT_TOOLS, registerProjectTools } from './tools/project-tools.mjs';
+import { READER_CONTRACT, READER_TOOLS, registerReaderTools } from './tools/reader-tools.mjs';
+import { withReadOnly } from './tools/read-only.mjs';
 import { withLearning } from './tools/learning-hook.mjs';
 import { withImplicitWorkspace } from './tools/implicit-workspace.mjs';
 import { PROJECTS_LIST_DEFINITION } from './tools/catalog-tools.mjs';
@@ -42,15 +44,24 @@ const TOOL_GROUPS = {
   audit: [...AUDIT_TOOLS],
   memory: [...MEMORY_TOOLS],
   source: [...SOURCE_TOOLS, ...CONTEXT_TOOLS, ...SOURCE_RECONCILE_TOOLS],
-  projects: [...PROJECT_TOOLS]
+  projects: [...PROJECT_TOOLS],
+  reader: [...READER_TOOLS]
 };
 const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
+
+// Read-only process (#252, docs/READER_CONTRACT.md): started with --read-only or
+// MEMO_BRIDGE_READ_ONLY. Its principal is reader:<OS user>, its store is opened read-only, every
+// write tool answers read_only and nothing it does leaves a trace.
+const READ_ONLY = readOnlyRequested();
+const READ_ONLY_INSTRUCTIONS = 'This Memo Bridge process is READ-ONLY: every write tool answers read_only and changes nothing; ' +
+  'reads leave no trace. Use reader_activity and reader_job_events (docs/READER_CONTRACT.md) for every conversation\'s ' +
+  'sessions, task leases, jobs and audit events. ';
 
 const server = new McpServer({
   name: 'memo-bridge',
   version: VERSION
 }, {
-  instructions: 'Memo Bridge observes registered local projects, the Mac running this plugin and a VPS reachable via SSH alias lab, ' +
+  instructions: (READ_ONLY ? READ_ONLY_INSTRUCTIONS : '') + 'Memo Bridge observes registered local projects, the Mac running this plugin and a VPS reachable via SSH alias lab, ' +
     'coordinates work between AI sessions, and runs that work on this machine. Flow for one task: workspace_open (pass its id ' +
     'explicitly afterwards) -> sessions_overview -> task_next, or tasks_list -> task_claim (keep claim_id and the latest fence; renew with task_renew) -> ' +
     'worktree_create with the issue -> worktree_read_file / worktree_write_file -> jobs_submit test|build|lint, then ' +
@@ -65,21 +76,24 @@ const server = new McpServer({
 });
 
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+// In a read-only process every tool is registered through the read-only gate; the tools of this
+// file are all reads (BASE_TOOLS and OBSERVER_TOOLS, no store, no write).
+const surface = READ_ONLY ? withReadOnly(server, getRuntime().principal, { readTools: [...BASE_TOOLS, ...OBSERVER_TOOLS] }) : server;
 const result = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
 
-server.registerTool('list_hosts', {
+surface.registerTool('list_hosts', {
   description: 'List the two independently reachable machines (Mac and VPS) and whether each responds. Read-only.',
   inputSchema: z.object({}),
   annotations: readonly
 }, async () => result(await listHosts()));
 
-server.registerTool('host_status', {
+surface.registerTool('host_status', {
   description: 'Read-only inventory for the Mac or VPS: OS, hostname, CPU count, load, disk availability, and VPS container count.',
   inputSchema: z.object({ host: z.enum(['mac', 'vps']) }),
   annotations: readonly
 }, async ({ host }) => result(await collectHost(host)));
 
-server.registerTool('bridge_info', {
+surface.registerTool('bridge_info', {
   description: 'Describe Memo Bridge capabilities, safety limits and supported hosts. Read-only.',
   inputSchema: z.object({}),
   annotations: readonly
@@ -87,7 +101,9 @@ server.registerTool('bridge_info', {
   const rt = getRuntime();
   return result({
     version: VERSION,
-    mode: 'observe+coordinate+run',
+    mode: rt.readOnly ? 'read-only' : 'observe+coordinate+run',
+    read_only: rt.readOnly === true,
+    reader_contract: READER_CONTRACT,
     transport: 'stdio',
     hosts: ['mac', 'vps'],
     this_host: rt.host,
@@ -128,48 +144,48 @@ server.registerTool('bridge_info', {
 });
 
 
-server.registerTool('projects_list', {
+surface.registerTool('projects_list', {
   ...PROJECTS_LIST_DEFINITION,
   annotations: readonly
 }, async (args) => result(await listProjects(args)));
 
-server.registerTool('project_info', {
+surface.registerTool('project_info', {
   description: 'Get metadata for a known registered Memo Labs project; cannot browse arbitrary paths.',
   inputSchema: z.object({ project: z.string().max(80) }),
   annotations: readonly
 }, async ({ project }) => result(await projectInfo(project)));
 
-server.registerTool('project_git_status', {
+surface.registerTool('project_git_status', {
   description: 'Read live Git branch, changes count and worktree count of a known registered project. No writes.',
   inputSchema: z.object({ project: z.string().max(80) }),
   annotations: readonly
 }, async ({ project }) => result(await projectGitStatus(project)));
 
-server.registerTool('projects_audit', {
+surface.registerTool('projects_audit', {
   description: 'Report repositories found in local inventory or Memo Labs aliases but absent from canonical PROJECTS.md. Read-only.',
   inputSchema: z.object({}),
   annotations: readonly
 }, async () => result(await auditProjectRegistry()));
 
-server.registerTool('observe_guardian', {
+surface.registerTool('observe_guardian', {
   description: 'Latest infrastructure-guardian audit of the Mac, the VPS, skills and owners: overall status, per-section status, finding counts and the most severe findings, with freshness. Read-only; no new probe.',
   inputSchema: z.object({}),
   annotations: readonly
 }, async () => result(await guardianReport()));
 
-server.registerTool('observe_agents', {
+surface.registerTool('observe_agents', {
   description: 'State of the VPS agent workflows from agents-observe (status, uptime, restarts, alerts), with freshness. Read-only.',
   inputSchema: z.object({}),
   annotations: readonly
 }, async () => result(await agentsObserve()));
 
-server.registerTool('observe_live_state', {
+surface.registerTool('observe_live_state', {
   description: 'Operational sections of LIVE-STATE (CI failures, agent configuration health, unpublished Git work), with freshness. Other sections are withheld. Read-only.',
   inputSchema: z.object({}),
   annotations: readonly
 }, async () => result(await liveState()));
 
-server.registerTool('observe_focus', {
+surface.registerTool('observe_focus', {
   description: 'Active Stasis focus (project, bet, kill criterion, review due) or the last closed bet. Read-only; Stasis decides, Memo Bridge only reports.',
   inputSchema: z.object({}),
   annotations: readonly
@@ -178,7 +194,8 @@ server.registerTool('observe_focus', {
 // Phase 2 and 3 modules. Each one calls getRuntime() lazily, so the read-only tools above keep
 // working when the private state directory is unavailable.
 // Their calls are counted for the learning review (#38, server/tools/learning-hook.mjs).
-const counted = withLearning(withImplicitWorkspace(server, getRuntime), getRuntime);
+// A read-only process counts nothing: the learning counters are writes.
+const counted = READ_ONLY ? withImplicitWorkspace(surface, getRuntime) : withLearning(withImplicitWorkspace(surface, getRuntime), getRuntime);
 registerCoordinatorTools(counted, getRuntime);
 registerWorktreeTools(counted, getRuntime);
 registerJobTools(counted, getRuntime);
@@ -190,5 +207,7 @@ registerSourceTools(counted, getRuntime);
 registerContextTools(counted, getRuntime);
 registerSourceReconcileTools(counted, getRuntime);
 registerProjectTools(counted, getRuntime);
+// Not counted for the learning review: a reader call writes nothing, in any process.
+registerReaderTools(surface, getRuntime);
 
 await server.connect(new StdioServerTransport());

@@ -164,11 +164,21 @@ export function operatorCallTier(operation, args) {
   return tier;
 }
 
-// The capability an operation needs, from either table, or null for an unknown operation.
+// The owner-wide reader view (#252, docs/READER_CONTRACT.md). Local stdio only: kept apart from
+// OPERATION_CAPABILITY, which is what the hub and the remote surface serve. Both ops show every
+// principal's workspaces, leases and jobs, so they need coordinator:audit, which a remote
+// principal never holds (runtime.mjs gateRemotePrincipal).
+export const READER_OPERATION_CAPABILITY = Object.freeze({
+  reader_activity: CAPABILITIES.AUDIT,
+  reader_job_events: CAPABILITIES.AUDIT
+});
+
+// The capability an operation needs, from any table, or null for an unknown operation.
 export function operationCapability(operation) {
   if (typeof operation !== 'string') return null;
   if (Object.hasOwn(OPERATION_CAPABILITY, operation)) return OPERATION_CAPABILITY[operation];
   if (Object.hasOwn(OPERATOR_OPERATION_CAPABILITY, operation)) return OPERATOR_OPERATION_CAPABILITY[operation];
+  if (Object.hasOwn(READER_OPERATION_CAPABILITY, operation)) return READER_OPERATION_CAPABILITY[operation];
   return null;
 }
 
@@ -208,14 +218,35 @@ export function makePrincipal(id, capabilities, { client_type: clientType, via }
 
 export const isPrincipal = value => minted.has(value);
 
-// The local stdio plugin runs as the trusted OS user that launched it (see SECURITY.md).
-export function localOwnerPrincipal(env = process.env) {
+function localUserName(env) {
   let raw;
   // userInfo() throws when the uid has no passwd entry (some containers); never let that
   // take the whole server down.
   try { raw = userInfo().username; } catch { raw = env.USER || env.LOGNAME || 'unknown'; }
-  const name = String(raw).replace(/[^A-Za-z0-9._@-]/g, '_').slice(0, 120) || 'unknown';
-  return makePrincipal(`local:${name}`, Object.values(CAPABILITIES));
+  return String(raw).replace(/[^A-Za-z0-9._@-]/g, '_').slice(0, 120) || 'unknown';
+}
+
+// The local stdio plugin runs as the trusted OS user that launched it (see SECURITY.md).
+export function localOwnerPrincipal(env = process.env) {
+  return makePrincipal(`local:${localUserName(env)}`, Object.values(CAPABILITIES));
+}
+
+// The read-only local principal (#252), for a stdio process started with --read-only or
+// MEMO_BRIDGE_READ_ONLY: reading only, every principal's records included (coordinator:audit),
+// and no write capability at all. Its id is reader:<OS user>, never local:<OS user>, so it owns
+// no workspace: it cannot act on a claim, a worktree or a job even through a read tool.
+export const READER_CAPABILITIES = Object.freeze([CAPABILITIES.READ, CAPABILITIES.AUDIT]);
+export function readerPrincipal(env = process.env) {
+  return makePrincipal(`reader:${localUserName(env)}`, READER_CAPABILITIES, { via: 'stdio' });
+}
+export const holdsWriteCapability = principal => WRITE_CAPABILITIES.some(c => principal?.capabilities?.has(c));
+
+// Whether this process was started read-only: the --read-only argument, or MEMO_BRIDGE_READ_ONLY
+// set to anything but "", "0" or "false". An unexpected value means read-only (fail closed).
+export function readOnlyRequested(argv = process.argv, env = process.env) {
+  if (Array.isArray(argv) && argv.slice(2).includes('--read-only')) return true;
+  const value = env.MEMO_BRIDGE_READ_ONLY;
+  return value !== undefined && !['', '0', 'false'].includes(String(value).trim().toLowerCase());
 }
 
 // ---------------------------------------------------------------------------------------------

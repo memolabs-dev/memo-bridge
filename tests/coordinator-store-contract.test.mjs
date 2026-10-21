@@ -74,6 +74,55 @@ for (const { engine, open } of STORES) {
     t.after(() => store.close());
     await assert.rejects(store.transaction(repo => repo.insertClaim(claim('orphan'))), /FOREIGN KEY/i);
   });
+  // Reader contract (#252): owner-wide reads across principals, by project and "changed since".
+  test(`[${engine}] reader queries: every principal, project filter, since keeps live rows, event cursor`, async t => {
+    const dir = await tempStateDir(t);
+    const store = open(dir);
+    t.after(() => store.close());
+    await store.transaction(repo => {
+      repo.insertWorkspace(workspace('ws_1'));
+      repo.insertWorkspace({ ...workspace('ws_2'), principal: 'hub:owner', project_id: 'cuesheet', updated_at: T + 10 });
+      repo.updateWorkspace('ws_2', { status: 'closed', closed_at: T + 10 });
+      repo.insertClaim(claim('c1'));
+      repo.insertClaim({ ...claim('c2'), workspace_id: 'ws_2', issue_ref: 'memolabs-dev/cuesheet#3' });
+      repo.updateClaim('c2', { state: 'released', updated_at: T + 5 }, 'a'.repeat(40));
+      repo.insertCheckpoint({ issue_ref: 'memolabs-dev/drop#7', claim_id: 'c1', workspace_id: 'ws_1', fence_sha: 'a'.repeat(40),
+        branch: 'b', commit_sha: 'c'.repeat(40), durability: 'remote', at: T + 1 });
+      repo.insertWorktree({ id: 'wt_1', workspace_id: 'ws_1', project_id: 'drop', host: 'mac', path: '/x', branch: 'b', base_ref: 'main',
+        base_commit: 'a'.repeat(40), issue_ref: 'memolabs-dev/drop#7', created_at: T, updated_at: T });
+      for (const [id, created] of [['job_a', T], ['job_b', T + 20]]) {
+        repo.insertJob({ id, workspace_id: 'ws_1', worktree_id: 'wt_1', project_id: 'drop', host: 'mac', recipe: 'test', argv_json: '[]',
+          timeout_ms: 1000, log_path: '/x', created_at: created });
+      }
+      repo.updateJob('job_a', { status: 'running', started_at: T }, 'queued');
+      repo.updateJob('job_b', { status: 'succeeded', started_at: T + 20, ended_at: T + 30 }, 'queued');
+      for (let i = 0; i < 4; i++) {
+        repo.appendEvent({ at: T + i, principal: i % 2 ? 'hub:owner' : 'local:owner', workspace_id: i % 2 ? 'ws_2' : 'ws_1', op: 'x', outcome: 'ok' });
+      }
+      repo.appendEvent({ at: T + 9, principal: 'local:owner', op: 'y', outcome: 'denied' });
+    });
+    const read = fn => store.transaction(fn, { write: false });
+    assert.deepEqual((await read(repo => repo.readerWorkspaces({ limit: 10 }))).map(w => w.id), ['ws_2', 'ws_1']);
+    assert.deepEqual((await read(repo => repo.readerWorkspaces({ project_id: 'cuesheet', limit: 10 }))).map(w => w.id), ['ws_2']);
+    assert.deepEqual((await read(repo => repo.readerWorkspaces({ since: T + 50, limit: 10 }))).map(w => w.id), ['ws_1'], 'active stays');
+    const claims = await read(repo => repo.readerClaims({ limit: 10 }));
+    assert.deepEqual(claims.map(c => [c.claim_id, c.project_id, c.principal]), [['c2', 'cuesheet', 'hub:owner'], ['c1', 'drop', 'local:owner']]);
+    assert.deepEqual((await read(repo => repo.readerClaims({ since: T + 50, limit: 10 }))).map(c => c.claim_id), ['c1'], 'claimed stays');
+    const jobs = await read(repo => repo.readerJobs({ project_id: 'drop', limit: 10 }));
+    assert.deepEqual(jobs.map(j => [j.id, j.issue_ref, j.workspace_principal]), [['job_b', 'memolabs-dev/drop#7', 'local:owner'],
+      ['job_a', 'memolabs-dev/drop#7', 'local:owner']]);
+    assert.deepEqual((await read(repo => repo.readerJobs({ since: T + 25, live: ['running'], limit: 10 }))).map(j => j.id), ['job_b', 'job_a']);
+    assert.deepEqual((await read(repo => repo.readerJobs({ since: T + 40, live: ['running'], limit: 10 }))).map(j => j.id), ['job_a']);
+    assert.deepEqual((await read(repo => repo.readerJobs({ since: T + 40, limit: 10 }))).map(j => j.id), [], 'no live statuses given');
+    const all = await read(repo => repo.readerEvents({ limit: 10 }));
+    assert.equal(all.length, 5);
+    const page = await read(repo => repo.readerEvents({ after_seq: all[1].seq, limit: 2 }));
+    assert.deepEqual(page.map(e => e.seq), [all[2].seq, all[3].seq]);
+    assert.deepEqual((await read(repo => repo.readerEvents({ project_id: 'drop', limit: 10 }))).map(e => e.workspace_id), ['ws_1', 'ws_1']);
+    assert.deepEqual((await read(repo => repo.readerEvents({ since: T + 3, limit: 10 }))).map(e => e.op), ['x', 'y']);
+    assert.equal((await read(repo => repo.readerLastCheckpoint('c1'))).commit_sha, 'c'.repeat(40));
+    assert.equal(await read(repo => repo.readerLastCheckpoint('c2')), null);
+  });
 }
 
 test('[sqlite] state stays private: 0700 directory, 0600 database', async t => {

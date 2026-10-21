@@ -13,8 +13,9 @@ import { platform } from 'node:os';
 import { createCoordinator } from './coordinator/index.mjs';
 import { learningThresholds } from './coordinator/learning.mjs';
 import { createIssueLeaseClient } from './coordinator/issue-lease.mjs';
-import { CAPABILITIES, CLIENT_TYPES, OPERATOR_TIER_CAPABILITIES, WRITE_CAPABILITIES, authorize, hubGrantsFromEnv, isPrincipal, isRemotePrincipal, localOwnerPrincipal,
-  makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal } from './coordinator/policy.mjs';
+import { CAPABILITIES, CLIENT_TYPES, OPERATOR_TIER_CAPABILITIES, WRITE_CAPABILITIES, authorize, holdsWriteCapability, hubGrantsFromEnv, isPrincipal,
+  isRemotePrincipal, localOwnerPrincipal, makePrincipal, parseHubGrants, principalFromHub as mapHubPrincipal, readOnlyRequested,
+  readerPrincipal } from './coordinator/policy.mjs';
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
 import { createProjectSync } from './integrations/project-sync.mjs';
@@ -49,9 +50,15 @@ export function gateRemotePrincipal(p, policy) {
   return makePrincipal(p.id, kept, { ...(p.client_type ? { client_type: p.client_type } : {}), ...(p.via ? { via: p.via } : {}) });
 }
 
-export function createRuntime({ stateDir = defaultStateDir(), principal = localOwnerPrincipal(), ledger, now = Date.now,
+// readOnly (#252, docs/READER_CONTRACT.md): a runtime that never writes. Its principal holds no
+// write capability (default: reader:<OS user>), its store is opened read-only (the engine refuses
+// any write), it journals nothing, its coordinator and job service neither journal nor
+// reconcile, and it serves no other principal (as() throws).
+export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
+  principal = readOnly ? readerPrincipal() : localOwnerPrincipal(), ledger, now = Date.now,
   catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env, remotePolicy,
   projectSync, githubCredentials } = {}) {
+  if (readOnly && holdsWriteCapability(principal)) throw new Error('read_only_principal_writes');
   let store;
   const coordinators = new Map();
   const views = new Map();
@@ -68,14 +75,14 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const credentials = githubCredentials ?? createGitHubCredentials({ env });
   const sharedLedger = ledger ?? createIssueLeaseClient({ env, scratchDir: join(stateDir, 'ledger-gh'), credentials });
 
-  const openStore = () => { store ??= openSqliteStore({ dir: stateDir }); return store; };
+  const openStore = () => { store ??= openSqliteStore({ dir: stateDir, readOnly }); return store; };
   // One GitHub Projects sync per runtime, shared by every principal's coordinator and by
   // github_create_pr; disabled unless MEMO_BRIDGE_PROJECT is set in this runtime's env.
   let sync = projectSync ?? null;
   const projectSyncOf = () => { sync ??= createProjectSync({ env }); return sync; };
   const coordinatorFor = p => {
     if (!coordinators.has(p)) {
-      coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host,
+      coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host, readOnly,
         remotePolicy: policy, projectSync: projectSyncOf(), credentials, scratchDir: join(stateDir, 'gh-pr'),
         learningThresholds: learningThresholds(env),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
@@ -87,6 +94,8 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   // per-request id (ids.request_id, from the envelope meta), never a tool argument.
   const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
   const auditAs = p => async (op, outcome, code, ids = {}) => {
+    // A read-only runtime leaves no trace, refusals included (docs/READER_CONTRACT.md).
+    if (readOnly) return;
     try {
       await openStore().transaction(repo => repo.appendEvent({ at: now(), principal: p.id,
         workspace_id: ids.workspace_id ?? null, issue_ref: ids.issue ?? null, op, outcome, code: code ?? null,
@@ -101,7 +110,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
   const policy = () => remotePolicy ?? remotePolicyFromEnv(env);
 
   const runtime = {
-    now, host, stateDir,
+    now, host, stateDir, readOnly,
     // Configured by the operator, never by a tool argument. Metadata-only discovery must not
     // change Coordinator resolution, GitHub allowlists or the host-local Git/worktree policy.
     catalogOptions: env.MEMO_BRIDGE_CATALOG_SNAPSHOT
@@ -123,6 +132,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
     // principal so per-runtime services (worktree runner, job service) are reused.
     as(p) {
       if (!isPrincipal(p)) throw new Error('invalid_principal');
+      if (readOnly && p !== principal) throw new Error('read_only_runtime');
       if (p === principal) return runtime;
       const key = `${p.id}\0${[...p.capabilities].sort().join(',')}\0${p.client_type ?? ''}\0${p.via ?? ''}`;
       const cached = views.get(key);
@@ -148,6 +158,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
     // Map an identity claim forwarded by the hub to a principal, or null when it is refused
     // (unknown id, malformed claim, invalid grants configuration: always fail closed).
     principalFromHub(claim) {
+      if (readOnly) return null;
       try {
         grants ??= remoteGrants(hubGrants !== undefined ? parseHubGrants(hubGrants) : hubGrantsFromEnv(env), policy());
       } catch {
@@ -165,6 +176,7 @@ export function createRuntime({ stateDir = defaultStateDir(), principal = localO
 
 let shared;
 export function getRuntime() {
-  shared ??= createRuntime();
+  // The stdio process is read-only when started with --read-only or MEMO_BRIDGE_READ_ONLY (#252).
+  shared ??= createRuntime({ readOnly: readOnlyRequested() });
   return shared;
 }
