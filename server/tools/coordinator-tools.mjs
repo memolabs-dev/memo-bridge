@@ -124,7 +124,7 @@ export function registerCoordinatorTools(server, getService) {
   }, call('taskRelease'));
 
   server.registerTool('task_complete', {
-    description: 'Use this right after github_create_pr succeeded: releases the claim as completed, with a summary. Never closes the Issue, merges or deploys: Mergify lands green PRs.',
+    description: 'Use this right after github_create_pr succeeded: releases the claim as completed, with a summary. Never closes the Issue, merges or deploys: land the PR yourself by the merge rule of the instructions.',
     inputSchema: z.object({ workspace_id: workspaceId, issue, claim_id: claimId, fence,
       summary: z.string().max(SUMMARY_MAX).optional().describe('What was done, plain text, e.g. "Fixed expired-token login, PR #31".') }),
     annotations: write

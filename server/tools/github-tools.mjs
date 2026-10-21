@@ -1,8 +1,8 @@
 // GitHub MCP tools: bounded reads of Issues, pull requests, workflow runs and checks for
 // registered repositories, and pull request creation from a claimed worktree.
 // Authorization comes first in every handler; the principal comes from the runtime, never
-// from tool arguments. Pull requests are opened, never merged: the landing contract of
-// memolabs-dev/.github lands them.
+// from tool arguments. Pull requests are opened, never merged by these tools: the agent lands
+// its own PR outside them (MERGE_INSTRUCTIONS in server/instructions.mjs).
 //
 // Phase 5 (D9), enforced here whatever the caller sends:
 // - a remote principal (oidc:) reads and opens pull requests only on the GitHub origins of the
@@ -175,7 +175,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   }));
 
   server.registerTool('github_create_pr', {
-    description: 'Use this after worktree_push to open the pull request into the default branch; adds "Closes #<n>" unless close_issue is false. Returns the open PR if one exists. Never merges: Mergify lands green PRs, gate files wait for the owner. Then task_complete.',
+    description: 'Use this after worktree_push to open the pull request into the default branch; adds "Closes #<n>" unless close_issue is false. Returns the open PR if one exists. Never merges: land it yourself by the merge rule (Mergify where it merges on its own, else gh pr merge --match-head-commit once CI is green). Then task_complete.',
     inputSchema: z.object({
       workspace_id: z.string().max(40).describe('Workspace id returned by workspace_open (ws_…).'),
       worktree_id: z.string().max(60).describe('wt_... id of the pushed worktree.'),

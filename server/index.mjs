@@ -57,7 +57,7 @@ const server = new McpServer({
     'job_status / job_results -> worktree_commit -> worktree_push (records a checkpoint) -> github_create_pr -> task_complete -> ' +
     'workspace_close. After losing context call workspace_recover. Stop writing as soon as a call returns stale_lease or ' +
     'no_live_claim. Memo Bridge\'s own tools use no shell, never write outside its worktrees (project_create aside: one PROJECTS.md row and the new checkout), never write the default ' +
-    'branch, never force-push, never merge and never deploy. Jobs run the repository\'s own test/build/lint scripts, which you ' +
+    'branch, never force-push, never merge and never deploy (you land your own PR yourself, as said below). Jobs run the repository\'s own test/build/lint scripts, which you ' +
     'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +
     'only, no private data or credentials) and stop when the claim ends; elsewhere they are refused unless the owner set ' +
     'MEMO_BRIDGE_JOB_SANDBOX=off, which makes them owner-equivalent. ' + MULTI_SESSION_INSTRUCTIONS + ' ' + MEMORY_INSTRUCTIONS + ' ' +

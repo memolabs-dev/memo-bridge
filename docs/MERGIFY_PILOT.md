@@ -43,7 +43,7 @@ Pausing: add `hold-merge` to a PR, or put it back to draft.
 
 ## Operator runbook
 
-1. Agents continue Issue → claim → isolated worktree → code → test → pushed branch → non-draft PR. They **never** merge PRs directly.
+1. Agents continue Issue → claim → isolated worktree → code → test → pushed branch → non-draft PR. In this repository Mergify merges the cohort, so they do not merge it themselves; they merge only a PR Mergify sets aside (a sensitive path, for example), with `gh pr merge <n> --match-head-commit <sha>`, never `--admin`, once required CI is green on that SHA, it is neither draft nor `hold-merge`, has no conflict, and an independent review of the T2/T3 change is done (owner decision 2026-10-21, `~/memolabs/AGENTS.md` rule 9).
 2. For normal low-risk agent PRs, do not attach `mergify:pilot`, `landing:approved`, or issue GitHub native auto-merge commands. Simply let the validated CI and Mergify queue run.
 3. If CI fails, task owner inspects failures, fixes under its own reservation and pushes a new commit. Mergify must only consider current evidence.
 4. For a PR requiring human review, use draft mode and/or `hold-merge`/separate security review. Do not remove safety controls merely to force a merge.
