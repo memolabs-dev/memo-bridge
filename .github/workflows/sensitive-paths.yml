@@ -34,11 +34,12 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Label a PR that touches a sensitive path and say which paths, once (autoloop T-M2b).
           # The sensitive pattern is read from the base branch's .mergify.yml, so the label and
           # Mergify's refusal can never disagree. Never checks out or runs PR code.
-          # Env: GH_TOKEN, REPO, PR, BASE_SHA. DRY_RUN=1 prints instead of writing.
+          # Env: GH_TOKEN, REPO, PR, BASE_SHA, HEAD_SHA. DRY_RUN=1 prints instead of writing.
           set -euo pipefail
           marker='<!-- memo-labs:sensitive-paths -->'
 
@@ -62,7 +63,7 @@ jobs:
           list=$(printf '%s\n' "$matched" | sed -n '1,50p' | sed 's/`//g; s/^/- `/; s/$/`/')
           count=$(printf '%s\n' "$matched" | wc -l | tr -d ' ')
           body="$marker
-          This pull request touches $count path(s) that Mergify never merges on its own. The owner merges it by hand, or closes it.
+          This pull request touches $count path(s) that Mergify never merges on its own. The agent that opened it merges it with \`gh pr merge $PR --match-head-commit $HEAD_SHA\` (never \`--admin\`) once required CI is green on that exact SHA, it is neither draft nor labelled \`hold-merge\`, it has no conflict, and an independent review is done with its blocking points fixed. If those conditions cannot be met, it is closed.
 
           $list
 
@@ -73,8 +74,8 @@ jobs:
             exit 0
           fi
 
-          gh label create needs-human-review --repo "$REPO" --color D93F0B \
-            --description "Touches a sensitive path: the owner merges by hand" 2>/dev/null || true
+          gh label create needs-human-review --repo "$REPO" --color D93F0B --force \
+            --description "Touches a sensitive path: merged by its agent after an independent review" 2>/dev/null || true
           gh api -X POST "repos/$REPO/issues/$PR/labels" -f 'labels[]=needs-human-review' >/dev/null
           existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
             --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | sed -n 1p)

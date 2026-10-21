@@ -79,7 +79,8 @@ queue_rules:
    `gh pr view <n> --json mergedBy` says `mergify`.
 6. Negative canary: a small real change under a sensitive path. Pass when CI is green and the PR
    is still open with the `-files` condition unmet in the Mergify Merge Queue check, labelled
-   `needs-human-review` with one comment naming the path. The owner then merges or closes it.
+   `needs-human-review` with one comment naming the path. The agent that opened it then merges it
+   after an independent review (`gh pr merge <n> --match-head-commit <sha>`), or closes it.
 7. Set `delete_branch_on_merge` on the repository (T-C3, owner setting) and record the result in
    the table below.
 
