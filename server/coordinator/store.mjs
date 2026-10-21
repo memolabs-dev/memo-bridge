@@ -4,13 +4,14 @@
 // tests/coordinator-store-contract.test.mjs.
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { MEMORY_SCHEMA, memoryRepository } from './memory-store.mjs';
 import { CONTINUITY_SCHEMA, continuityRepository } from './continuity-store.mjs';
 import { delegationRepository, migrateV7 } from './delegation-store.mjs';
 import { SOURCE_SCHEMA, sourceRepository } from './source-store.mjs';
+import { readerRepository } from './reader-store.mjs';
 
 // v5: context memory across conversations (server/coordinator/memory-store.mjs), additive.
 // v6: structured handoffs and learning counters (server/coordinator/continuity-store.mjs), additive.
@@ -522,8 +523,13 @@ function withOpenRetry(fn, attempts = 40) {
   }
 }
 
-export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 } = {}) {
+// readOnly (#252): open an existing store for reading only. Nothing is created, re-moded or
+// migrated; the connection is SQLITE_OPEN_READONLY with query_only on, so the engine itself
+// refuses any write, and transaction(fn) with write: true is refused before BEGIN.
+// Errors: state_store_missing, state_dir_not_private, state_schema_mismatch.
+export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000, readOnly = false } = {}) {
   assertPrivateLocation(dir);
+  if (readOnly) return openReadOnlyStore(dir, busyTimeoutMs);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
@@ -547,7 +553,12 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
     db.close();
     throw error;
   }
-  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db), ...delegationRepository(db), ...sourceRepository(db) };
+  return storeHandle(db, { dir, file });
+}
+
+function storeHandle(db, { dir, file, readOnly = false }) {
+  const repo = { ...repository(db), ...memoryRepository(db), ...continuityRepository(db), ...delegationRepository(db),
+    ...sourceRepository(db), ...readerRepository(db) };
   // One connection per process: serialize transactions so concurrent MCP calls in the same
   // process never interleave inside BEGIN/COMMIT. Cross-process exclusion is SQLite's lock.
   let queue = Promise.resolve();
@@ -556,11 +567,14 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
   return {
     engine: 'sqlite',
     file,
+    readOnly,
     // Writes take the write lock up front (BEGIN IMMEDIATE) so check-then-write is atomic
     // across processes; reads use a deferred transaction and keep WAL's concurrent readers.
     transaction(fn, { write = true } = {}) {
       const run = queue.then(async () => {
         if (closed) throw new Error('store_closed');
+        // A read-only store refuses a write transaction before BEGIN (the engine would too).
+        if (write && readOnly) throw new Error('state_read_only');
         db.exec(write ? 'BEGIN IMMEDIATE' : 'BEGIN');
         let open = true;
         try {
@@ -593,4 +607,25 @@ export function openSqliteStore({ dir = defaultStateDir(), busyTimeoutMs = 5000 
       };
     }
   };
+}
+
+// The read-only store (#252): an existing, private, current store, never created or migrated.
+function openReadOnlyStore(dir, busyTimeoutMs) {
+  const file = join(dir, DB_FILE);
+  if (!existsSync(dir) || !existsSync(file)) throw new Error('state_store_missing');
+  // The database itself must be a plain file of this directory, never a link to elsewhere.
+  if (lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile()) throw new Error('state_dir_not_private');
+  if ((statSync(dir).mode & 0o077) !== 0 || (statSync(file).mode & 0o077) !== 0) throw new Error('state_dir_not_private');
+  const timeout = Math.max(0, Math.trunc(Number(busyTimeoutMs) || 0));
+  const db = new DatabaseSync(file, { readOnly: true, timeout });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${timeout}`);
+    db.exec('PRAGMA query_only = ON');
+    // Only the schema this server writes: an older store needs the owner's server to migrate it first.
+    if (Number(db.prepare('PRAGMA user_version').get().user_version) !== SCHEMA_VERSION) throw new Error('state_schema_mismatch');
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  return storeHandle(db, { dir, file, readOnly: true });
 }

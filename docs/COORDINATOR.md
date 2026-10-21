@@ -163,6 +163,8 @@ The principal comes from the entry point, never from tool arguments.
 
 Authorization is checked before argument validation, so every refusal is journaled. Write operations journal every outcome (`ok`, `denied`, `error`); read operations journal only refusals. A workspace can only be read or used by its principal. The journal is read with `audit_events` and `audit_operation`, which return only the caller's events unless the caller holds `coordinator:audit`.
 
+A stdio process started with `--read-only` or `MEMO_BRIDGE_READ_ONLY` (#252) runs as `reader:<OS user>` with `coordinator:read` and `coordinator:audit` only, opens the store read-only and journals nothing, refusals included; its write tools answer `read_only` and its job reads never reconcile. `reader_activity` and `reader_job_events` give the owner-wide view of sessions, leases, jobs and audit events. Contract: [READER_CONTRACT.md](READER_CONTRACT.md).
+
 ## Errors
 
 Every result is `{ ok: true, ... }` or `{ ok: false, error, detail? }`.
