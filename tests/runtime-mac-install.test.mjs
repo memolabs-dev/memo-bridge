@@ -8,7 +8,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENT_URL, enroll, renderPlist, renderPrivatePolicy, renderRemotePolicy, runtimeLayout } from '../deploy/mac/runtime-mac.mjs';
+import { AGENT_URL, LEASE_KEY_SCHEMA, enroll, promote, renderPlist, renderPrivatePolicy, renderRemotePolicy, runtimeLayout, stagedLayout } from '../deploy/mac/runtime-mac.mjs';
 import { parseRemotePolicy } from '../bridge/write-gate.mjs';
 import { loadOwnerPrivatePolicy, parseOwnerPrivatePolicy } from '../server/coordinator/owner-private-repos.mjs';
 
@@ -90,6 +90,7 @@ test('plist: runtime mode with every variable the runtime and the ledger read, n
     CREDENTIALS_DIRECTORY: L.credentials, MEMO_BRIDGE_REMOTE_CONFIG: L.remotePolicy, MEMO_BRIDGE_OWNER_SUB: SUB,
     MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE: '/Users/owner/.local/share/memo-bridge/owner-policy/private-repos.json',
     MEMO_BRIDGE_OWNER_EXTERNAL_PROJECTS_FILE: '/Users/owner/.local/share/memo-bridge/owner-policy/external-projects.json',
+    MEMO_BRIDGE_OWNER_LEASE_KEY_FILE: '/Users/owner/.local/share/memo-bridge/owner-policy/lease-key.json',
     MEMO_BRIDGE_GOVERNANCE_ROOT: `${L.base}/governance/def`, MEMOLABS_ROOT: '/Users/owner/memolabs', HOME: home,
     PATH: '/opt/node/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' });
   assert.match(text, /runtime-releases\/abc\/bridge\/agent-cli\.mjs/);
@@ -164,7 +165,13 @@ function run(home, args) {
 test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies, staged plist, launchd untouched',
   { skip: process.platform !== 'darwin' && 'the installer runs on macOS only', timeout: 180_000 }, async t => {
     const { home, p, govRef } = macHome(t);
-    const L = runtimeLayout(home);
+    const L0 = runtimeLayout(home);
+    // Fix pass of #258, finding 4: a stage run never rewrites the live policy the running
+    // runtime reads; it writes the staging copies, and --install promotes them.
+    mkdirSync(L0.policyDir, { recursive: true, mode: 0o700 });
+    writeFileSync(L0.remotePolicy, 'live remote\n', { mode: 0o600 });
+    writeFileSync(L0.privatePolicy, 'live private\n', { mode: 0o600 });
+    const L = { ...L0, ...stagedLayout(home) };
     const publicOnly = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'),
       '--repo', 'memolabs-dev/open-app']);
     assert.equal(publicOnly.status, 0, publicOnly.stderr + publicOnly.stdout);
@@ -208,17 +215,26 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
     assert.deepEqual(parseOwnerPrivatePolicy(JSON.parse(readFileSync(L.privatePolicy, 'utf8')),
       { expectedOwnerSub: SUB }), { ok: true, repos: ['memolabs-dev/secret-app'] },
     'public projects must never enter the private repository governance allowlist');
-    // The coordinator's own loader accepts the file for the owner only.
-    const loaded = await loadOwnerPrivatePolicy({ file: L.privatePolicy, principal: { id: `oidc:${SUB}` }, remotePolicy: remote,
-      host: 'mac', home });
-    assert.deepEqual(loaded, { ok: true, repos: ['memolabs-dev/secret-app'] });
-    assert.equal((await loadOwnerPrivatePolicy({ file: L.privatePolicy, principal: { id: 'oidc:someone-else' },
-      remotePolicy: remote, host: 'mac', home })).error, 'private_policy_owner_only');
     const staged = readFileSync(join(L.base, 'launchd', 'dev.memolabs.memo-bridge-agent.plist'), 'utf8');
     assert.equal(plistEnv(staged).MEMO_BRIDGE_GOVERNANCE_ROOT, out.steps.governance.root);
     assert.ok(!staged.includes('gho_fixture'));
     assert.equal(existsSync(join(home, 'Library/LaunchAgents/dev.memolabs.memo-bridge-agent.plist')), false, 'launchd untouched');
     assert.equal(plistEnv(staged).MEMO_BRIDGE_GITHUB_APP_ID, undefined);
+    assert.equal(readFileSync(L0.remotePolicy, 'utf8'), 'live remote\n', 'the live remote policy is untouched by stage runs');
+    assert.equal(readFileSync(L0.privatePolicy, 'utf8'), 'live private\n', 'the live private policy is untouched by stage runs');
+    assert.equal(existsSync(L0.leaseKey), false, 'no live lease key is created by a stage run');
+    assert.equal(mode(L.leaseKey), 0o600, 'a staged lease key waits for --install');
+    assert.equal(out.steps.configure.private_policy, L.privatePolicy);
+    assert.equal(out.steps.configure.live_unchanged, true);
+    // --install promotes them (promote, below); then the coordinator's own loader accepts the
+    // live file for the owner only.
+    assert.equal((await promote({ home })).ok, true);
+    assert.equal(existsSync(L0.leaseKey), true);
+    const loaded = await loadOwnerPrivatePolicy({ file: L0.privatePolicy, principal: { id: `oidc:${SUB}` }, remotePolicy: remote,
+      host: 'mac', home, uid: process.getuid() });
+    assert.deepEqual(loaded, { ok: true, repos: ['memolabs-dev/secret-app'] });
+    assert.equal((await loadOwnerPrivatePolicy({ file: L0.privatePolicy, principal: { id: 'oidc:someone-else' },
+      remotePolicy: remote, host: 'mac', home })).error, 'private_policy_owner_only');
 
     // --app-key (owner console D-A2-2): the key becomes the 0600 app-key credential, the plist gets
     // the App ids and the purpose gate; a later run without it removes the key again.
@@ -275,3 +291,55 @@ test('a governance pin that resolves the owner home from $HOME is refused (incid
     assert.equal(accepted.status, 0, accepted.stderr + accepted.stdout);
     assert.ok(existsSync(join(accepted.steps.governance.root, 'scripts', 'private_owner_allowlist.py')));
   });
+
+// Fix pass of #258, finding 4: promote (called by --install right before the agent restarts)
+// moves the staged policies into place, keeps a 0600 backup of the live ones, never replaces a
+// live lease key, and refuses when the live policy changed since the stage run (a project_create
+// enrollment would otherwise be lost).
+test('promote: staged policies go live atomically with backups; a live lease key is never replaced', async t => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'memo-rt-promote-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const L = runtimeLayout(home); const S = stagedLayout(home);
+  mkdirSync(L.policyDir, { recursive: true, mode: 0o700 }); mkdirSync(S.policyDir, { recursive: true, mode: 0o700 });
+  writeFileSync(L.remotePolicy, 'old remote\n', { mode: 0o600 }); writeFileSync(L.privatePolicy, 'old private\n', { mode: 0o600 });
+  writeFileSync(S.remotePolicy, 'new remote\n', { mode: 0o600 }); writeFileSync(S.privatePolicy, 'new private\n', { mode: 0o600 });
+  const key = JSON.stringify({ schema: LEASE_KEY_SCHEMA, owner_sub: SUB, key: 'ab'.repeat(32) });
+  writeFileSync(S.leaseKey, key, { mode: 0o600 });
+  // What the stage run saw of the live files.
+  const { stageRecord } = await import('../deploy/mac/runtime-mac.mjs');
+  writeFileSync(S.record, JSON.stringify(stageRecord(home)), { mode: 0o600 });
+  const done = await promote({ home, now: () => '20261022-230000' });
+  assert.equal(done.ok, true, JSON.stringify(done));
+  assert.equal(readFileSync(L.remotePolicy, 'utf8'), 'new remote\n');
+  assert.equal(readFileSync(L.privatePolicy, 'utf8'), 'new private\n');
+  assert.equal(readFileSync(`${L.remotePolicy}.bak-20261022-230000`, 'utf8'), 'old remote\n');
+  assert.equal(mode(`${L.privatePolicy}.bak-20261022-230000`), 0o600);
+  assert.equal(readFileSync(L.leaseKey, 'utf8'), key);
+  for (const f of [L.remotePolicy, L.privatePolicy, L.leaseKey]) assert.equal(mode(f), 0o600, f);
+  for (const f of [S.remotePolicy, S.privatePolicy, S.leaseKey, S.record]) assert.equal(existsSync(f), false, `${f} consumed`);
+  // A second stage with another key: the live key stays.
+  writeFileSync(S.remotePolicy, 'newer remote\n', { mode: 0o600 }); writeFileSync(S.privatePolicy, 'newer private\n', { mode: 0o600 });
+  writeFileSync(S.leaseKey, JSON.stringify({ schema: LEASE_KEY_SCHEMA, owner_sub: SUB, key: 'cd'.repeat(32) }), { mode: 0o600 });
+  writeFileSync(S.record, JSON.stringify(stageRecord(home)), { mode: 0o600 });
+  assert.equal((await promote({ home, now: () => '20261022-230100' })).ok, true);
+  assert.equal(readFileSync(L.leaseKey, 'utf8'), key, 'the live lease key is never replaced');
+  // The live policy changed after the stage run (a project_create enrollment): refused, nothing moved.
+  writeFileSync(S.remotePolicy, 'stale remote\n', { mode: 0o600 }); writeFileSync(S.privatePolicy, 'stale private\n', { mode: 0o600 });
+  writeFileSync(S.record, JSON.stringify(stageRecord(home)), { mode: 0o600 });
+  writeFileSync(L.privatePolicy, 'enrolled meanwhile\n', { mode: 0o600 });
+  const refused = await promote({ home, now: () => '20261022-230200' });
+  assert.equal(refused.error, 'owner_policy_changed_since_stage');
+  assert.equal(readFileSync(L.privatePolicy, 'utf8'), 'enrolled meanwhile\n');
+  assert.equal(readFileSync(L.remotePolicy, 'utf8'), 'newer remote\n');
+  // Nothing staged: refused.
+  rmSync(S.policyDir, { recursive: true, force: true });
+  assert.equal((await promote({ home })).error, 'nothing_staged');
+});
+
+test('the installer promotes the staged policies only with --install, right before the agent restarts', () => {
+  const text = readFileSync(SCRIPT, 'utf8');
+  const promoteAt = text.indexOf('runtime-mac.mjs" promote');
+  assert.ok(promoteAt > 0, 'promote is called');
+  assert.ok(promoteAt > text.indexOf('if [ "$INSTALL" != 1 ]; then'), 'never in a stage run');
+  assert.ok(promoteAt < text.indexOf('reload_agent\n/bin/launchctl kickstart'), 'before the restart');
+});

@@ -21,9 +21,21 @@
 //                            opted-in public project names,
 //                            remote writes, enforce session binding, mac_runtime_routing
 //   3. the launchd plist of dev.memolabs.memo-bridge-agent in runtime mode, staged in --out.
+// Everything configure writes is STAGED in --out (fix pass of #258, finding 4): the policy files
+// in --out/owner-policy/, with a record of the live files it saw and, when the owner has none
+// yet, a new lease-key.json (the key of private lease names, memolabs-dev/.github
+// scripts/issue_lease.py). The running runtime keeps reading the live files until --install:
+//
+//   node deploy/mac/runtime-mac.mjs promote --home <abs> [--out <dir>]
+//
+// moves the staged policies into place under the enrollment lock, keeps a 0600 .bak-<time> of
+// each live one, never replaces a live lease key, and refuses when a live policy changed since
+// the stage run (a project_create enrollment would otherwise be lost).
 // Nothing here talks to the VPS: no corpus, path or credential leaves the Mac.
 import { execFile } from 'node:child_process';
-import { chmodSync, closeSync, constants as fsConstants, mkdirSync, openSync, renameSync, rmdirSync, writeSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync,
+  rmdirSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readProjectRegistry } from '../../server/catalog.mjs';
@@ -33,6 +45,7 @@ import { acquireLock } from '../../server/projects/registry-writer.mjs';
 export const LABEL = 'dev.memolabs.memo-bridge-agent';
 export const AGENT_URL = 'wss://127.0.0.1:9444/agent';
 export const PRIVATE_SCHEMA = 'memolabs.owner-private-repos.v1';
+export const LEASE_KEY_SCHEMA = 'memolabs.owner-lease-key.v1';
 // The governance ledger accepts only a Pocket ID user id (private_owner_allowlist.py OWNER).
 export const OWNER_SUB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const REPO_RE = /^(?:memolabs-dev|guillaume-flambard)\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -53,6 +66,7 @@ export function runtimeLayout(home) {
     privatePolicy: join(base, 'owner-policy', 'private-repos.json'),
     externalProjects: join(base, 'owner-policy', 'external-projects.json'),
     remotePolicy: join(base, 'owner-policy', 'remote.json'),
+    leaseKey: join(base, 'owner-policy', 'lease-key.json'),
     config: join(base, 'runtime-config'),
     credentials: join(base, 'runtime-config', 'credentials'),
     agentConfig: join(home, '.config', 'memo-bridge'),
@@ -60,6 +74,27 @@ export function runtimeLayout(home) {
     logs: join(home, 'Library', 'Logs', 'memo-bridge'),
     plist: join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`)
   };
+}
+
+// Where configure stages the policy files (the installer's --out, ~/.local/share/memo-bridge/launchd).
+export function stagedLayout(home, out = join(runtimeLayout(home).base, 'launchd')) {
+  if (typeof out !== 'string' || !isAbsolute(out)) throw new Error('out_not_absolute');
+  const policyDir = join(out, 'owner-policy');
+  return { policyDir, privatePolicy: join(policyDir, 'private-repos.json'), remotePolicy: join(policyDir, 'remote.json'),
+    leaseKey: join(policyDir, 'lease-key.json'), record: join(policyDir, 'stage.json') };
+}
+
+const sha256 = path => { try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; } };
+// What the stage run saw of the live policy files (null: absent).
+export function stageRecord(home) {
+  const L = runtimeLayout(home);
+  return { private_sha256: sha256(L.privatePolicy), remote_sha256: sha256(L.remotePolicy) };
+}
+
+export function renderLeaseKey({ ownerSub, key = randomBytes(32).toString('hex') }) {
+  if (!OWNER_SUB_RE.test(ownerSub ?? '')) throw new Error('owner_sub_invalid');
+  if (!/^[0-9a-f]{64}$/.test(key)) throw new Error('lease_key_invalid');
+  return `${JSON.stringify({ schema: LEASE_KEY_SCHEMA, owner_sub: ownerSub, key })}\n`;
 }
 
 const run = (cmd, args, opts = {}) => new Promise(resolve => {
@@ -158,6 +193,7 @@ export function renderPlist({ home, node, release, governance, ownerSub, extraPa
     MEMO_BRIDGE_OWNER_SUB: ownerSub,
     MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE: L.privatePolicy,
     MEMO_BRIDGE_OWNER_EXTERNAL_PROJECTS_FILE: L.externalProjects,
+    MEMO_BRIDGE_OWNER_LEASE_KEY_FILE: L.leaseKey,
     MEMO_BRIDGE_GOVERNANCE_ROOT: governance,
     MEMOLABS_ROOT: L.registryRoot,
     ...(githubApp ? { MEMO_BRIDGE_GITHUB_APP_ID: GITHUB_APP.id, MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID: GITHUB_APP.installation,
@@ -212,23 +248,68 @@ export async function configure({ home, ownerSub, release, governance, node, out
   } catch { return { ok: false, error: 'registry_unavailable' }; }
   const enrolled = await enroll({ projects: registry.projects, explicit: repos, fromRegistry, origin, visibility });
   if (!enrolled.ok) return enrolled;
-  // Under the lock project_create's enrollment takes (server/projects/mac-enroll.mjs, #216), so an
-  // enrollment never renames an older copy over what the installer just wrote.
-  mkdirSync(L.policyDir, { recursive: true, mode: 0o700 });
-  const lock = join(L.policyDir, ENROLL_LOCK);
-  if (!(await acquireLock(lock, { waitMs: 10_000, stepMs: 50 }))) return { ok: false, error: 'owner_policy_locked', detail: lock };
-  try {
-    writeAtomic(L.privatePolicy, renderPrivatePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
-    writeAtomic(L.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects }), 0o600);
-  } finally {
-    rmdirSync(lock);
+  // Staged only: the running runtime keeps the live files until promote (--install).
+  const S = stagedLayout(home, out);
+  writeAtomic(S.privatePolicy, renderPrivatePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
+  writeAtomic(S.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects }), 0o600);
+  // A lease key is made once and never replaced (that would orphan every live private lease).
+  let leaseKey = 'live';
+  if (!existsSync(L.leaseKey)) {
+    if (!existsSync(S.leaseKey)) writeAtomic(S.leaseKey, renderLeaseKey({ ownerSub }), 0o600);
+    leaseKey = 'staged';
   }
-  chmodSync(L.policyDir, 0o700);
+  writeAtomic(S.record, `${JSON.stringify(stageRecord(home))}\n`, 0o600);
+  chmodSync(S.policyDir, 0o700);
   const staged = join(out, `${LABEL}.plist`);
   writeAtomic(staged, renderPlist({ home, node, release, governance, ownerSub, extraPath, githubApp }), 0o644);
   return { ok: true, enrolled: enrolled.projects, public_enrolled: enrolled.publicProjects,
-    skipped: enrolled.skipped, private_policy: L.privatePolicy,
-    remote_policy: L.remotePolicy, plist: staged, github_app: githubApp };
+    skipped: enrolled.skipped, private_policy: S.privatePolicy, remote_policy: S.remotePolicy, lease_key: leaseKey,
+    live_unchanged: true, plist: staged, github_app: githubApp };
+}
+
+const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+const privateFile = path => { try { const st = lstatSync(path); return st.isFile() && (st.mode & 0o077) === 0 && st.uid === process.getuid(); } catch { return false; } };
+
+// Move the staged policy files into place (--install, right before the agent restarts).
+export async function promote({ home, out, now = stamp }) {
+  const L = runtimeLayout(home);
+  const S = stagedLayout(home, out);
+  if (![S.privatePolicy, S.remotePolicy, S.record].every(privateFile)) return { ok: false, error: 'nothing_staged', detail: S.policyDir };
+  mkdirSync(L.policyDir, { recursive: true, mode: 0o700 });
+  // Under the lock project_create's enrollment takes (server/projects/mac-enroll.mjs, #216).
+  const lock = join(L.policyDir, ENROLL_LOCK);
+  if (!(await acquireLock(lock, { waitMs: 10_000, stepMs: 50 }))) return { ok: false, error: 'owner_policy_locked', detail: lock };
+  try {
+    let seen;
+    try { seen = JSON.parse(readFileSync(S.record, 'utf8')); } catch { return { ok: false, error: 'nothing_staged', detail: S.record }; }
+    const live = stageRecord(home);
+    if (seen?.private_sha256 !== live.private_sha256 || seen?.remote_sha256 !== live.remote_sha256) {
+      return { ok: false, error: 'owner_policy_changed_since_stage', detail: 'stage again, then --install' };
+    }
+    const at = now();
+    const backups = [];
+    for (const [staged, target] of [[S.privatePolicy, L.privatePolicy], [S.remotePolicy, L.remotePolicy]]) {
+      if (existsSync(target)) {
+        const backup = `${target}.bak-${at}`;
+        copyFileSync(target, backup, fsConstants.COPYFILE_EXCL);
+        chmodSync(backup, 0o600);
+        backups.push(backup);
+      }
+    }
+    // The private list first: until remote.json names a new project, nothing routes to it.
+    renameSync(S.privatePolicy, L.privatePolicy);
+    renameSync(S.remotePolicy, L.remotePolicy);
+    let leaseKey = 'kept';
+    if (privateFile(S.leaseKey)) {
+      if (existsSync(L.leaseKey)) unlinkSync(S.leaseKey);
+      else { renameSync(S.leaseKey, L.leaseKey); leaseKey = 'created'; }
+    }
+    unlinkSync(S.record);
+    chmodSync(L.policyDir, 0o700);
+    return { ok: true, promoted: [L.privatePolicy, L.remotePolicy], backups, lease_key: leaseKey };
+  } finally {
+    rmdirSync(lock);
+  }
 }
 
 function parseArgs(argv) {
@@ -255,8 +336,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const [step, ...rest] = process.argv.slice(2);
   let result;
   try {
-    if (step !== 'configure') throw new Error('usage: runtime-mac.mjs configure ...');
-    result = await configure(parseArgs(rest));
+    if (step === 'promote') {
+      const opts = parseArgs(rest);
+      result = await promote({ home: opts.home, out: opts.out });
+    } else if (step === 'configure') {
+      result = await configure(parseArgs(rest));
+    } else {
+      throw new Error('usage: runtime-mac.mjs configure|promote ...');
+    }
   } catch (error) {
     result = { ok: false, error: 'configure_failed', detail: String(error?.message ?? error).slice(0, 200) };
   }
