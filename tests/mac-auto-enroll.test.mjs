@@ -98,11 +98,11 @@ test('#216 enrollOnMac never writes outside the owner-policy files or into an un
   assert.equal((await enrollOnMac(args(none))).error, 'enroll_policy_untrusted');
 });
 
-test('#216 enrollOnMac refuses past 50 projects and serializes concurrent enrollments', async t => {
-  const names = Array.from({ length: 50 }, (_, i) => `p${i}`);
+test('#216 enrollOnMac refuses past 100 projects (#257) and serializes concurrent enrollments', async t => {
+  const names = Array.from({ length: 100 }, (_, i) => `p${i}`);
   const full = await home(t, { repos: names.map(n => `memolabs-dev/${n}`), projects: names });
   assert.equal((await enrollOnMac(args(full))).error, 'enroll_limit');
-  assert.equal((await json(full.privateFile)).repos.length, 50);
+  assert.equal((await json(full.privateFile)).repos.length, 100);
   const h = await home(t);
   const many = ['a1', 'b2', 'c3', 'd4', 'e5'];
   const results = await Promise.all(many.map(n => enrollOnMac(args(h, { name: n, repo: `memolabs-dev/${n}` }))));

@@ -5,8 +5,11 @@
 //        --governance <abs> --node <abs> --out <dir> [--from-registry] [--repo memolabs-dev/x ...]
 //
 // configure does three things, all owner-local:
-//   1. enrollment: the private memolabs-dev repositories this Mac may serve to ChatGPT. Each one
-//      must be registered in ~/memolabs/PROJECTS.md, with a verified GitHub origin and not archived.
+//   1. enrollment: the private repositories of the owner's namespaces (memolabs-dev,
+//      guillaume-flambard, #257) this Mac may serve to ChatGPT. Each one must be registered in
+//      ~/memolabs/PROJECTS.md, or be an owner external project of
+//      owner-policy/external-projects.json (server/projects/external-projects.mjs, provisioned by
+//      the owner, never written here), with a verified GitHub origin and not archived.
 //      --from-registry enrolls only private repos; --repo explicitly opts in one verified public
 //      or private repo. A discovery snapshot, VPS file or remote request never enrolls anything.
 //   2. the two policy files the runtime reads (0600, ~/.local/share/memo-bridge/owner-policy/):
@@ -32,9 +35,9 @@ export const AGENT_URL = 'wss://127.0.0.1:9444/agent';
 export const PRIVATE_SCHEMA = 'memolabs.owner-private-repos.v1';
 // The governance ledger accepts only a Pocket ID user id (private_owner_allowlist.py OWNER).
 export const OWNER_SUB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export const REPO_RE = /^memolabs-dev\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+export const REPO_RE = /^(?:memolabs-dev|guillaume-flambard)\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 export const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
-export const MAX_REPOS = 50;
+export const MAX_REPOS = 100;
 // The memo-labs-automation App (lab-infra memo_runner_github_app_id and _installation_id): with
 // --github-app the runtime may use it for project_create only (owner console D-A2-2); the key
 // itself is the app-key credential the installer copies, never in the plist.
@@ -48,6 +51,7 @@ export function runtimeLayout(home) {
     base,
     policyDir: join(base, 'owner-policy'),
     privatePolicy: join(base, 'owner-policy', 'private-repos.json'),
+    externalProjects: join(base, 'owner-policy', 'external-projects.json'),
     remotePolicy: join(base, 'owner-policy', 'remote.json'),
     config: join(base, 'runtime-config'),
     credentials: join(base, 'runtime-config', 'credentials'),
@@ -153,6 +157,7 @@ export function renderPlist({ home, node, release, governance, ownerSub, extraPa
     MEMO_BRIDGE_REMOTE_CONFIG: L.remotePolicy,
     MEMO_BRIDGE_OWNER_SUB: ownerSub,
     MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE: L.privatePolicy,
+    MEMO_BRIDGE_OWNER_EXTERNAL_PROJECTS_FILE: L.externalProjects,
     MEMO_BRIDGE_GOVERNANCE_ROOT: governance,
     MEMOLABS_ROOT: L.registryRoot,
     ...(githubApp ? { MEMO_BRIDGE_GITHUB_APP_ID: GITHUB_APP.id, MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID: GITHUB_APP.installation,
@@ -200,7 +205,11 @@ export async function configure({ home, ownerSub, release, governance, node, out
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) return { ok: false, error: 'owner_sub_invalid' };
   if (!fromRegistry && repos.length === 0) return { ok: false, error: 'nothing_to_enroll', detail: 'pass --from-registry or --repo' };
   let registry;
-  try { registry = await readProjectRegistry({ projectsRoot: L.registryRoot, layoutRoot: L.registryRoot }); } catch { return { ok: false, error: 'registry_unavailable' }; }
+  // The owner's external projects count as registered checkouts here (#257); absent file, none.
+  try {
+    registry = await readProjectRegistry({ projectsRoot: L.registryRoot, layoutRoot: L.registryRoot,
+      externalProjects: { file: L.externalProjects, ownerSub, home, root: L.registryRoot } });
+  } catch { return { ok: false, error: 'registry_unavailable' }; }
   const enrolled = await enroll({ projects: registry.projects, explicit: repos, fromRegistry, origin, visibility });
   if (!enrolled.ok) return enrolled;
   // Under the lock project_create's enrollment takes (server/projects/mac-enroll.mjs, #216), so an

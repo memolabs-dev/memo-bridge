@@ -113,7 +113,8 @@ test('governance gates come from the ledger: readiness, allowlist, Issue edits; 
   assert.equal((await coordinator.taskClaim({ workspace_id: a, issue: 'memolabs-dev/drop#10' })).error, 'issue_not_ready');
   assert.equal((await coordinator.taskClaim({ workspace_id: a, issue: 'memolabs-dev/cuesheet#3' })).error, 'project_mismatch');
   const other = await ws('unknown-origin');
-  assert.equal((await coordinator.taskClaim({ workspace_id: other, issue: 'guillaume-flambard/kollio#1' })).error, 'repo_not_allowed');
+  // Outside the owner's namespaces (memolabs-dev, guillaume-flambard since #257).
+  assert.equal((await coordinator.taskClaim({ workspace_id: other, issue: 'someone-else/kollio#1' })).error, 'repo_not_allowed');
 
   const claim = await coordinator.taskClaim({ workspace_id: a, issue: DROP });
   await github.editIssue(DROP, { body: 'scope changed after the claim' });
@@ -517,23 +518,29 @@ test('tasks_list ranks claimable Issues of registered and allowlisted repositori
   assert.equal((await journal(store)).length, 0, 'successful reads journal nothing');
 });
 
-test('tasks_list intersects registered origins with the ledger allowlist', async t => {
+test('tasks_list intersects registered origins with the ledger allowlist and the owner namespaces (#257)', async t => {
   const stateDir = await tempStateDir(t);
-  const stub = tasksStub([ghItem('memolabs-dev/drop', 1, READY('p1')), ghItem('memolabs-dev/cuesheet', 2, READY('p0'))]);
+  const stub = tasksStub([ghItem('memolabs-dev/drop', 1, READY('p1')), ghItem('memolabs-dev/cuesheet', 2, READY('p0')),
+    ghItem('guillaume-flambard/spec-guard', 3, READY('p2'))]);
+  const origins = { ...PROJECT_ORIGINS, 'spec-guard': 'guillaume-flambard/spec-guard', foreign: 'someone-else/foreign' };
   const { store, coordinator } = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: {
     ...stub,
+    resolveProject: stubProjects({ 'spec-guard': null, foreign: null }),
+    projectRemote: project => Promise.resolve(origins[project.name] ?? null),
     readAllowlist: async () => ({ ok: true, repos: ['memolabs-dev/drop', 'memolabs-dev/lab-hub'] }),
-    listProjectRepos: async () => [{ name: 'drop' }, { name: 'cuesheet' }, { name: 'unknown-origin' }]
+    listProjectRepos: async () => [{ name: 'drop' }, { name: 'cuesheet' }, { name: 'spec-guard' }, { name: 'foreign' }, { name: 'unknown-origin' }]
   } });
   t.after(() => store.close());
   const listed = await coordinator.tasksList({});
-  assert.deepEqual(listed.tasks.map(x => x.issue), ['memolabs-dev/drop#1'], 'cuesheet is registered but not allowlisted');
-  assert.deepEqual(listed.repositories, ['memolabs-dev/drop'], 'lab-hub is allowlisted but not registered');
-  assert.deepEqual(listed.not_allowed, ['cuesheet']);
-  assert.equal(stub.queries.at(-1), 'is:issue is:open label:"agent:ready" repo:memolabs-dev/drop');
+  // cuesheet and spec-guard are not in the literal but in the owner's namespaces: the ledger decides at claim time.
+  assert.deepEqual(listed.tasks.map(x => x.issue), ['memolabs-dev/cuesheet#2', 'memolabs-dev/drop#1', 'guillaume-flambard/spec-guard#3']);
+  assert.deepEqual(listed.repositories, ['guillaume-flambard/spec-guard', 'memolabs-dev/cuesheet', 'memolabs-dev/drop'],
+    'lab-hub is allowlisted but not registered');
+  assert.deepEqual(listed.not_allowed, ['foreign'], 'another owner never reaches the search');
+  assert.ok(stub.queries.every(q => !q.includes('someone-else')));
 
   assert.equal((await coordinator.tasksList({ project: 'drop' })).count, 1);
-  assert.equal((await coordinator.tasksList({ project: 'cuesheet' })).error, 'repo_not_allowed');
+  assert.equal((await coordinator.tasksList({ project: 'foreign' })).error, 'repo_not_allowed');
   assert.equal((await coordinator.tasksList({ project: 'unknown-origin' })).error, 'project_origin_unknown');
   const journaled = (await journal(store)).map(e => `${e.op}:${e.outcome}:${e.code}`);
   assert.deepEqual(journaled, ['tasks_list:denied:repo_not_allowed'], 'only the refusal is journaled');
@@ -543,6 +550,7 @@ test('tasks_list with nothing to search, a GitHub failure, an unreadable allowli
   const stateDir = await tempStateDir(t);
   const none = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: {
     readAllowlist: async () => ({ ok: true, repos: ['memolabs-dev/lab-hub'] }),
+    listProjectRepos: async () => [{ name: 'unknown-origin' }],
     searchIssues: async () => { throw new Error('must not search'); }
   } });
   t.after(() => none.store.close());

@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { memolabsRoot } from './memolabs-root.mjs';
 import { loadCatalogSnapshot, projectDiscoveryProjection } from './catalog-snapshot.mjs';
+import { readExternalProjects } from './projects/external-projects.mjs';
 
 const execFileAsync = promisify(execFile);
 // The registry root: PROJECTS.md lives there and its Path column is relative to it. On the Mac
@@ -93,6 +94,16 @@ export async function readProjectRegistry(options = {}) {
     }
     return { ...record, available, path: safePath };
   }));
+  // The owner's enrolled checkouts outside the root (#257, server/projects/external-projects.mjs):
+  // Mac only, from his 0600 owner-policy file; a registry row of the same name wins.
+  // options.externalProjects: false leaves them out (the catalog snapshot export), an object
+  // replaces the environment defaults (tests).
+  if (options.externalProjects !== false) {
+    const names = new Set(projects.map(p => p.name));
+    for (const row of await readExternalProjects(options.externalProjects ?? {})) {
+      if (!names.has(row.name)) { projects.push(row); names.add(row.name); }
+    }
+  }
   return { source: 'PROJECTS.md', projects, count: projects.length };
 }
 

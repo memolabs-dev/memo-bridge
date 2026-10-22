@@ -13,9 +13,11 @@
 #   --owner-sub       the owner's Pocket ID user id (lab-infra memo_bridge_remote_owner_sub)
 #   --governance-ref  the memolabs-dev/.github commit the ledger runs (scripts/issue_lease.py,
 #                     issue_preflight.py, private_owner_allowlist.py); 40 hex
-#   --from-registry   enroll every project of ~/memolabs/PROJECTS.md whose Mac checkout has a
-#                     memolabs-dev origin that GitHub reports private and not archived
-#   --repo            enroll one such repository (repeatable)
+#   --from-registry   enroll every project of ~/memolabs/PROJECTS.md, and every owner external
+#                     project of owner-policy/external-projects.json (#257, provisioned by the
+#                     owner), whose Mac checkout has an origin in the owner's namespaces
+#                     (memolabs-dev, guillaume-flambard) that GitHub reports private and not archived
+#   --repo            enroll one such repository, or opt in one public one (repeatable)
 #   --bridge-ref      the memo-bridge commit to run (default: HEAD of this checkout); 40 hex
 #   --governance-src  where to clone the governance repository from (default GitHub)
 #   --app-key         the memo-labs-automation App private key (lab-infra memo_runner_github_app_key_path),
@@ -32,7 +34,8 @@
 #                     (the token of the owner's own `gh` login, read from the Keychain, never
 #                     printed, never in the plist or the environment)
 #   ~/.local/share/memo-bridge/owner-policy/                    0700: private-repos.json and
-#                     remote.json (deploy/mac/runtime-mac.mjs configure)
+#                     remote.json (deploy/mac/runtime-mac.mjs configure); external-projects.json
+#                     is read, never written
 #   ~/.local/share/memo-bridge/launchd/dev.memolabs.memo-bridge-agent.plist   staged plist
 # --install keeps the current plist as .../launchd/dev.memolabs.memo-bridge-agent.plist.probe
 # (once), installs the staged one and restarts the agent; --rollback puts the probe one back.

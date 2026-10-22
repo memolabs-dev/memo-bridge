@@ -50,7 +50,9 @@ test('enrollment: only registered Mac checkouts that GitHub reports private and 
     assert.equal((await enroll({ projects: registry, explicit: [repo], ...deps })).error, 'repo_not_enrolled', repo);
   }
   assert.equal((await enroll({ projects: registry, explicit: ['someone/perso'], ...deps })).error, 'invalid_repo');
-  const many = Array.from({ length: 51 }, (_, i) => project(`p${i}`));
+  // #257: the owner's own account is an owner namespace; a look-alike is not.
+  assert.equal((await enroll({ projects: registry, explicit: ['guillaume-flambard-x/perso'], ...deps })).error, 'invalid_repo');
+  const many = Array.from({ length: 101 }, (_, i) => project(`p${i}`));
   const wide = await enroll({ projects: many, fromRegistry: true, origin: async p => `memolabs-dev/${p.slice(3)}`,
     visibility: async () => ({ private: true, archived: false }) });
   assert.equal(wide.error, 'too_many_repos');
@@ -87,6 +89,7 @@ test('plist: runtime mode with every variable the runtime and the ledger read, n
     MEMO_BRIDGE_AGENT_URL: AGENT_URL, MEMO_BRIDGE_AGENT_CONFIG: '/Users/owner/.config/memo-bridge',
     CREDENTIALS_DIRECTORY: L.credentials, MEMO_BRIDGE_REMOTE_CONFIG: L.remotePolicy, MEMO_BRIDGE_OWNER_SUB: SUB,
     MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE: '/Users/owner/.local/share/memo-bridge/owner-policy/private-repos.json',
+    MEMO_BRIDGE_OWNER_EXTERNAL_PROJECTS_FILE: '/Users/owner/.local/share/memo-bridge/owner-policy/external-projects.json',
     MEMO_BRIDGE_GOVERNANCE_ROOT: `${L.base}/governance/def`, MEMOLABS_ROOT: '/Users/owner/memolabs', HOME: home,
     PATH: '/opt/node/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' });
   assert.match(text, /runtime-releases\/abc\/bridge\/agent-cli\.mjs/);

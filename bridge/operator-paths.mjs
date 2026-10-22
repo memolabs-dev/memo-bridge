@@ -115,8 +115,10 @@ export async function repositoryGuard(canonical, { projects }) {
 export function catalogProjects(repositories, read = readProjectRegistry) {
   if (!repositories) return async () => [];
   return async () => {
+    // The operator's own policy names its repositories; the owner's external projects (#257) are
+    // a coordinator matter and stay out of it.
     const catalog = await read({ projectsRoot: repositories.projects_root, registryFile: repositories.registry_file,
-      layoutRoot: repositories.layout_root });
+      layoutRoot: repositories.layout_root, externalProjects: false });
     return catalog.projects.filter(p => p.available && p.path).map(p => ({ name: p.name, path: p.path }));
   };
 }

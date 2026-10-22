@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 export async function exportMacCatalog({ projectsRoot, output, generatedAt } = {}) {
   if (process.platform !== 'darwin' && !projectsRoot) throw new Error('mac_registry_required');
   if (!isAbsolute(output ?? '')) throw new Error('absolute_output_required');
-  const registry = await readProjectRegistry({ projectsRoot, layoutRoot: projectsRoot });
+  const registry = await readProjectRegistry({ projectsRoot, layoutRoot: projectsRoot, externalProjects: false });
   const snapshot = makeCatalogSnapshot(registry.projects, generatedAt);
   const temporary = join(dirname(output), '.' + basename(output) + '.' + randomUUID() + '.tmp');
   try {

@@ -37,6 +37,8 @@ const DENIALS = [
   [/^(Missing or superseded lease|Lease expired)/, 'stale_lease'],
   [/^(Issue changed|Post-claim preflight failed)/, 'issue_changed'],
   [/allowlist/, 'repo_not_allowed'],
+  // A private repository that is not enrolled, or an archived one (issue_preflight.py assess).
+  [/^Repository privacy or enrollment mismatch/, 'repo_not_allowed'],
   [/^Concurrent lease change/, 'lease_race_lost'],
   [/^Issue (is not open|is not explicitly agent:ready|has blocking labels|must have exactly one explicit priority)/, 'issue_not_ready'],
   [/^(GitHub API|Cannot verify GitHub)/, 'ledger_unavailable']
@@ -93,8 +95,11 @@ export const ledgerChildEnv = ghChildEnv;
 // runtime passes <stateDir>/ledger-gh; /tmp may be read-only under ProtectSystem=strict).
 // `credentials`: the GitHub credentials provider (the runtime shares one); built from `env`
 // when absent.
+// `childDefaults`: variables the ledger child gets when `env` does not set them (the stdio
+// server's MEMO_BRIDGE_AGENT_MODE=stdio and MEMO_BRIDGE_HOST, #257).
 export function createIssueLeaseClient({ root = defaultGovernanceRoot(), python = 'python3', timeoutMs = 120000,
-  env = process.env, run = runLedger, scratchDir = null, credentials = null } = {}) {
+  env: ownEnv = process.env, run = runLedger, scratchDir = null, credentials = null, childDefaults = {} } = {}) {
+  const env = { ...childDefaults, ...ownEnv };
   const provider = credentials ?? createGitHubCredentials({ env });
   let script = null;
   function locate() {

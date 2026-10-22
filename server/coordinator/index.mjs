@@ -8,7 +8,7 @@
 // - this module adds what the ledger does not own: per-session workspaces, the identity of the
 //   worker (derived by the server, never by the model), Git-verified checkpoints and an audit
 //   journal, all in the private local store.
-import { withOwnerPrivateRepos } from './owner-private-repos.mjs';
+import { allowedRepo, withOwnerPrivateRepos } from './owner-private-repos.mjs';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
@@ -343,7 +343,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   const currentRemotePolicy = typeof remotePolicyOption === 'function' ? remotePolicyOption : () => remotePolicyOption;
   const remote = isRemotePrincipal(principal);
   // Mac owner-only private enrollment is an explicit local file grant, never
-  // the VPS metadata-only snapshot or a request-provided repository name.
+  // the VPS metadata-only snapshot or a request-provided repository name. The result also
+  // names the owner's namespaces (#257): a repository there passes this pre-filter and the
+  // ledger decides public, enrolled private or refused (allowedRepo).
   const effectiveAllowlist = async () => withOwnerPrivateRepos(await readAllowlist(), {
     file: privatePolicyFile, principal, remotePolicy: currentRemotePolicy(), host
   });
@@ -611,7 +613,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     if (!origin) return fail('project_origin_unknown');
     const allowlist = await effectiveAllowlist();
     if (!allowlist.ok) return allowlist;
-    const repo = allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase());
+    const repo = allowedRepo(allowlist, origin);
     if (!repo) return fail('repo_not_allowed');
     const [owner, name] = repo.split('/');
     return { ok: true, project: project.project.name, repo: { full: repo, owner, name } };
@@ -890,13 +892,12 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       }
       const allowlist = await effectiveAllowlist();
       if (!allowlist.ok) return allowlist;
-      const allowed = new Map(allowlist.repos.map(r => [r.toLowerCase(), r]));
       const origins = await Promise.all(projects.map(async p => ({ name: p.name, origin: await projectRemote(p) })));
       const repoProjects = new Map();
       const notAllowed = [];
       for (const { name, origin } of origins) {
         if (!origin) continue;
-        const repo = allowed.get(origin.toLowerCase());
+        const repo = allowedRepo(allowlist, origin);
         if (!repo) { notAllowed.push(name); continue; }
         // Two registered projects on one origin: the first registered name wins.
         if (!repoProjects.has(repo.toLowerCase())) repoProjects.set(repo.toLowerCase(), { name, repo });

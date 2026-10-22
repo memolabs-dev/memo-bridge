@@ -137,9 +137,12 @@ surface.registerTool('bridge_info', {
       'deployment'],
     excluded_scope: 'the tools themselves; jobs are bounded by job_sandbox, and owner-equivalent when it is off',
     vps_runner: 'Phase 4: the same tools run on the VPS through the hub (memo-bridge-runner.service, runtime for host vps), jobs ' +
-      'queued one at a time as memo-job@<id>.service without credentials; hub write tools stay disabled until the root CI ' +
-      'runners are isolated (docs/RUNNER_VPS.md, docs/HUB_SECURITY.md)',
-    next: 'Hub write tools for the owner once the root CI runners are isolated; OIDC and public exposure (Phase 5).'
+      'queued one at a time as memo-job@<id>.service without credentials; hub write tools are served to the owner only ' +
+      'when remote.json sets remote_writes: enabled, and the hub refuses to open them while a GitHub Actions runner unit ' +
+      'runs as root (bridge/remote-boot.mjs, docs/RUNNER_VPS.md, docs/HUB_SECURITY.md)',
+    owner_scope: 'the owner (local:<OS user> here, oidc:<owner sub> through the hub) works on every project of his ' +
+      'namespaces memolabs-dev and guillaume-flambard: public ones as GitHub reports them, private ones only when ' +
+      'enrolled in the Mac owner-policy files (private-repos.json, external-projects.json) (#257)'
   });
 });
 
