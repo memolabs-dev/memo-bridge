@@ -256,3 +256,52 @@ test('re-check: the private-data denylist covers the Memo Labs layout and other 
     assert.ok(HOME_DENY_READ.includes(entry), entry);
   }
 });
+
+// #257: an owner external checkout sits directly in the home (server/projects/external-projects.mjs).
+async function homeCheckout(t) {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'memo-sbx-ext-')));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const home = join(base, 'home');
+  const repo = join(home, 'ext');
+  await mkdir(repo, { recursive: true });
+  git(repo, 'init', '-q', '-b', 'main');
+  await writeFile(join(repo, 'README.md'), '# ext\n');
+  git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'initial');
+  await writeFile(join(repo, '.env'), 'TOKEN=owner-secret\n');            // untracked, the owner's
+  const worktrees = join(base, 'worktrees');
+  const worktree = join(worktrees, 'ext', 'agent-1');
+  await mkdir(join(worktrees, 'ext'), { recursive: true });
+  git(repo, 'worktree', 'add', '-q', '-b', 'agent/1', worktree, 'main');
+  const tools = join(home, '.toolchain', 'v1', 'bin');                     // like ~/.nvm/versions/node/v24/bin
+  await mkdir(tools, { recursive: true });
+  await writeFile(join(tools, 'hello'), '#!/bin/sh\necho toolchain-ok\n', { mode: 0o755 });
+  await mkdir(join(home, '.ssh'));
+  await writeFile(join(home, '.ssh', 'id_ed25519'), 'PRIVATE KEY\n');
+  const stateDir = join(base, 'state'); await mkdir(stateDir, { mode: 0o700 });
+  const jobTmp = join(base, 'jobtmp'); await mkdir(jobTmp, { mode: 0o700 });
+  return { home, repo, worktree, worktrees, tools, stateDir, jobTmp };
+}
+
+test('#257 a checkout directly in the home closes the checkout, never the whole home', async t => {
+  const w = await homeCheckout(t);
+  const paths = sandboxPaths({ worktree: w.worktree, stateDir: w.stateDir, jobTmp: w.jobTmp, worktreesRoot: w.worktrees, home: w.home });
+  assert.equal(paths.gitCommon, join(w.repo, '.git'));
+  assert.ok(paths.denyRead.includes(w.repo), 'the checkout (its .env, the owner files) is closed');
+  assert.ok(!paths.denyRead.includes(w.home), 'the home itself is not: it would close every toolchain');
+  assert.ok(paths.denyRead.includes(join(w.home, '.ssh')));
+});
+
+test('#257 in the sandbox a job of a home checkout runs its toolchain but reads neither the checkout nor secrets', { skip: !DARWIN && 'Seatbelt is macOS only' }, async t => {
+  const w = await homeCheckout(t);
+  const paths = sandboxPaths({ worktree: w.worktree, stateDir: w.stateDir, jobTmp: w.jobTmp, worktreesRoot: w.worktrees, home: w.home });
+  const run = (...argv) => {
+    const [command, args] = sandboxCommand(argv, paths);
+    return spawnSync(command, args, { cwd: w.worktree, encoding: 'utf8', timeout: 20000,
+      env: { PATH: `${w.tools}:/usr/bin:/bin`, HOME: w.jobTmp, GIT_CONFIG_GLOBAL: join(GIT_HOME, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' } });
+  };
+  assert.equal(run('/bin/cat', 'README.md').stdout, '# ext\n', 'the worktree is readable');
+  assert.equal(run('hello').stdout, 'toolchain-ok\n', 'a toolchain in the home still runs');
+  assert.notEqual(run('/bin/cat', join(w.repo, '.env')).status, 0, 'the checkout .env is closed');
+  assert.notEqual(run('/bin/cat', join(w.home, '.ssh', 'id_ed25519')).status, 0, 'private keys are closed');
+  assert.match(run('/usr/bin/git', 'log', '--oneline', '-1').stdout, /initial/, 'Git data of the checkout stays readable');
+});

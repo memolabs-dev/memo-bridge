@@ -119,8 +119,16 @@ export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home =
   }
   if (worktreesRoot) denyRead.add(real(worktreesRoot));
   // The folder holding the repository itself (the projects root): other repositories and
-  // their .env files stay out of reach.
-  if (common) denyRead.add(dirname(dirname(common)));
+  // their .env files stay out of reach. An owner external checkout sits directly in the home
+  // (#257, server/projects/external-projects.mjs): its folder is the home itself, and closing it
+  // would close every toolchain. Then the checkout itself is closed (its .env and the owner's
+  // working files); the worktree and the Git data are opened again after it, and the rest of
+  // the home is covered by HOME_DENY_READ and, while installing, by the closed home.
+  if (common) {
+    const holder = dirname(dirname(common));
+    const homeReal = real(home);
+    denyRead.add(holder === homeReal || homeReal.startsWith(`${holder}/`) ? dirname(common) : holder);
+  }
   return {
     worktree: wt,
     worktreeGit: join(wt, '.git'),
