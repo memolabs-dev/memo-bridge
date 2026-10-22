@@ -523,7 +523,8 @@ test('tasks_list intersects registered origins with the ledger allowlist and the
   const stub = tasksStub([ghItem('memolabs-dev/drop', 1, READY('p1')), ghItem('memolabs-dev/cuesheet', 2, READY('p0')),
     ghItem('guillaume-flambard/spec-guard', 3, READY('p2'))]);
   const origins = { ...PROJECT_ORIGINS, 'spec-guard': 'guillaume-flambard/spec-guard', foreign: 'someone-else/foreign' };
-  const { store, coordinator } = coordinatorOn(stateDir, { ledger: stubLedger(), tasks: {
+  // The owner's own local principal: the namespaces are his only (fix pass of #258).
+  const { store, coordinator } = coordinatorOn(stateDir, { principal: localOwnerPrincipal(), ledger: stubLedger(), tasks: {
     ...stub,
     resolveProject: stubProjects({ 'spec-guard': null, foreign: null }),
     projectRemote: project => Promise.resolve(origins[project.name] ?? null),
@@ -538,6 +539,10 @@ test('tasks_list intersects registered origins with the ledger allowlist and the
     'lab-hub is allowlisted but not registered');
   assert.deepEqual(listed.not_allowed, ['foreign'], 'another owner never reaches the search');
   assert.ok(stub.queries.every(q => !q.includes('someone-else')));
+  // Namespace-only repositories are searched as public only; the exact entry as is.
+  assert.ok(stub.queries.some(q => q === 'is:issue is:open label:"agent:ready" repo:memolabs-dev/drop'), stub.queries.join('\n'));
+  assert.ok(stub.queries.some(q => q.startsWith('is:issue is:open is:public label:"agent:ready"') && q.includes('repo:memolabs-dev/cuesheet')),
+    stub.queries.join('\n'));
 
   assert.equal((await coordinator.tasksList({ project: 'drop' })).count, 1);
   assert.equal((await coordinator.tasksList({ project: 'foreign' })).error, 'repo_not_allowed');

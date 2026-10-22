@@ -7,6 +7,11 @@
 // (the stdio server he starts himself; the file must belong to that same uid). Any other
 // remote principal is refused; any other local principal (reader:, hub:) gets no private
 // repository and keeps the public ones.
+//
+// The owner namespaces (memolabs-dev, guillaume-flambard) are a pre-filter for the owner's
+// principals only (fix pass of #258): anyone else keeps the exact public literal, whether or not
+// a private file is set, so hub:owner, hub:readonly and reader: never search a private
+// repository the owner did not enroll.
 import { readFile, lstat, realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { isPrincipal, isRemotePrincipal, localOwnerId } from './policy.mjs';
@@ -66,6 +71,14 @@ export async function readOwnerFile({ file, name, home, uid, fs }) {
   } catch { return {error:'private_policy_unavailable'}; }
 }
 
+// Whether `principal` is the owner for the namespace pre-filter and the ledger's owner marker:
+// his remote principal (oidc:<owner_sub>, the configured owner sub) or his local stdio principal
+// (the minted local:<OS user>, which SECURITY.md already treats as the owner; no owner sub needed).
+export function isOwnerPrincipal(principal, ownerSub, env = process.env) {
+  if (ownerKind(principal, ownerSub, env)) return true;
+  return !isRemotePrincipal(principal) && isPrincipal(principal) && principal.id === localOwnerId(env);
+}
+
 export async function loadOwnerPrivatePolicy({
   file, principal, remotePolicy, host,
   home = process.env.HOME,
@@ -92,7 +105,18 @@ export async function withOwnerPrivateRepos(baseAllowlist, context={}) {
   if (!baseAllowlist?.ok || !Array.isArray(baseAllowlist.repos)) return baseAllowlist;
   const privateResult = await loadOwnerPrivatePolicy(context);
   if (!privateResult.ok) return privateResult;
-  return {ok:true,repos:[...new Set([...baseAllowlist.repos,...privateResult.repos])],namespaces:OWNER_NAMESPACES};
+  const repos = [...new Set([...baseAllowlist.repos,...privateResult.repos])];
+  const ownerSub = context.remotePolicy?.configured ? context.remotePolicy.owner_sub : null;
+  return isOwnerPrincipal(context.principal, ownerSub, context.env ?? process.env)
+    ? {ok:true,repos,namespaces:OWNER_NAMESPACES} : {ok:true,repos};
+}
+
+// The exact entry an origin matches (the public literal, an enrolled private repository), or
+// null. A repository allowed only through the owner namespaces is searched as public only
+// (tasks_list adds is:public): its privacy is GitHub's to say, and the ledger decides at claim.
+export function exactRepo(allowlist, origin) {
+  if (!allowlist?.ok || typeof origin !== 'string') return null;
+  return allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase()) ?? null;
 }
 
 // The repository spelling a project origin is allowed under, or null. An exact entry (the
@@ -102,7 +126,7 @@ export async function withOwnerPrivateRepos(baseAllowlist, context={}) {
 // reaches the ledger.
 export function allowedRepo(allowlist, origin) {
   if (!allowlist?.ok || typeof origin !== 'string') return null;
-  const exactMatch = allowlist.repos.find(r => r.toLowerCase() === origin.toLowerCase());
+  const exactMatch = exactRepo(allowlist, origin);
   if (exactMatch) return exactMatch;
   const [owner] = origin.split('/');
   const namespaces = Array.isArray(allowlist.namespaces) ? allowlist.namespaces : [];

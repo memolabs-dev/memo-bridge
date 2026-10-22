@@ -8,7 +8,7 @@
 // - this module adds what the ledger does not own: per-session workspaces, the identity of the
 //   worker (derived by the server, never by the model), Git-verified checkpoints and an audit
 //   journal, all in the private local store.
-import { allowedRepo, withOwnerPrivateRepos } from './owner-private-repos.mjs';
+import { allowedRepo, exactRepo, isOwnerPrincipal, withOwnerPrivateRepos } from './owner-private-repos.mjs';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
@@ -287,8 +287,10 @@ export function ghSearchIssues(query, { perPage = TASKS_SCAN.perPage, timeoutMs 
 
 // The search query is fixed except for the repository qualifiers, which come only from the
 // allowlist ∩ registered origins and are validated by REPO_RE.
-export function tasksQuery(repos) {
-  return ['is:issue', 'is:open', `label:"${READY_LABEL}"`, ...repos.map(r => `repo:${r}`)].join(' ');
+// `publicOnly`: repositories allowed only through the owner namespaces (fix pass of #258): GitHub
+// returns their Issues only when the repository is public. The repository qualifiers stay last.
+export function tasksQuery(repos, { publicOnly = false } = {}) {
+  return ['is:issue', 'is:open', ...(publicOnly ? ['is:public'] : []), `label:"${READY_LABEL}"`, ...repos.map(r => `repo:${r}`)].join(' ');
 }
 
 // Keep the claimable Issues of one search page, in rank order: p0 > p1 > p2, then oldest first.
@@ -349,6 +351,14 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   const effectiveAllowlist = async () => withOwnerPrivateRepos(await readAllowlist(), {
     file: privatePolicyFile, principal, remotePolicy: currentRemotePolicy(), host
   });
+  // The ledger a claim goes through: the owner's carries the per-call owner marker, which the
+  // governance script requires before it grants a new lease on an enrolled private repository
+  // (fix pass of #258). Anyone else's claim goes through the plain client.
+  const claimLedger = () => {
+    const policy = currentRemotePolicy();
+    return isOwnerPrincipal(principal, policy?.configured ? policy.owner_sub : null) && typeof ledger.forOwner === 'function'
+      ? ledger.forOwner() : ledger;
+  };
   // Where the call came from and which client made it, as the server set them on the principal
   // (D6); never read from arguments. Absent attributes stay null in the journal.
   const principalVia = ['stdio', 'hub'].includes(principal.via) ? principal.via : (remote ? 'hub' : null);
@@ -900,7 +910,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         const repo = allowedRepo(allowlist, origin);
         if (!repo) { notAllowed.push(name); continue; }
         // Two registered projects on one origin: the first registered name wins.
-        if (!repoProjects.has(repo.toLowerCase())) repoProjects.set(repo.toLowerCase(), { name, repo });
+        if (!repoProjects.has(repo.toLowerCase())) repoProjects.set(repo.toLowerCase(), { name, repo, publicOnly: !exactRepo(allowlist, origin) });
       }
       if (args.project !== undefined) {
         if (!origins[0].origin) return fail('project_origin_unknown');
@@ -909,18 +919,27 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       const repos = [...repoProjects.values()].map(p => p.repo).sort();
       const perQuery = perRepoSearch ? 1 : TASKS_SCAN.reposPerQuery;
       const queries = perRepoSearch ? TASKS_SCAN.repoQueries : TASKS_SCAN.queries;
+      // Exact entries and namespace-only repositories never share a query: the latter are
+      // searched with is:public.
       const chunks = [];
-      for (let i = 0; i < repos.length && chunks.length < queries; i += perQuery) {
-        chunks.push(repos.slice(i, i + perQuery));
+      for (const publicOnly of [false, true]) {
+        const group = repos.filter(r => repoProjects.get(r.toLowerCase()).publicOnly === publicOnly);
+        for (let i = 0; i < group.length && chunks.length < queries; i += perQuery) {
+          chunks.push({ repos: group.slice(i, i + perQuery), publicOnly });
+        }
       }
-      let truncated = repos.length > queries * perQuery;
-      const items = [];
-      for (const chunk of chunks) {
-        const page = await search(tasksQuery(chunk), chunk);
+      let truncated = chunks.reduce((n, c) => n + c.repos.length, 0) < repos.length;
+      const items = []; const seen = new Set();
+      for (const { repos: chunk, publicOnly } of chunks) {
+        const page = await search(tasksQuery(chunk, { publicOnly }), chunk);
         if (page.error === 'credential_unavailable') return page;
         if (!page.ok) return fail('github_unavailable', page.detail);
         if (page.incomplete || page.total_count > page.items.length) truncated = true;
-        items.push(...page.items.slice(0, TASKS_SCAN.perPage));
+        for (const item of page.items.slice(0, TASKS_SCAN.perPage)) {
+          // One Issue once, whichever query returned it.
+          const key = `${item?.repository_url}#${item?.number}`;
+          if (!seen.has(key)) { seen.add(key); items.push(item); }
+        }
       }
       const tasks = rankTasks(items, repoProjects, { withBody });
       return { ok: true, count: Math.min(tasks.length, max), tasks: tasks.slice(0, max),
@@ -970,7 +989,7 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (lease?.state === 'claimed' && lease.worker !== worker && !(now() >= reclaimableAfter(lease.expires_at))) {
         return fail('lease_held', 'the previous lease is live, expired less than 60 s ago, or has no readable expiry');
       }
-      const result = await ledger.claim(issue, worker, ttl);
+      const result = await claimLedger().claim(issue, worker, ttl);
       if (result.ok) {
         receipt = result.receipt;
       } else if (UNCERTAIN.has(result.error)) {

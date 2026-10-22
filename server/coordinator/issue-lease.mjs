@@ -111,12 +111,18 @@ export function createIssueLeaseClient({ root = defaultGovernanceRoot(), python 
     return script;
   }
 
-  async function call(action, args) {
+  // `owner`: the coordinator's per-call statement that the caller is the owner (fix pass of #258).
+  // The variable never comes from the server's own environment: a plist or shell that sets it
+  // grants nothing.
+  async function call(action, args, { owner = false } = {}) {
     let path;
     try { path = locate(); } catch { return { ok: false, error: 'ledger_unavailable', detail: 'issue_lease.py not found' }; }
     // -E -s: ignore PYTHON* variables and user site-packages; the script directory stays on
     // sys.path because the ledger imports its sibling issue_preflight module.
-    let childEnv = { ...env, GH_PROMPT_DISABLED: '1' };
+    const base = { ...env };
+    delete base[OWNER_CALL_VAR];
+    if (owner) base[OWNER_CALL_VAR] = '1';
+    let childEnv = { ...base, GH_PROMPT_DISABLED: '1' };
     let configDir = null;
     if (credentialsRequired(env)) {
       const read = await provider.token('ledger', LEDGER_REPO);
@@ -125,7 +131,7 @@ export function createIssueLeaseClient({ root = defaultGovernanceRoot(), python 
       try { configDir = await privateConfigDir(scratchDir); } catch {
         return { ok: false, error: 'ledger_unavailable', detail: 'gh config dir unavailable' };
       }
-      childEnv = ledgerChildEnv(env, read.token, configDir);
+      childEnv = ledgerChildEnv(base, read.token, configDir);
     }
     let out;
     try {
@@ -153,21 +159,26 @@ export function createIssueLeaseClient({ root = defaultGovernanceRoot(), python 
     WORKER_RE.test(worker) && CLAIM_RE.test(claimId) && SHA_RE.test(fence) ? ['--worker', worker, '--claim-id', claimId, '--fence', fence] : null;
   const invalid = { ok: false, error: 'invalid_input', detail: 'ownership' };
 
-  return {
-    status: issue => call('status', issueArgs(issue)),
+  const client = opts => ({
+    status: issue => call('status', issueArgs(issue), opts),
     claim: (issue, worker, ttl) => WORKER_RE.test(worker)
-      ? call('claim', [...issueArgs(issue), '--worker', worker, '--ttl', String(ttl)]) : Promise.resolve(invalid),
+      ? call('claim', [...issueArgs(issue), '--worker', worker, '--ttl', String(ttl)], opts) : Promise.resolve(invalid),
     verify: (issue, worker, claimId, fence) => {
       const o = owner(worker, claimId, fence);
-      return o ? call('verify', [...issueArgs(issue), ...o]) : Promise.resolve(invalid);
+      return o ? call('verify', [...issueArgs(issue), ...o], opts) : Promise.resolve(invalid);
     },
     heartbeat: (issue, worker, claimId, fence, ttl) => {
       const o = owner(worker, claimId, fence);
-      return o ? call('heartbeat', [...issueArgs(issue), ...o, '--ttl', String(ttl)]) : Promise.resolve(invalid);
+      return o ? call('heartbeat', [...issueArgs(issue), ...o, '--ttl', String(ttl)], opts) : Promise.resolve(invalid);
     },
     release: (issue, worker, claimId, fence, outcome) => {
       const o = owner(worker, claimId, fence);
-      return o ? call('release', [...issueArgs(issue), ...o, '--outcome', outcome]) : Promise.resolve(invalid);
+      return o ? call('release', [...issueArgs(issue), ...o, '--outcome', outcome], opts) : Promise.resolve(invalid);
     }
-  };
+  });
+  // forOwner(): the same calls, marked as the owner's (the coordinator decides, per principal).
+  return { ...client({}), forOwner: () => client({ owner: true }) };
 }
+
+// The variable that tells the ledger child the call is the owner's (scripts/private_owner_allowlist.py).
+export const OWNER_CALL_VAR = 'MEMO_BRIDGE_LEDGER_OWNER_CALL';
