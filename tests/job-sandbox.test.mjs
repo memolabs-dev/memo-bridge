@@ -289,6 +289,7 @@ test('#257 a checkout directly in the home closes the checkout, never the whole 
   assert.ok(paths.denyRead.includes(w.repo), 'the checkout (its .env, the owner files) is closed');
   assert.ok(!paths.denyRead.includes(w.home), 'the home itself is not: it would close every toolchain');
   assert.ok(paths.denyRead.includes(join(w.home, '.ssh')));
+  assert.ok(paths.denyRead.includes(join(w.home, 'gmail.json')), 'the mail export in the home root');
 });
 
 test('#257 in the sandbox a job of a home checkout runs its toolchain but reads neither the checkout nor secrets', { skip: !DARWIN && 'Seatbelt is macOS only' }, async t => {

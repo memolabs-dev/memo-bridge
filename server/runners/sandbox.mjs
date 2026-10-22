@@ -51,6 +51,8 @@ export const HOME_DENY_READ = Object.freeze([
   '.config/configstore', '.config/rclone', '.config/stripe', '.cloudflared', '.wrangler', '.vercel', '.netlify',
   '.fly', '.railway', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml', '.gem/credentials',
   '.zsh_history', '.bash_history', '.python_history', '.node_repl_history',
+  // The owner's mail export in the home root (~/AGENTS.md: never read; review of #257).
+  'gmail.json',
   'Library/Mobile Documents', 'Library/CloudStorage', 'Library/Containers', 'Library/Group Containers', 'Library/Safari'
 ]);
 
