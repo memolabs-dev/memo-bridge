@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { createRuntime } from '../server/runtime.mjs';
 import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
@@ -294,15 +294,83 @@ test('#257 a checkout directly in the home closes the checkout, never the whole 
 
 test('#257 in the sandbox a job of a home checkout runs its toolchain but reads neither the checkout nor secrets', { skip: !DARWIN && 'Seatbelt is macOS only' }, async t => {
   const w = await homeCheckout(t);
-  const paths = sandboxPaths({ worktree: w.worktree, stateDir: w.stateDir, jobTmp: w.jobTmp, worktreesRoot: w.worktrees, home: w.home });
+  const path = `${w.tools}:/usr/bin:/bin`;
+  const paths = sandboxPaths({ worktree: w.worktree, stateDir: w.stateDir, jobTmp: w.jobTmp, worktreesRoot: w.worktrees, home: w.home, path });
   const run = (...argv) => {
     const [command, args] = sandboxCommand(argv, paths);
     return spawnSync(command, args, { cwd: w.worktree, encoding: 'utf8', timeout: 20000,
-      env: { PATH: `${w.tools}:/usr/bin:/bin`, HOME: w.jobTmp, GIT_CONFIG_GLOBAL: join(GIT_HOME, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' } });
+      env: { PATH: path, HOME: w.jobTmp, GIT_CONFIG_GLOBAL: join(GIT_HOME, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' } });
   };
   assert.equal(run('/bin/cat', 'README.md').stdout, '# ext\n', 'the worktree is readable');
   assert.equal(run('hello').stdout, 'toolchain-ok\n', 'a toolchain in the home still runs');
   assert.notEqual(run('/bin/cat', join(w.repo, '.env')).status, 0, 'the checkout .env is closed');
   assert.notEqual(run('/bin/cat', join(w.home, '.ssh', 'id_ed25519')).status, 0, 'private keys are closed');
   assert.match(run('/usr/bin/git', 'log', '--oneline', '-1').stdout, /initial/, 'Git data of the checkout stays readable');
+});
+
+// Fix pass of #258, finding 1: the recipe phase read every home file the denylist did not name,
+// ~/.zshrc and its exported tokens included. A test script could copy one into the worktree,
+// and worktree_read_file would hand it to the remote model.
+const HOME_SECRETS = ['.zshrc', '.zprofile', '.zshenv', '.bashrc', '.bash_profile', '.profile',
+  '.config/opencode/secrets/key', '.config/memo-bridge/token', '.config/dify-dataset-key', '.config/resend/key',
+  '.config/neonctl/credentials.json', '.config/jobs/key', '.composio/key', 'notes.txt'];
+
+test('fix pass #258: the denylist names the shell startup files and the measured .config secrets', () => {
+  for (const entry of ['.zshrc', '.zprofile', '.zshenv', '.zlogin', '.bashrc', '.bash_profile', '.profile', '.config/opencode',
+    '.config/memo-bridge', '.config/dify-dataset-key', '.config/resend', '.config/neonctl', '.config/jobs']) {
+    assert.ok(HOME_DENY_READ.includes(entry), entry);
+  }
+});
+
+test('fix pass #258: a recipe reads no home file outside its tool roots, even one the denylist does not name', { skip: !DARWIN && 'Seatbelt is macOS only' }, async t => {
+  const w = await homeCheckout(t);
+  for (const rel of HOME_SECRETS) {
+    await mkdir(join(w.home, rel, '..'), { recursive: true });
+    await writeFile(join(w.home, rel), 'export API_TOKEN=owner-secret\n');
+  }
+  const path = `${w.tools}:/usr/bin:/bin`;
+  const paths = sandboxPaths({ worktree: w.worktree, stateDir: w.stateDir, jobTmp: w.jobTmp, worktreesRoot: w.worktrees, home: w.home, path });
+  const run = (...argv) => {
+    const [command, args] = sandboxCommand(argv, paths);
+    return spawnSync(command, args, { cwd: w.worktree, encoding: 'utf8', timeout: 20000,
+      env: { PATH: path, HOME: w.jobTmp, GIT_CONFIG_GLOBAL: join(GIT_HOME, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' } });
+  };
+  for (const rel of HOME_SECRETS) {
+    const r = run('/bin/cat', join(w.home, rel));
+    assert.notEqual(r.status, 0, `read ~/${rel}`);
+    assert.doesNotMatch(r.stdout, /owner-secret/, rel);
+  }
+  // The exfiltration chain of the finding: the test script copies a dotfile into the worktree.
+  const copied = run('/bin/sh', '-c', `cat ${JSON.stringify(join(w.home, '.zshrc'))} > leak.txt`);
+  assert.notEqual(copied.status, 0);
+  assert.equal(readFileSync(join(w.worktree, 'leak.txt'), 'utf8'), '', 'nothing reached the worktree');
+  // What a job needs still works.
+  assert.equal(run('hello').stdout, 'toolchain-ok\n', 'a toolchain on PATH under the home');
+  assert.equal(run('/bin/cat', 'README.md').stdout, '# ext\n');
+  assert.match(run('/usr/bin/git', 'log', '--oneline', '-1').stdout, /initial/);
+});
+
+// The same check against the real home of whoever runs the tests: byte counts only, never contents.
+test('fix pass #258: on this Mac, a recipe cannot read the real shell startup files or .config secrets', { skip: !DARWIN && 'Seatbelt is macOS only' }, async t => {
+  const realHome = userInfo().homedir;
+  const candidates = ['.zshrc', '.zprofile', '.zshenv', '.bashrc', '.bash_profile', '.profile', '.config/dify-dataset-key']
+    .map(rel => join(realHome, rel)).filter(p => existsSync(p));
+  for (const dir of ['.config/opencode/secrets', '.config/memo-bridge', '.config/resend', '.config/neonctl', '.config/jobs']) {
+    const d = join(realHome, dir);
+    if (!existsSync(d)) continue;
+    const first = (await readdir(d, { withFileTypes: true })).find(e => e.isFile());
+    if (first) candidates.push(join(d, first.name));
+  }
+  if (!candidates.length) { t.skip('no such file in this home'); return; }
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'memo-sbx-real-')));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const worktree = join(base, 'wt'); const stateDir = join(base, 'state'); const jobTmp = join(base, 'job');
+  for (const d of [worktree, stateDir, jobTmp]) await mkdir(d, { recursive: true });
+  const paths = sandboxPaths({ worktree, stateDir, jobTmp, path: process.env.PATH });
+  for (const file of candidates) {
+    const [command, args] = sandboxCommand(['/bin/cat', file], paths);
+    const r = spawnSync(command, args, { cwd: worktree, encoding: 'buffer', timeout: 20000, env: { PATH: '/usr/bin:/bin', HOME: jobTmp } });
+    assert.notEqual(r.status, 0, file);
+    assert.equal(r.stdout.length, 0, `${file}: no byte read`);
+  }
 });

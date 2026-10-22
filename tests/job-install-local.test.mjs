@@ -91,12 +91,21 @@ test('plan: Node exactly as on the VPS, Go by recipe, nothing outside the pinned
 
 const sha = text => createHash('sha256').update(text).digest('hex');
 
-test('recipe profile: byte for byte the profile of origin/main before the install phase', () => {
-  // Hashes of sandboxProfile({ denyReadCount: 2, gitCommon }) at 59e9e85.
-  assert.equal(sha(sandboxProfile({ denyReadCount: 2, gitCommon: true })), 'fe6d9bbc330670f8cd377d6a67b436a4d69d8608cd224f7fe02e3d801a3e7ee6');
-  assert.equal(sha(sandboxProfile({ denyReadCount: 2, gitCommon: false })), 'ee41caca66ecbe87d3ceaab3dc659b24d00daa77bc3e39ddcb3e754e5fd79811');
-  assert.equal(sandboxProfile({ denyReadCount: 2, gitCommon: true, phase: 'recipe', toolRootCount: 3 }),
-    sandboxProfile({ denyReadCount: 2, gitCommon: true }), 'tool roots never reach the recipe profile');
+test('recipe profile: home closed except tool roots, denylist on top, the worktree, job folder and Git data reopened (fix pass of #258)', () => {
+  const profile = sandboxProfile({ denyReadCount: 2, gitCommon: true, toolRootCount: 2 });
+  assert.doesNotMatch(profile.replace(/"\/dev\/[a-z]+"|#"\^\/dev\/[a-z]+\/?"/g, ''), /"\//, 'paths only come in through -D parameters');
+  const lines = profile.split('\n');
+  const at = text => { const i = lines.indexOf(text); assert.ok(i >= 0, `missing: ${text}`); return i; };
+  const home = at('(deny file-read-data file-read-xattr (subpath (param "HOME")))');
+  const tools = at('(allow file-read-data file-read-xattr (subpath (param "TOOL_ROOT_0")) (subpath (param "TOOL_ROOT_1")))');
+  const deny = at('(deny file-read-data file-read-xattr (subpath (param "DENY_READ_0")) (subpath (param "DENY_READ_1")))');
+  const own = at('(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP")) (subpath (param "GIT_COMMON")))');
+  const state = at('(deny file-read-data file-read-xattr file-write* (subpath (param "STATE_DIR")))');
+  assert.ok(home < tools && tools < deny && deny < own && own < state);
+  // Network stays loopback only.
+  at('(allow network-outbound (remote ip "localhost:*"))');
+  assert.doesNotMatch(profile, /\*:443/);
+  assert.equal(sandboxProfile({ denyReadCount: 0, gitCommon: false }).includes('TOOL_ROOT'), false);
   assert.throws(() => sandboxProfile({ denyReadCount: 0, gitCommon: false, phase: 'network' }), /sandbox_phase_invalid/);
 });
 
@@ -139,7 +148,9 @@ test('install command: its parameters, and a home that cannot be closed is refus
   assert.ok(!args.some(a => a.startsWith('GIT_COMMON=')));
   const [, recipeArgs] = sandboxCommand(['npm', 'test'], paths);
   assert.ok(recipeArgs.includes('GIT_COMMON=/r/.git'));
-  assert.ok(!recipeArgs.some(a => /^(HOME|MDNS_SOCKET|TOOL_ROOT_\d+)=/.test(a)), 'the recipe command is unchanged');
+  for (const p of ['HOME=/Users/o', 'TOOL_ROOT_0=/Users/o/.nvm/versions/node/v24']) assert.ok(recipeArgs.includes(p), `recipe ${p}`);
+  assert.ok(!recipeArgs.some(a => a.startsWith('MDNS_SOCKET=')), 'the recipe has no DNS');
+  assert.throws(() => sandboxCommand(['npm', 'test'], { ...paths, home: '/' }), /sandbox_home_invalid/, 'the recipe closes the home too');
   assert.throws(() => sandboxCommand(['npm', 'ci'], { ...paths, home: '/' }, { phase: 'install' }), /sandbox_home_invalid/);
   assert.throws(() => sandboxCommand(['npm', 'ci'], { ...paths, home: undefined }, { phase: 'install' }), /sandbox_home_invalid/);
   assert.throws(() => sandboxCommand(['npm', 'ci'], paths, { phase: 'other' }), /sandbox_phase_invalid/);
@@ -223,7 +234,13 @@ test('install sandbox on macOS: port 443 only, no loopback, home closed except t
     assert.notEqual(r.status, 0, `install read ${secret}`);
     assert.match(r.stderr, /Operation not permitted/, secret);
   }
-  assert.equal(run('recipe', '/bin/cat', join(home, '.zshrc')).status, 0, 'the recipe profile is unchanged: it reads what the denylist does not name');
+  // The recipe closes the home too (fix pass of #258): a test script cannot copy ~/.zshrc into the worktree.
+  assert.equal(run('recipe', '/bin/cat', join(home, '.tool/versions/v1/lib/tool.js')).stdout, 'tool\n', 'a tool root is readable by the recipe');
+  for (const secret of [join(home, 'notes.txt'), join(home, '.zshrc'), join(home, '.config/gh/hosts.yml')]) {
+    const r = run('recipe', '/bin/cat', secret);
+    assert.notEqual(r.status, 0, `recipe read ${secret}`);
+    assert.match(r.stderr, /Operation not permitted/, secret);
+  }
   // Writes.
   assert.equal(run('install', '/usr/bin/touch', join(worktree, 'node_modules.txt')).status, 0);
   assert.equal(run('install', '/usr/bin/touch', join(jobTmp, 'cache')).status, 0);
