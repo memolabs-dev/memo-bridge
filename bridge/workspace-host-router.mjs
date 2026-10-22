@@ -56,7 +56,8 @@ const MAC_UNAVAILABLE = new Set(['host_offline', 'unsupported_op']);
 // Calls that name no workspace but a project or an Issue: placed like an implicit workspace call.
 // task_status reads the lease of an Issue: on the VPS a private repository is refused
 // (project_not_allowed), so it must go where the project lives (seen 2026-10-18, CDKF#14).
-const HINTED = new Set([...IMPLICIT_WORKSPACE_TOOLS, ...BY_PROJECT, 'task_status']);
+// project_context checks the receiving runtime's allowlist the same way (memo-orbit, 2026-10-22).
+const HINTED = new Set([...IMPLICIT_WORKSPACE_TOOLS, ...BY_PROJECT, 'task_status', 'project_context']);
 const fail = (error, detail) => ({ ok:false, error, ...(detail ? { detail } : {}) });
 const PROBE_ONLY = 'the Mac agent is connected in probe mode: its runtime is not installed (deploy/mac/install-runtime-agent.sh)';
 
