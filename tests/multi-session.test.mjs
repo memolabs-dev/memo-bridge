@@ -454,9 +454,10 @@ test('host default: vps when the Mac is not connected; root, script and dangerou
     assert.equal(out.error, 'host_required', `${op} ${JSON.stringify(args)}`);
     assert.match(out.detail, /Mac ou VPS \?/);
   }
-  // Named explicitly, the same root call goes on to the gate (here: no workspace).
+  // Named explicitly, the same root call passes the gate without any workspace (owner decision
+  // 2026-10-23) and reaches the host, offline here.
   assert.equal((await hub.requestOperator('vps', 'operator_run', { args: { host: 'vps', argv: ['id'], as_root: true }, principal: CHAT })).error,
-    'workspace_required');
+    'host_offline');
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -480,31 +481,40 @@ test('MS-R12: the instructions tell the agent to land its own PR by the merge ru
   assert.equal(/landing contract merges when CI is green/.test(skill), false);
 });
 
-test('MS-R11: the instructions, the skill and the docs carry the start sequence and the stop codes', () => {
-  const rules = ['workspace_open', 'sessions_overview', 'task_next', 'task_claim', 'operator_lock', 'operator_unlock', 'global',
-    ...STOP_CODES];
-  // Owner console REQ-Z1: the shared text no longer asks for workspace_open (stdio says it in its own
-  // flow); the remote text says the conversation's workspace is used without it.
-  for (const rule of rules) {
-    assert.ok(REMOTE_INSTRUCTIONS.includes(rule), rule);
-    if (rule !== 'workspace_open') assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(rule), rule);
-  }
-  assert.match(REMOTE_INSTRUCTIONS, /No workspace_open or workspace_id is needed/);
+test('MS-R11: stdio carries the start sequence and the stop codes; the canonical checkout comes first', () => {
+  const rules = ['sessions_overview', 'task_next', 'task_claim', 'operator_lock', 'operator_unlock', 'global', ...STOP_CODES];
+  for (const rule of rules) assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(rule), rule);
   for (const step of ['batch_create', 'task_claim', 'worktree_create', 'jobs_submit', 'worktree_push', 'github_create_pr', 'task_complete'])
     assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(step), `chain: ${step}`);
-  assert.ok(REMOTE_INSTRUCTIONS.includes(OPERATOR_HOST_INSTRUCTIONS));
+  // Owner decision 2026-10-23: the project's own checkout on a branch by default, the chain only on request.
+  assert.ok(MULTI_SESSION_INSTRUCTIONS.includes('own checkout'));
+  assert.ok(MULTI_SESSION_INSTRUCTIONS.indexOf('own checkout') < MULTI_SESSION_INSTRUCTIONS.indexOf('worktree_create'));
   // Owner, 2026-10-14 21:37: "il doit comprendre mon intention". Intent first, act through to the result, no scope creep.
-  for (const phrase of ["understand the owner's intent", 'restate in one line', 'without stopping at a plan', 'never widen the scope', 'batch_create'])
+  for (const phrase of ["understand the owner's intent", 'restate in one line', 'without stopping at a plan', 'never widen the scope'])
     assert.ok(MULTI_SESSION_INSTRUCTIONS.includes(phrase) && REMOTE_INSTRUCTIONS.includes(phrase), phrase);
+  assert.ok(REMOTE_INSTRUCTIONS.includes(OPERATOR_HOST_INSTRUCTIONS));
   for (const word of ['Mac ou VPS ?', 'host_required', 'as_root', 'operator_script']) assert.ok(OPERATOR_HOST_INSTRUCTIONS.includes(word), word);
   const stdio = readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8');
   assert.ok(stdio.includes('MULTI_SESSION_INSTRUCTIONS'));
   const skill = readFileSync(new URL('../plugin/skills/memo-bridge-operations/SKILL.md', import.meta.url), 'utf8');
   for (const rule of [...rules, 'Mac ou VPS ?']) assert.ok(skill.includes(rule), `skill: ${rule}`);
-  const doc = readFileSync(new URL('../docs/REMOTE_CHATGPT.md', import.meta.url), 'utf8');
-  assert.match(doc, /^Avec Memo Bridge, prends la prochaine tâche disponible .+$/m);
-  for (const text of [MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, skill, doc]) assert.equal(/[\u2013\u2014]/.test(text), false, 'no dashes');
-  // The tools exist on the remote surface.
-  assert.ok(REMOTE_TOOLS_READ.includes('sessions_overview'));
-  assert.ok(REMOTE_OPERATOR_TOOLS.includes('operator_lock') && REMOTE_OPERATOR_TOOLS.includes('operator_unlock'));
+  for (const text of [MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, skill]) assert.equal(/[\u2013\u2014]/.test(text), false, 'no dashes');
+});
+
+// Owner, 2026-10-23: "créer aussi un guide pour ChatGPT qu'il utilise Memo Bridge correctement".
+// OpenAI: "Keep the most important details in the first 512 characters" of the server instructions
+// (developers.openai.com/plugins/build/mcp-server).
+test('ChatGPT guide: the first 512 characters say what Memo Bridge is and how to work; no dev flow anywhere', () => {
+  const head = REMOTE_INSTRUCTIONS.slice(0, 512);
+  for (const word of ['"mac"', '"vps"', 'operator_run', 'operator_read', 'operator_edit', 'project_context', 'branch', 'worktree'])
+    assert.ok(head.includes(word), `first 512: ${word}`);
+  for (const word of ['workspace_open', 'workspace_id', 'task_claim', 'task_next', 'batch_create', 'worktree_create', 'jobs_submit',
+    'github_create_pr', 'operator_lock', 'delegation', 'memory_save', 'use_dev_flow'])
+    assert.equal(REMOTE_INSTRUCTIONS.includes(word), false, `no ${word}`);
+  for (const word of ['locked_by_other_session', 'pending_approval', 'operator_help', 'operator_snapshot', 'operator_grant'])
+    assert.ok(REMOTE_INSTRUCTIONS.includes(word), word);
+  assert.equal(/[\u2013\u2014]/.test(REMOTE_INSTRUCTIONS), false, 'no dashes');
+  const guide = readFileSync(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
+  for (const word of ['operator_run', 'worktree', 'branche', 'Mac ou VPS']) assert.ok(guide.includes(word), `guide: ${word}`);
+  assert.equal(/[\u2013\u2014]/.test(guide), false, 'guide: no dashes');
 });

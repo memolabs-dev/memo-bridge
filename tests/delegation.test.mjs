@@ -21,7 +21,7 @@ import { CHILD_RULES, DELEGATION_LIMITS, REPORT_NOTE, currentFenceFor, parseScop
 import { createOperatorLocks, delegationTargetRefusal, mergeOverview } from '../bridge/operator-locks.mjs';
 import { createHub } from '../bridge/hub.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
-import { REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
+import { REMOTE_FULL_INSTRUCTIONS as REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
 import { DELEGATION_INSTRUCTIONS } from '../server/instructions.mjs';
 import { REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE } from '../server/registry.mjs';
 import { createRuntime } from '../server/runtime.mjs';

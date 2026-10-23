@@ -268,7 +268,7 @@ test('remote.json parsing: the lab-infra file maps onto every Phase 5 piece; bad
     allowedHosts: [HOST], allowedOrigins: ['chatgpt.com']
   });
   const c = ok.config;
-  assert.deepEqual({ ...c.surface }, { owner_sub: ownerSub, allowed_client_ids: [chatgpt], remote_writes: 'disabled', result_budget_bytes: 24576,
+  assert.deepEqual({ ...c.surface }, { owner_sub: ownerSub, allowed_client_ids: [chatgpt], remote_writes: 'disabled', surface: 'simple', result_budget_bytes: 24576,
     list_limit: 50, read_page_bytes: 16384, write_content_bytes: 98304 });
   assert.deepEqual([c.policy.projects, c.policy.session_binding, c.policy.owner_sub], [['memo-bridge'], 'warn', ownerSub]);
   assert.equal(c.softDeadlineMs, 40_000);
@@ -317,6 +317,10 @@ test('remote.json parsing: the lab-infra file maps onto every Phase 5 piece; bad
     assert.equal(out.ok, false);
     assert.match(out.field, /^oidc: /, JSON.stringify(out));
   }
+  // What ChatGPT is served: "simple" by default (owner decision 2026-10-23), "full" on request.
+  assert.equal(parsePublicListenerSettings(with_(r => { r.surface = 'full'; })).config.surface.surface, 'full');
+  const badSurface = parsePublicListenerSettings(with_(r => { r.surface = 'everything'; }));
+  assert.deepEqual([badSurface.ok, badSurface.field], [false, 'surface']);
   // The values remote-surface.mjs bounds are checked here too, so the hub fails before listening.
   const surface = parsePublicListenerSettings(with_(r => { r.budgets.list_max_items = 0; }));
   assert.equal(surface.ok, false);

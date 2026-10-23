@@ -71,8 +71,26 @@ export const isRemoteWriteTool = name => REMOTE_WRITE_SET.has(name);
 export const REMOTE_OPERATOR_TOOLS = Object.freeze(Object.keys(OPERATOR_OPERATION_CAPABILITY));
 const REMOTE_OPERATOR_SET = new Set(REMOTE_OPERATOR_TOOLS);
 export const isRemoteOperatorTool = name => REMOTE_OPERATOR_SET.has(name);
-export function operatorToolsFor(principal, { remoteWrites = false } = {}) {
-  return REMOTE_OPERATOR_TOOLS.filter(name => authorize(principal, name) && (operatorTier(name) === 0 || remoteWrites === true)).sort();
+
+// The surface ChatGPT gets by default (remote.json "surface": "simple"). Owner decision
+// 2026-10-23: from ChatGPT, Memo Bridge is a terminal and a file editor on the Mac and the VPS,
+// plus the project register to find a checkout; no workspace, task, batch, delegation, worktree,
+// job, pull request or memory tool. "surface": "full" serves the lists above again.
+export const REMOTE_SURFACES = Object.freeze(['simple', 'full']);
+export const SIMPLE_REMOTE_TOOLS = Object.freeze(['projects_list', 'project_context']);
+export const SIMPLE_REMOTE_OPERATOR_TOOLS = Object.freeze([
+  'operator_run', 'operator_script', 'operator_job_status',
+  'operator_read', 'operator_list', 'operator_search', 'operator_read_media', 'operator_snapshot',
+  'operator_preflight', 'operator_edit', 'operator_upload_init', 'operator_upload_chunk', 'operator_upload_complete',
+  'operator_transfer', 'operator_transfer_status',
+  'operator_state', 'operator_policy', 'operator_logs', 'operator_service_status', 'operator_service', 'operator_docker',
+  'operator_grant', 'approval_status', 'operator_help'
+]);
+const SIMPLE_SET = new Set([...SIMPLE_REMOTE_TOOLS, ...SIMPLE_REMOTE_OPERATOR_TOOLS]);
+const onSurface = (name, surface) => surface === 'full' || SIMPLE_SET.has(name);
+export function operatorToolsFor(principal, { remoteWrites = false, surface = 'simple' } = {}) {
+  return REMOTE_OPERATOR_TOOLS.filter(name => onSurface(name, surface) && authorize(principal, name)
+    && (operatorTier(name) === 0 || remoteWrites === true)).sort();
 }
 
 // Gate layer 1: writes are listed remotely only with remote_writes exactly "enabled".
@@ -80,9 +98,9 @@ export const remoteWritesEnabled = config => config?.remote_writes === 'enabled'
 
 // Tools one remote principal may list, sorted. remoteWrites false (the default) lists none of
 // the write tools, whatever the principal holds.
-export function toolsFor(principal, { remoteWrites = false } = {}) {
+export function toolsFor(principal, { remoteWrites = false, surface = 'simple' } = {}) {
   const names = remoteWrites === true ? REMOTE_TOOLS : REMOTE_TOOLS_READ;
-  return names.filter(name => authorize(principal, name)).sort();
+  return names.filter(name => onSurface(name, surface) && authorize(principal, name)).sort();
 }
 
 // Register every runtime tool module against a collector. Returns a Map

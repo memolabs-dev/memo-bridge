@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { z } from 'zod/v4';
-import { createDenylist, catalogProjects, resolveOperatorPath } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath } from './operator-paths.mjs';
 import { UPLOAD_CHUNK_BYTES, UPLOAD_MAX_BYTES } from '../server/tools/operator-tools.mjs';
 
 export const TRANSFER_CHUNK_BYTES = UPLOAD_CHUNK_BYTES;
@@ -28,9 +28,9 @@ export const TRANSFER_SOURCE_SCHEMAS = Object.freeze({
 
 const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
 
-export function createTransferSourceTools(policy, { projects = catalogProjects(policy.repositories) } = {}) {
+export function createTransferSourceTools(policy, ) {
   const denylist = createDenylist(policy);
-  const resolve = raw => resolveOperatorPath(policy, raw, { access: 'r', denylist, projects });
+  const resolve = raw => resolveOperatorPath(policy, raw, { access: 'r', denylist });
   async function opened(raw) {
     const at = await resolve(raw);
     if (!at.ok) return at;

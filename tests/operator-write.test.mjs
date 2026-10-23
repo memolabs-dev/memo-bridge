@@ -97,7 +97,7 @@ test('AC-P6-02: validators are named presets with fixed argv; any other name is 
   assert.equal((await missing.tools.operator_edit({ path: missing.p('srv/rw/app.conf'), mode: 'append', new_text: 'x', validator: 'caddy' })).error, 'validator_unavailable');
 });
 
-test('AC-P6-02 and AC-P6-13 on the write tools: .git and a default-branch checkout are refused; reads outside rw roots too', async t => {
+test('AC-P6-02 and AC-P6-13 on the write tools: .git is refused, a default-branch checkout is writable; reads outside rw roots refused', async t => {
   const h = host(t);
   const checkout = h.p('srv/rw/project');
   mkdirSync(join(checkout, '.git'), { recursive: true });
@@ -109,9 +109,17 @@ test('AC-P6-02 and AC-P6-13 on the write tools: .git and a default-branch checko
   const policy = parseOperatorPolicy({ ...h.raw, max_tier: 'write', repositories: { projects_root: h.p('srv/rw'), layout_root: h.p('srv/rw') } });
   writeFileSync(h.p('srv/rw/PROJECTS.md'), readFileSync(h.p('projects/PROJECTS.md')));
   const tools = createOperatorWriteTools(policy, { stateDir: h.p('state') });
-  assert.equal((await tools.operator_edit({ path: join(checkout, 'README.md'), mode: 'append', new_text: 'x' })).error, 'use_dev_flow');
+  assert.equal((await tools.operator_edit({ path: join(checkout, 'README.md'), mode: 'append', new_text: 'x' })).ok, true);
+  assert.equal(readFileSync(join(checkout, 'README.md'), 'utf8'), 'readme\nx');
   assert.equal((await tools.operator_edit({ path: join(checkout, '.git', 'config'), mode: 'append', new_text: '[core]\n\tsshCommand = id\n' })).error, 'git_internal');
-  assert.equal((await tools.operator_delete({ path: join(checkout, 'README.md') })).error, 'use_dev_flow');
+  assert.equal((await tools.operator_delete({ path: join(checkout, 'README.md') })).ok, true);
+  // Review 2026-10-23: the checkout itself (its root holds .git) is never deleted, moved or overwritten.
+  assert.equal((await tools.operator_delete({ path: checkout, recursive: true })).error, 'git_internal');
+  assert.equal((await tools.operator_move({ src: checkout, dst: h.p('srv/rw/moved') })).error, 'git_internal');
+  mkdirSync(h.p('srv/rw/other'), { recursive: true });
+  assert.equal((await tools.operator_move({ src: h.p('srv/rw/other'), dst: checkout, overwrite: true })).error, 'git_internal');
+  assert.equal((await tools.operator_copy({ src: h.p('srv/rw/other'), dst: checkout, overwrite: true, recursive: true })).error, 'git_internal');
+  assert.equal(readFileSync(join(checkout, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/main\n');
   assert.equal((await tools.operator_chmod({ path: join(checkout, '.git', 'config'), mode: '777' })).error, 'git_internal');
   assert.equal(readFileSync(join(checkout, '.git', 'config'), 'utf8'), '[core]\n');
   // Outside the write roots: refused, even inside a read root.
@@ -121,10 +129,10 @@ test('AC-P6-02 and AC-P6-13 on the write tools: .git and a default-branch checko
   assert.equal((await tools.operator_edit({ path: h.p('srv/rw/.env'), mode: 'write', new_text: 'x' })).error, 'path_secret');
 });
 
-test('policy: a write tier needs the repositories section (no write tool without the D11 guard)', t => {
+test('policy: a write tier no longer needs the repositories section; root still needs its helper', t => {
   const h = makeHost(t);
   const { repositories, ...raw } = h.raw;
-  assert.throws(() => parseOperatorPolicy({ ...raw, max_tier: 'write' }), /invalid_operator_policy:repositories/);
+  assert.equal(parseOperatorPolicy({ ...raw, max_tier: 'write' }).maxTierName, 'write');
   assert.throws(() => parseOperatorPolicy({ ...raw, max_tier: 'root', repositories }), /invalid_operator_policy:root_helper/);
   // The Mac: root only with a root helper (spec §13, Mac root follow-up).
   assert.throws(() => parseOperatorPolicy({ ...raw, host: 'mac', max_tier: 'root', repositories }), /invalid_operator_policy:root_helper/);

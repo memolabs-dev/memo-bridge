@@ -6,8 +6,8 @@
 // 87 KiB of base64: under the 128 KiB request cap (MAX_REQUEST_BYTES) and the 1 MiB result cap,
 // and the 16 KiB frame limit is met by the protocol's own `part` frames. No new frame type, no
 // protocol version, no new write path on the hosts. Consequences:
-//  - the destination keeps every rule of an upload: write roots, secret denylist, use_dev_flow,
-//    the caller's workspace and operator lock on the destination path, the hub freeze, approval
+//  - the destination keeps every rule of an upload: write roots, secret denylist,
+//    another conversation's operator lock on the destination path, the hub freeze, approval
 //    mode, backup on overwrite, atomic rename, and the SHA-256 check at the destination (against
 //    the digest the source agent computed);
 //  - the source keeps the read rules of its host (read roots, denylist, O_NOFOLLOW) and refuses a

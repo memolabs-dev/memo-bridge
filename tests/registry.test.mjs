@@ -12,7 +12,8 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import {
-  REMOTE_TOOLS, REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE, TOOL_MODULES, collectToolDefinitions, collectTools, isRemoteWriteTool,
+  REMOTE_OPERATOR_TOOLS, REMOTE_TOOLS, REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE, SIMPLE_REMOTE_OPERATOR_TOOLS, SIMPLE_REMOTE_TOOLS, TOOL_MODULES,
+  collectToolDefinitions, collectTools, isRemoteWriteTool, operatorToolsFor,
   registryProblems, remoteWritesEnabled, toolsFor
 } from '../server/registry.mjs';
 import { CAPABILITIES, OPERATION_CAPABILITY, makePrincipal } from '../server/coordinator/policy.mjs';
@@ -66,27 +67,31 @@ test('remote allowlists: disjoint, read tools read, write tools write, exclusion
   assert.deepEqual(registryProblems(await collectToolDefinitions()), []);
   // The self-check catches a missing tool, a missing hint and a misfiled tool.
   const defs = await collectToolDefinitions();
-  defs.delete('task_status');
-  defs.set('job_status', { ...defs.get('job_status'), annotations: { readOnlyHint: true } });
-  defs.set('tasks_list', { ...defs.get('tasks_list'), annotations: { ...defs.get('tasks_list').annotations, readOnlyHint: false } });
-  const problems = registryProblems(defs);
-  assert.ok(problems.includes('task_status: not collected'), problems.join('\n'));
-  assert.ok(problems.includes('job_status: destructiveHint not explicit'), problems.join('\n'));
-  assert.ok(problems.includes('tasks_list: readOnlyHint disagrees with policy'), problems.join('\n'));
+  defs.delete('project_context');
+  defs.set('projects_list', { ...defs.get('projects_list'), annotations: { readOnlyHint: true } });
+  let problems = registryProblems(defs);
+  assert.ok(problems.includes('project_context: not collected'), problems.join('\n'));
+  assert.ok(problems.includes('projects_list: destructiveHint not explicit'), problems.join('\n'));
+  const again = await collectToolDefinitions();
+  again.set('projects_list', { ...again.get('projects_list'), annotations: { ...again.get('projects_list').annotations, readOnlyHint: false } });
+  problems = registryProblems(again);
+  assert.ok(problems.includes('projects_list: readOnlyHint disagrees with policy'), problems.join('\n'));
 });
 
 test('toolsFor: gate layer 1 lists writes only with remote_writes "enabled", and only those authorized', () => {
-  assert.deepEqual(toolsFor(READ_ONLY), [...REMOTE_TOOLS_READ].sort());
-  assert.deepEqual(toolsFor(EVERYTHING), [...REMOTE_TOOLS_READ].sort(), 'gate closed by default, whatever the principal holds');
-  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: false }), [...REMOTE_TOOLS_READ].sort());
-  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: 'enabled' }), [...REMOTE_TOOLS_READ].sort(), 'only the boolean opens it');
-  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: true }), [...REMOTE_TOOLS].sort());
-  assert.deepEqual(toolsFor(READ_ONLY, { remoteWrites: true }), [...REMOTE_TOOLS_READ].sort());
+  assert.deepEqual(toolsFor(READ_ONLY, { surface: 'full' }), [...REMOTE_TOOLS_READ].sort());
+  assert.deepEqual(toolsFor(EVERYTHING, { surface: 'full' }), [...REMOTE_TOOLS_READ].sort(), 'gate closed by default, whatever the principal holds');
+  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: false, surface: 'full' }), [...REMOTE_TOOLS_READ].sort());
+  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: 'enabled', surface: 'full' }), [...REMOTE_TOOLS_READ].sort(), 'only the boolean opens it');
+  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: true, surface: 'full' }), [...REMOTE_TOOLS].sort());
+  assert.deepEqual(toolsFor(READ_ONLY, { remoteWrites: true, surface: 'full' }), [...REMOTE_TOOLS_READ].sort());
   const claimer = makePrincipal('oidc:claimer', [CAPABILITIES.READ, CAPABILITIES.WRITE]);
-  assert.deepEqual(toolsFor(claimer, { remoteWrites: true }),
+  assert.deepEqual(toolsFor(claimer, { remoteWrites: true, surface: 'full' }),
     [...REMOTE_TOOLS_READ, 'workspace_open', 'workspace_close', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
       'task_next', 'memory_save', 'source_reconcile', 'workspace_delegate', 'delegation_join', 'delegation_report', 'delegation_end'].sort());
-  assert.deepEqual(toolsFor(makePrincipal('oidc:none', [])), []);
+  assert.deepEqual(toolsFor(claimer, { remoteWrites: true, surface: 'simple' }), ['project_context', 'projects_list']);
+  assert.deepEqual(toolsFor(makePrincipal('oidc:none', []), { surface: 'full' }), []);
+  assert.deepEqual(toolsFor(EVERYTHING, { remoteWrites: true }), ['project_context', 'projects_list'], 'the default is the simple surface');
   assert.deepEqual(toolsFor(null), []);
   for (const value of [undefined, null, {}, { remote_writes: 'disabled' }, { remote_writes: 'yes' }, { remote_writes: true }]) {
     assert.equal(remoteWritesEnabled(value), false, JSON.stringify(value));
@@ -101,7 +106,7 @@ const jsonRpcBody = text => JSON.parse(/^(event|data):/m.test(text)
 // tools/list as a JSON-RPC client sees it, from the remote factory with every tool open.
 async function remoteList() {
   const factory = createRemoteServerFactory({ dispatch: async () => ({ ok: true }),
-    config: { owner_sub: 'owner', allowed_client_ids: ['https://chatgpt.com/c.json'], remote_writes: 'enabled' } });
+    config: { owner_sub: 'owner', allowed_client_ids: ['https://chatgpt.com/c.json'], remote_writes: 'enabled', surface: 'full' } });
   const handler = createMcpHandler(factory, { legacy: 'stateless' });
   const authInfo = { token: 't', clientId: 'https://chatgpt.com/c.json', scopes: ALL, extra: { sub: 'owner' } };
   const response = await handler.fetch(new Request('http://localhost/mcp', { method: 'POST',
@@ -136,4 +141,20 @@ test('AC-P5-06: every remote tool is identical to the stdio server\'s (name, des
       assert.equal(typeof tool.annotations?.[hint], 'boolean', `${tool.name} ${hint} explicit`);
     }
   }
+});
+
+// Owner decision 2026-10-23: from ChatGPT, Memo Bridge is a terminal and a file editor on the Mac
+// and the VPS, nothing more. No workspace, task, worktree, job or pull request tool is served.
+test('remote surface "simple": exactly the run, read and write tools and the project register, no dev flow', () => {
+  const OWNER = makePrincipal('oidc:owner', Object.values(CAPABILITIES));
+  const simple = { remoteWrites: true, surface: 'simple' };
+  assert.deepEqual([...toolsFor(OWNER, simple), ...operatorToolsFor(OWNER, simple)].sort(), [...SIMPLE_REMOTE_TOOLS, ...SIMPLE_REMOTE_OPERATOR_TOOLS].sort());
+  assert.deepEqual([...SIMPLE_REMOTE_TOOLS].sort(), ['project_context', 'projects_list']);
+  assert.deepEqual([...SIMPLE_REMOTE_OPERATOR_TOOLS].sort(), ['approval_status', 'operator_docker', 'operator_edit', 'operator_grant', 'operator_help',
+    'operator_job_status', 'operator_list', 'operator_logs', 'operator_policy', 'operator_preflight', 'operator_read', 'operator_read_media',
+    'operator_run', 'operator_script', 'operator_search', 'operator_service', 'operator_service_status', 'operator_snapshot', 'operator_state',
+    'operator_transfer', 'operator_transfer_status', 'operator_upload_chunk', 'operator_upload_complete', 'operator_upload_init']);
+  for (const name of SIMPLE_REMOTE_OPERATOR_TOOLS) assert.ok(REMOTE_OPERATOR_TOOLS.includes(name), name);
+  // Write tiers still follow the write gate.
+  assert.equal(operatorToolsFor(OWNER, { surface: 'simple' }).includes('operator_run'), false);
 });

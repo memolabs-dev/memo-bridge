@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createOidcVerifier } from '../bridge/oidc.mjs';
 import { createRemoteService } from '../bridge/remote-boot.mjs';
 import { REMOTE_DEFAULT_CEILING, operatorTier } from '../server/coordinator/policy.mjs';
-import { REMOTE_OPERATOR_TOOLS } from '../server/registry.mjs';
+import { REMOTE_OPERATOR_TOOLS, SIMPLE_REMOTE_OPERATOR_TOOLS } from '../server/registry.mjs';
 import { CHATGPT, ISSUER, RESOURCE, SUB, SYSTEMCTL_NO_RUNNER, labRemoteJson, loopbackFetch, tlsPair } from './helpers/remote-stack.mjs';
 
 const pair = await generateKeyPair('ES256');
@@ -64,7 +64,8 @@ test('with operator:read in the ceiling and the token: T0 tools listed, routed t
   assert.equal((await names(await s.client('coordinator:read'))).some(n => n.startsWith('operator_')), false);
   const c = await s.client('coordinator:read operator:read');
   const listed = await names(c);
-  for (const tool of REMOTE_OPERATOR_TOOLS) assert.equal(listed.includes(tool), operatorTier(tool) === 0, tool);
+  // The default "simple" surface (owner decision 2026-10-23): only its T0 tools, nothing beyond it.
+  for (const tool of REMOTE_OPERATOR_TOOLS) assert.equal(listed.includes(tool), operatorTier(tool) === 0 && SIMPLE_REMOTE_OPERATOR_TOOLS.includes(tool), tool);
   const read = await callJson(c, 'operator_read', { host: 'mac', path: '~/notes.txt' });
   // 60 KiB of content: over the 24 KiB dev-tool budget, inside the operator bound (spec D10).
   assert.equal(read.ok, true);
@@ -94,12 +95,13 @@ test('Lot 2: the operator write, exec and root tools are listed only with the wr
   const scopes = 'coordinator:read operator:read operator:write operator:exec operator:root';
   const closed = await service(t, { ceiling: ALL_OPERATOR });
   const closedTools = await names(await closed.client(scopes));
-  for (const tool of REMOTE_OPERATOR_TOOLS) assert.equal(closedTools.includes(tool), operatorTier(tool) === 0, `${tool} with the gate closed`);
+  for (const tool of SIMPLE_REMOTE_OPERATOR_TOOLS) assert.equal(closedTools.includes(tool), operatorTier(tool) === 0, `${tool} with the gate closed`);
   const open = await service(t, { ceiling: ALL_OPERATOR, remoteWrites: 'enabled' });
   assert.deepEqual((await open.metadata()).scopes_supported.filter(s => s.startsWith('operator:')).sort(),
     ['operator:exec', 'operator:read', 'operator:root', 'operator:write']);
   const all = await names(await open.client(scopes));
-  for (const tool of REMOTE_OPERATOR_TOOLS) assert.ok(all.includes(tool), tool);
+  for (const tool of REMOTE_OPERATOR_TOOLS) assert.equal(all.includes(tool), SIMPLE_REMOTE_OPERATOR_TOOLS.includes(tool), tool);
+  for (const tool of ['operator_lock', 'operator_unlock', 'operator_move', 'operator_delete']) assert.equal(all.includes(tool), false, tool);
   // A token with operator:exec but not operator:root lists operator_run and operator_script (as_root is checked per call by
   // the hub; repatriation D-R6 made a user script T2).
   const exec = await names(await open.client('coordinator:read operator:read operator:exec'));

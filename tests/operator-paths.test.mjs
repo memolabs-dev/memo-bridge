@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { catalogProjects, createDenylist, globToRegExp, repositoryGuard, resolveOperatorPath } from '../bridge/operator-paths.mjs';
+import { createDenylist, globToRegExp, resolveOperatorPath } from '../bridge/operator-paths.mjs';
 import { parseOperatorPolicy } from '../bridge/operator-policy.mjs';
 import { makeHost } from './helpers/operator-fixture.mjs';
 
@@ -73,25 +73,19 @@ function registeredCheckout(t, host, branch) {
   return checkout;
 }
 
-test('AC-P6-13: a write path inside a registered checkout on its default branch answers use_dev_flow', async t => {
+// Owner decision 2026-10-23: the agent works in the canonical checkout, on whatever branch it is
+// on; no tool sends it to a worktree. The default branch is protected on GitHub, not here.
+test('AC-P6-13: a write inside a registered checkout is allowed on its default branch and on a detached HEAD', async t => {
   const host = makeHost(t);
   const checkout = registeredCheckout(t, host, 'main');
   const policy = parseOperatorPolicy({ ...host.raw, repositories: { projects_root: host.p('srv/rw'), layout_root: host.p('srv/rw') } });
-  const out = await resolveOperatorPath(policy, join(checkout, 'README.md'), { access: 'rw' });
-  assert.deepEqual(out, { ok: false, error: 'use_dev_flow', project: 'project', branch: 'main' });
-  // Through a symlink to the checkout: the canonical path is guarded the same way.
-  assert.equal((await resolveOperatorPath(policy, host.p('srv/rw/projects-link/README.md'), { access: 'rw' })).error, 'use_dev_flow');
-  // A read is not guarded: the operator surface reads code freely.
-  assert.equal((await resolveOperatorPath(policy, join(checkout, 'README.md'))).ok, true);
-  // On a feature branch the checkout is not the default branch: allowed (still inside a write root).
-  writeFileSync(join(checkout, '.git', 'HEAD'), 'ref: refs/heads/feature/x\n');
   assert.equal((await resolveOperatorPath(policy, join(checkout, 'README.md'), { access: 'rw' })).ok, true);
-  // A detached HEAD fails towards the dev flow.
+  assert.equal((await resolveOperatorPath(policy, host.p('srv/rw/projects-link/README.md'), { access: 'rw' })).ok, true);
   writeFileSync(join(checkout, '.git', 'HEAD'), 'a'.repeat(40) + '\n');
-  assert.equal((await resolveOperatorPath(policy, join(checkout, 'README.md'), { access: 'rw' })).error, 'use_dev_flow');
+  assert.equal((await resolveOperatorPath(policy, join(checkout, 'README.md'), { access: 'rw' })).ok, true);
 });
 
-test('AC-P6-02 (git part): .git internals are never writable, whatever the branch; the guard source is the catalog', async t => {
+test('AC-P6-02 (git part): .git internals are never writable, whatever the branch', async t => {
   const host = makeHost(t);
   const checkout = registeredCheckout(t, host, 'feature/x');
   const policy = parseOperatorPolicy({ ...host.raw, repositories: { projects_root: host.p('srv/rw'), layout_root: host.p('srv/rw') } });
@@ -99,10 +93,4 @@ test('AC-P6-02 (git part): .git internals are never writable, whatever the branc
     assert.equal((await resolveOperatorPath(policy, join(checkout, inside), { access: 'rw' })).error, 'git_internal', inside);
   }
   assert.equal((await resolveOperatorPath(policy, join(checkout, '.git', 'hooks', 'pre-commit'), { access: 'rw', mustExist: false })).error, 'git_internal');
-  // catalogProjects reads the canonical PROJECTS.md table.
-  const projects = await catalogProjects(policy.repositories)();
-  assert.deepEqual(projects, [{ name: 'project', path: checkout }]);
-  // A failing registry fails closed for writes.
-  assert.deepEqual(await repositoryGuard(join(checkout, 'README.md'), { projects: async () => { throw new Error('io'); } }),
-    { error: 'repository_guard_unavailable' });
 });
