@@ -36,22 +36,25 @@ test('lease is restored after restart, not treated as an empty table', () => {
   assert.equal(acquire(state.open(), B).error, 'locked_by_other_session');
 });
 
-test('expired checkout may be taken by new session, but previous holder is fenced forever', () => {
+test('expiry refuses takeover and same-session resurrection across restart', () => {
   const clock = { now: 0 }, state = memoryState(clock), l = state.open();
   assert.equal(acquire(l, A).ok, true);
   clock.now = 60_000;
-  assert.equal(acquire(l, B).ok, true);
-  assert.equal(acquire(l, A).error, 'checkout_lease_revoked');
+  assert.equal(acquire(l, B).error, 'checkout_recovery_required');
+  assert.equal(acquire(l, A).error, 'checkout_recovery_required');
   clock.now = 120_000;
-  assert.equal(acquire(state.open(), A).error, 'checkout_lease_revoked', 'fence survives restart and expiry');
-  assert.equal(acquire(state.open(), C).ok, true);
-  assert.equal(acquire(state.open(), B).error, 'checkout_lease_revoked');
+  assert.equal(acquire(state.open(), A).error, 'checkout_recovery_required');
+  assert.equal(acquire(state.open(), C).error, 'checkout_recovery_required');
+  assert.equal(state.read().data.rows[0].session, A);
+  assert.equal(l.release({ host: 'mac', root: ROOT, principal: 'oidc:owner', clientSession: A }).error,
+    'checkout_recovery_required', 'an expired owner cannot manufacture a clean handoff');
 });
 
 test('missing session hint fails closed; it cannot inherit the owner principal identity', () => {
   const l = memoryState({ now: 0 }).open();
   assert.equal(acquire(l, null).error, 'session_required');
   assert.equal(acquire(l, '').error, 'session_required');
+  assert.equal(acquire(l, [A]).error, 'session_required', 'no regex coercion of arrays');
   assert.equal(l.size, 0);
 });
 
@@ -72,6 +75,15 @@ test('failed save refuses the write and restores the prior owner', () => {
   });
   assert.equal(acquire(l, A).error, 'checkout_lease_state_unavailable');
   assert.equal(l.size, 0);
+});
+
+test('malformed persisted identities and unrepresentable expiries fail closed', () => {
+  const base = { host: 'mac', root: ROOT.toLowerCase(), principal: 'oidc:owner', session: A, expires: 60_000, revoked: [] };
+  for (const delta of [{ session: [A] }, { principal: '' }, { revoked: [[B]] }, { expires: Number.MAX_SAFE_INTEGER }]) {
+    const leases = createCheckoutLeases({ reload: () => ({ ok: true, data: { schema: 1, rows: [{ ...base, ...delta }] } }) });
+    assert.equal(acquire(leases, B).error, 'checkout_lease_state_unavailable');
+  }
+  assert.equal(acquire(createCheckoutLeases({ now: () => NaN }), A).error, 'checkout_lease_state_unavailable');
 });
 
 test('normalized root requires a verified ancestor, not a path controlled by git output', () => {
@@ -105,12 +117,13 @@ test('hub with opt-in reserves an entire checkout across calls and restarts; wit
   const { privateKey } = generateKeyPairSync('ed25519');
   const signingKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
   const principal = makePrincipal('oidc:owner', Object.values(CAPABILITIES), { client_type: 'chatgpt', via: 'hub' });
+  let now = Date.now();
   const opts = {
     tlsKey: readFileSync(join(tmp,'tls.key'),'utf8'), tlsCert: readFileSync(join(tmp,'tls.crt'),'utf8'),
     tokenSha256: createHash('sha256').update('checkout-test').digest('hex'), port: 0,
     stateDir: join(tmp,'state'), allowedAgentKeys: {},
     operator: {
-      signingKeyPem, checkoutLeasesEnabled: true,
+      signingKeyPem, checkoutLeasesEnabled: true, now: () => now,
       sessionWorkspace: async () => ({ ok: false, error: 'no_workspace' }),
       checkoutProbe: async ({path}) => ({ ok: true, path,
         git: { repository: true, root: ROOT } })
@@ -130,6 +143,10 @@ test('hub with opt-in reserves an entire checkout across calls and restarts; wit
   const second = createHub(opts);
   assert.equal((await call(second, B)).error, 'locked_by_other_session', 'hub restart preserved ownership');
   assert.equal((await call(second, A)).error, 'host_offline', 'first session renews after restart');
+  now += 30 * 60_000;
+  const expired = createHub(opts);
+  assert.equal((await call(expired, B)).error, 'checkout_recovery_required', 'hub must not hand off while old host operation may still run');
+  assert.equal((await call(expired, A)).error, 'checkout_recovery_required');
   const optOut = createHub({ ...opts, stateDir: join(tmp,'off'), operator: { ...opts.operator, checkoutLeasesEnabled: false } });
   assert.equal((await call(optOut, null)).error, 'host_offline', 'default behavior tolerates absent session hints');
 });
@@ -190,7 +207,7 @@ test('Mac authority refuses automatic takeover after a missed heartbeat, includi
   const clock = { now: 0 };
   let saved = null;
   const make = () => createCheckoutLeases({
-    now: () => clock.now, ttlMs: 60_000, requireExplicitRecovery: true,
+    now: () => clock.now, ttlMs: 60_000,
     reload: () => ({ ok: true, data: saved }),
     onChange: data => { saved = JSON.parse(JSON.stringify(data)); return { ok: true }; }
   });
@@ -204,11 +221,11 @@ test('Mac authority refuses automatic takeover after a missed heartbeat, includi
   assert.equal(saved.rows[0].session, A, 'refusals preserve the previous owner record');
 });
 
-test('Mac authority permits clean release/handoff but fences original holder', () => {
+test('legacy release tombstones cannot certify quiescence or permit takeover', () => {
   const clock = { now: 0 };
   let saved = null;
   const make = () => createCheckoutLeases({
-    now: () => clock.now, ttlMs: 60_000, requireExplicitRecovery: true,
+    now: () => clock.now, ttlMs: 60_000,
     reload: () => ({ ok: true, data: saved }),
     onChange: data => { saved = JSON.parse(JSON.stringify(data)); return { ok: true }; }
   });
@@ -216,6 +233,6 @@ test('Mac authority permits clean release/handoff but fences original holder', (
   assert.equal(acquire(first, A).ok, true);
   const released = first.release({ host: 'mac', root: ROOT, clientSession: A, principal: 'oidc:owner' });
   assert.equal(released.ok, true);
-  assert.equal(acquire(make(), B).ok, true);
+  assert.equal(acquire(make(), B).error, 'checkout_recovery_required');
   assert.equal(acquire(make(), A).error, 'checkout_lease_revoked');
 });
