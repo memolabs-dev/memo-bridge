@@ -30,6 +30,8 @@ const SIG_RE = /^[A-Za-z0-9_-]{86}$/;         // 64 bytes, base64url
 const KEY_ID_RE = /^[0-9a-f]{16}$/;
 export const APPROVAL_ID_RE = /^ap_[A-Za-z0-9_-]{16,40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+const SESSION_HASH_RE = /^[0-9a-f]{32}$/;
+const SESSION_BOUND_VERSION = 2;
 
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -46,10 +48,15 @@ export function operatorKeyId(publicKeyPem) {
   return createHash('sha256').update(createPublicKey(publicKeyPem).export({ type: 'spki', format: 'der' })).digest('hex').slice(0, 16);
 }
 
-const statement = fields => Buffer.from(`memo-bridge-operator-v1\n${canonicalJson({
-  v: SIGNATURE_VERSION, id: fields.id, op: fields.op, host: fields.host, tier: fields.tier, principal: fields.principal,
-  args_sha256: fields.args_sha256, exp: fields.exp, nonce: fields.nonce, approval: fields.approval ?? null
-})}`, 'utf8');
+const statement = fields => {
+  const v = fields.v === SESSION_BOUND_VERSION ? SESSION_BOUND_VERSION : SIGNATURE_VERSION;
+  const document = {
+    v, id: fields.id, op: fields.op, host: fields.host, tier: fields.tier, principal: fields.principal,
+    args_sha256: fields.args_sha256, exp: fields.exp, nonce: fields.nonce, approval: fields.approval ?? null,
+    ...(v === SESSION_BOUND_VERSION ? { client_session: fields.client_session } : {})
+  };
+  return Buffer.from(`memo-bridge-operator-v${v}\n${canonicalJson(document)}`, 'utf8');
+};
 
 // Hub side. privateKeyPem: the operator signing key. Returns sign({id, op, host, tier,
 // principal, args}) -> the `operator` envelope field.
@@ -60,9 +67,12 @@ export function createOperatorSigner({ privateKeyPem, now = Date.now, ttlMs = DE
   if (!Number.isInteger(ttlMs) || ttlMs < 1_000 || ttlMs > MAX_SKEW_MS) throw new Error('invalid ttl');
   return Object.freeze({
     keyId,
-    sign({ id, op, host, tier, principal, args, approval = null }) {
-      const fields = { id, op, host, tier, principal, args_sha256: argsSha256(args), exp: now() + ttlMs,
-        nonce: random(16).toString('base64url'), approval: typeof approval === 'string' && APPROVAL_ID_RE.test(approval) ? approval : null };
+    sign({ id, op, host, tier, principal, args, approval = null, clientSession = null }) {
+      if (clientSession !== null && !SESSION_HASH_RE.test(clientSession)) throw new Error('invalid signed client session');
+      const fields = { v: clientSession === null ? SIGNATURE_VERSION : SESSION_BOUND_VERSION, id, op, host, tier, principal, args_sha256: argsSha256(args),
+        exp: now() + ttlMs, nonce: random(16).toString('base64url'),
+        approval: typeof approval === 'string' && APPROVAL_ID_RE.test(approval) ? approval : null,
+        ...(clientSession === null ? {} : { client_session: clientSession }) };
       return { key_id: keyId, ...fields, sig: sign(null, statement(fields), key).toString('base64url') };
     }
   });
@@ -70,7 +80,9 @@ export function createOperatorSigner({ privateKeyPem, now = Date.now, ttlMs = DE
 
 // Shape check of the envelope field, before any cryptography.
 function wellFormed(env) {
-  return plainObject(env) && typeof env.key_id === 'string' && KEY_ID_RE.test(env.key_id)
+  return plainObject(env) && [SIGNATURE_VERSION, SESSION_BOUND_VERSION].includes(env.v)
+    && (env.v === SESSION_BOUND_VERSION ? SESSION_HASH_RE.test(env.client_session ?? '') : env.client_session === undefined)
+    && typeof env.key_id === 'string' && KEY_ID_RE.test(env.key_id)
     && typeof env.id === 'string' && typeof env.op === 'string' && typeof env.host === 'string'
     && Number.isInteger(env.tier) && env.tier >= 0 && env.tier <= 3
     && typeof env.principal === 'string' && env.principal.length <= 130
@@ -103,7 +115,7 @@ export function createOperatorVerifier({ publicKeys, host, now = Date.now, maxEn
   return Object.freeze({
     get cacheSize() { return seen.size; },
     keyIds: Object.freeze([...keys.keys()]),
-    verify(env, { id, op, args, principal } = {}) {
+    verify(env, { id, op, args, principal, clientSession = null } = {}) {
       if (env === undefined || env === null) return { ok: false, error: 'signature_missing' };
       if (!wellFormed(env)) return { ok: false, error: 'signature_invalid' };
       const key = keys.get(env.key_id);
@@ -115,6 +127,9 @@ export function createOperatorVerifier({ publicKeys, host, now = Date.now, maxEn
       if (env.host !== host) return { ok: false, error: 'host_mismatch' };
       if (env.id !== id || env.op !== op || env.principal !== principal) return { ok: false, error: 'request_mismatch' };
       if (argsSha256(args) !== env.args_sha256) return { ok: false, error: 'args_mismatch' };
+      if (env.v === SESSION_BOUND_VERSION && env.client_session !== clientSession) {
+        return { ok: false, error: 'session_mismatch' };
+      }
       const t = now();
       if (env.exp < t) return { ok: false, error: 'expired' };
       if (env.exp > t + MAX_SKEW_MS) return { ok: false, error: 'exp_too_far' };
@@ -122,11 +137,12 @@ export function createOperatorVerifier({ publicKeys, host, now = Date.now, maxEn
       if (seen.has(env.nonce)) return { ok: false, error: 'replayed' };
       if (seen.size >= maxEntries) return { ok: false, error: 'nonce_cache_full' };
       seen.set(env.nonce, env.exp);
-      return { ok: true, tier: env.tier, keyId: env.key_id, approval: env.approval ?? null };
+      return { ok: true, tier: env.tier, keyId: env.key_id, approval: env.approval ?? null,
+        ...(env.v === SESSION_BOUND_VERSION ? { clientSession: env.client_session } : {}) };
     }
   });
 }
 
 // The refusal codes of verify(), counted towards auto-freeze (TODO-P6-07).
 export const SIGNATURE_REFUSALS = Object.freeze(['signature_missing', 'signature_invalid', 'unknown_key', 'host_mismatch',
-  'request_mismatch', 'args_mismatch', 'expired', 'exp_too_far', 'replayed', 'nonce_cache_full']);
+  'request_mismatch', 'args_mismatch', 'session_mismatch', 'expired', 'exp_too_far', 'replayed', 'nonce_cache_full']);

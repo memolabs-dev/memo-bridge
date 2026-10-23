@@ -74,3 +74,22 @@ test('AC-P6-03: exp too far, host mismatch, key rotation, bounded nonce cache', 
   assert.throws(() => createOperatorVerifier({ publicKeys: [keys.publicKeyPem], host: 'lab' }), /invalid operator host/);
   assert.throws(() => createOperatorSigner({ privateKeyPem: keys.privateKeyPem, ttlMs: 120_000 }), /invalid ttl/);
 });
+
+test('session-bound v2 operator signature refuses identity swapping, absent metadata and tampering', () => {
+  const { signer, verifier } = signingPair();
+  const sessionA = 'a'.repeat(32), sessionB = 'b'.repeat(32);
+  const signed = signer.sign({ ...REQ, clientSession: sessionA });
+  assert.equal(signed.v, 2);
+  assert.equal(signed.client_session, sessionA);
+  assert.equal(verifier.verify(signed, ctx({ clientSession: sessionB })).error, 'session_mismatch');
+  assert.equal(verifier.verify(signed, ctx()).error, 'session_mismatch');
+  assert.equal(verifier.verify({ ...signed, client_session: sessionB }, ctx({ clientSession: sessionB })).error, 'signature_invalid');
+  assert.equal(verifier.verify({ ...signed, v: 1 }, ctx({ clientSession: sessionA })).error, 'signature_invalid');
+  assert.deepEqual(verifier.verify(signed, ctx({ clientSession: sessionA })),
+    { ok: true, tier: 0, keyId: signer.keyId, approval: null, clientSession: sessionA });
+  assert.equal(verifier.verify(signed, ctx({ clientSession: sessionA })).error, 'replayed');
+  assert.throws(() => signer.sign({ ...REQ, clientSession: 'forged' }), /invalid signed client session/);
+  const legacy = signer.sign(REQ);
+  assert.equal(legacy.v, 1);
+  assert.equal(verifier.verify(legacy, ctx()).ok, true, 'legacy signature remains valid for non-protected operations');
+});

@@ -30,7 +30,7 @@ export const DENIED_CODES = Object.freeze(new Set(['forbidden', 'rate_limited', 
   // Phase 6 operator refusals (host agent or hub).
   'frozen', 'operator_disabled', 'tier_not_allowed', 'tier_mismatch', 'path_secret', 'path_not_allowed', 'git_internal',
   'use_dev_flow', 'unit_not_declared', 'container_not_declared', 'signature_missing', 'signature_invalid', 'unknown_key',
-  'host_mismatch', 'request_mismatch', 'args_mismatch', 'expired', 'exp_too_far', 'replayed',
+  'host_mismatch', 'request_mismatch', 'args_mismatch', 'session_mismatch', 'session_unbound', 'expired', 'exp_too_far', 'replayed',
   // Lot 2: approvals, writes, runs.
   'pending_approval', 'approval_unavailable', 'approval_required', 'approval_backlog', 'env_not_allowed', 'timeout_too_long',
   'root_protected', 'recursive_required', 'exists', 'owner_would_change', 'validation_failed', 'root_unavailable_on_host',

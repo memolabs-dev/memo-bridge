@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { createOperatorSigner, createOperatorVerifier } from '../bridge/operator-signing.mjs';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -111,16 +111,29 @@ test('signed operator-agent executes no mutation when local wrapper owns its tar
   const args = { host: 'mac', path: join(repo, 'sub', 'x') };
   const id = 'signed-request-1';
   const ctx = { id, principal: { id: 'oidc:owner' },
-    operator: signer.sign({ id, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args }),
+    operator: signer.sign({ id, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args, clientSession: B }),
     meta: { client_session: B } };
   assert.equal((await handlers.broker_test(args, ctx)).error, 'locked_by_other_session');
+  assert.equal(writes, 0);
+  const oldId = 'signed-request-legacy';
+  const legacy = { ...ctx, id: oldId, operator: signer.sign({
+    id: oldId, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args
+  }) };
+  assert.equal((await handlers.broker_test(args, legacy)).error, 'session_unbound',
+    'legacy v1 is denied when Mac-side authority is enabled');
+  const swapId = 'signed-request-swap';
+  const swapped = { ...ctx, id: swapId, operator: signer.sign({
+    id: swapId, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args, clientSession: B
+  }), meta: { client_session: C } };
+  assert.equal((await handlers.broker_test(args, swapped)).error, 'session_mismatch',
+    'swapping the unsigned transport metadata cannot impersonate another session');
   assert.equal(writes, 0);
   const forged = { ...args, session: A };
   // Caller-supplied args are either rejected by signature verification or
   // discarded by schema parsing; they never become the transport's session.
   const secondId = 'signed-request-2';
   const secondCtx = { ...ctx, id: secondId, operator: signer.sign({
-    id: secondId, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args: forged
+    id: secondId, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args: forged, clientSession: B
   }) };
   assert.equal((await handlers.broker_test(forged, secondCtx)).error,
     'locked_by_other_session');
@@ -227,4 +240,34 @@ test('supervisor SIGTERM after the direct child exits stops surviving process-gr
   const authority = createMacCheckoutAuthority({ stateDir });
   assert.equal(authority.guard('operator_edit', { path: join(repo, 'after-term') },
     { principal: 'oidc:owner', session: C }).ok, true, 'group should be stopped before release');
+});
+
+test('experimental Seatbelt writer cannot modify another checkout, including through a child process',
+  { skip: process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec') }, t => {
+  const { repo, other, stateDir } = fixture(t);
+  createMacCheckoutAuthority({ stateDir });
+  const script = new URL('../scripts/with-checkout-lease.mjs', import.meta.url).pathname;
+  const target = join(other, 'ESCAPE');
+  symlinkSync(other, join(repo, 'OTHER_ALIAS'));
+  const linkedTarget = join(repo, 'OTHER_ALIAS', 'SYMLINK_ESCAPE');
+  const child = "require('node:fs').writeFileSync(" + JSON.stringify(target) + ",'bad')";
+  const code = `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+fs.writeFileSync('ALLOWED','ok');
+const out = cp.spawnSync(process.execPath, ['-e', ${JSON.stringify(child)}], { encoding:'utf8' });
+fs.writeFileSync('CHILD_EXIT_CODE', String(out.status));
+if (out.status === 0) process.exit(19);
+try { fs.writeFileSync(${JSON.stringify(linkedTarget)},'bad'); process.exit(20); }
+catch (error) { fs.writeFileSync('LINK_DENIED', error?.code ?? 'unknown'); }
+`;
+  const run = spawnSync(process.execPath,
+    [script, '--repo', repo, '--state-dir', stateDir, '--sandbox-strict', '--', process.execPath, '-e', code],
+    { encoding: 'utf8', timeout: 15000 });
+  assert.equal(run.status, 0, JSON.stringify({ stdout: run.stdout, stderr: run.stderr }));
+  assert.equal(readFileSync(join(repo, 'ALLOWED'), 'utf8'), 'ok');
+  assert.notEqual(readFileSync(join(repo, 'CHILD_EXIT_CODE'), 'utf8'), '0');
+  assert.equal(existsSync(target), false, 'sandbox must prevent all writes to the second repo');
+  assert.equal(existsSync(join(other, 'SYMLINK_ESCAPE')), false, 'symlink must not escape Seatbelt');
+  assert.notEqual(readFileSync(join(repo, 'LINK_DENIED'), 'utf8'), '', 'symlink denial observed');
 });

@@ -493,7 +493,8 @@ export function createHub(options) {
     }
     const id = newId();
     const started = Date.now();
-    const signature = signer.sign({ id, op, host, tier, principal: principal.id, args, approval });
+    const signature = signer.sign({ id, op, host, tier, principal: principal.id, args, approval,
+      clientSession: operator?.sessionBindingEnabled === true && host === 'mac' && tier > 0 && tier < 3 ? clientSession : null });
     // A foreground run or script waits for its own timeout plus a margin.
     const foreground = ['operator_run', 'operator_script'].includes(op) && args.background !== true;
     const timeoutMs = foreground ? Math.max(OPS[op].timeoutMs, ((Number.isInteger(args.timeout_s) ? args.timeout_s : 30) + 30) * 1000) : undefined;

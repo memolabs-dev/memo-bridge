@@ -104,7 +104,8 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
         return out;
       };
 
-      const signed = verifier.verify(ctx.operator, { id: ctx.id, op, args, principal });
+      const signed = verifier.verify(ctx.operator, { id: ctx.id, op, args, principal,
+        clientSession: ctx.meta?.client_session ?? null });
       if (!signed.ok) return refuse(signed.error);
       approval = signed.approval;
       if (!Number.isInteger(tier) || signed.tier !== tier) return refuse('tier_mismatch');
@@ -126,6 +127,9 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       // The remote caller cannot choose the session through tool arguments: only the
       // trusted transport metadata is read, after signature and schema verification.
       if (checkoutAuthority && tier > 0) {
+        // No v1/unbound request can rely on a mutable transport metadata claim.
+        // V2 session identity is verified against the signature before admission.
+        if (!signed.clientSession) return refuse('session_unbound');
         const admission = checkoutAuthority.guard(op, parsed.data, {
           principal, session: ctx.meta?.client_session ?? null
         });

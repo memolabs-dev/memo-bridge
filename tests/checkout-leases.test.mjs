@@ -185,3 +185,37 @@ console.log(JSON.stringify(state.exclusive('checkout_leases', () => ({ok:true}))
   assert.equal(outer.ok, true);
   assert.equal(runChild().ok, true);
 });
+
+test('Mac authority refuses automatic takeover after a missed heartbeat, including same-session restarts', () => {
+  const clock = { now: 0 };
+  let saved = null;
+  const make = () => createCheckoutLeases({
+    now: () => clock.now, ttlMs: 60_000, requireExplicitRecovery: true,
+    reload: () => ({ ok: true, data: saved }),
+    onChange: data => { saved = JSON.parse(JSON.stringify(data)); return { ok: true }; }
+  });
+  const first = make();
+  assert.equal(acquire(first, A).ok, true);
+  clock.now = 60_001;
+  assert.equal(acquire(make(), B).error, 'checkout_recovery_required',
+    'new session cannot steal lease from potentially live orphaned child');
+  assert.equal(acquire(make(), A).error, 'checkout_recovery_required',
+    'same session ID does not prove a crashed process stopped');
+  assert.equal(saved.rows[0].session, A, 'refusals preserve the previous owner record');
+});
+
+test('Mac authority permits clean release/handoff but fences original holder', () => {
+  const clock = { now: 0 };
+  let saved = null;
+  const make = () => createCheckoutLeases({
+    now: () => clock.now, ttlMs: 60_000, requireExplicitRecovery: true,
+    reload: () => ({ ok: true, data: saved }),
+    onChange: data => { saved = JSON.parse(JSON.stringify(data)); return { ok: true }; }
+  });
+  const first = make();
+  assert.equal(acquire(first, A).ok, true);
+  const released = first.release({ host: 'mac', root: ROOT, clientSession: A, principal: 'oidc:owner' });
+  assert.equal(released.ok, true);
+  assert.equal(acquire(make(), B).ok, true);
+  assert.equal(acquire(make(), A).error, 'checkout_lease_revoked');
+});
