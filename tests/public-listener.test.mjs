@@ -319,6 +319,7 @@ test('remote.json parsing: the lab-infra file maps onto every Phase 5 piece; bad
   }
   // What ChatGPT is served: "simple" by default (owner decision 2026-10-23), "full" on request.
   assert.equal(parsePublicListenerSettings(with_(r => { r.surface = 'full'; })).config.surface.surface, 'full');
+  assert.equal(parsePublicListenerSettings(with_(r => { r.surface = 'intent'; })).config.surface.surface, 'intent');
   const badSurface = parsePublicListenerSettings(with_(r => { r.surface = 'everything'; }));
   assert.deepEqual([badSurface.ok, badSurface.field], [false, 'surface']);
   // The values remote-surface.mjs bounds are checked here too, so the hub fails before listening.
