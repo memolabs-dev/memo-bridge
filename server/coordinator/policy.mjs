@@ -227,8 +227,9 @@ function localUserName(env) {
 }
 
 // The local stdio plugin runs as the trusted OS user that launched it (see SECURITY.md).
+export const localOwnerId = (env = process.env) => `local:${localUserName(env)}`;
 export function localOwnerPrincipal(env = process.env) {
-  return makePrincipal(`local:${localUserName(env)}`, Object.values(CAPABILITIES));
+  return makePrincipal(localOwnerId(env), Object.values(CAPABILITIES));
 }
 
 // The read-only local principal (#252), for a stdio process started with --read-only or
