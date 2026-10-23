@@ -71,6 +71,7 @@ const COORDINATOR_TOOLS = ['workspace_open', 'workspace_status', 'workspace_list
 const WORKTREE_TOOLS = ['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files', 'worktree_read_file',
   'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove'];
 const JOB_TOOLS = ['jobs_submit', 'jobs_list', 'job_status', 'job_events', 'job_results', 'job_cancel'];
+const ACP_TOOLS = ['agent_preflight'];
 const HOST_TOOLS = ['host_capabilities', 'host_resources'];
 const GITHUB_TOOLS = ['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks', 'github_create_pr'];
 const AUDIT_TOOLS = ['audit_events', 'audit_operation'];
@@ -79,7 +80,7 @@ const SOURCE_TOOLS = ['source_changes_list', 'source_change_status', 'source_cha
 const PROJECT_TOOLS = ['project_create'];
 // Reader contract v1 (#252, docs/READER_CONTRACT.md), stdio only.
 const READER_TOOLS = ['reader_activity', 'reader_job_events'];
-const EXPECTED = [...BASE_TOOLS, ...OBSERVER_TOOLS, ...COORDINATOR_TOOLS, ...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS,
+const EXPECTED = [...BASE_TOOLS, ...OBSERVER_TOOLS, ...COORDINATOR_TOOLS, ...WORKTREE_TOOLS, ...JOB_TOOLS, ...ACP_TOOLS, ...HOST_TOOLS,
   ...GITHUB_TOOLS, ...AUDIT_TOOLS, ...MEMORY_TOOLS, ...SOURCE_TOOLS, ...PROJECT_TOOLS, ...READER_TOOLS].sort();
 
 const client = new Client({ name: 'memo-bridge-smoke', version: '0.2.0' });
