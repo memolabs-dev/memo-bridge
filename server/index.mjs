@@ -14,6 +14,7 @@ import { sandboxMode } from './runners/sandbox.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from './tools/coordinator-tools.mjs';
 import { WORKTREE_TOOLS, registerWorktreeTools } from './tools/worktree-tools.mjs';
 import { JOB_TOOLS, registerJobTools } from './tools/job-tools.mjs';
+import { ACP_TOOLS, registerAcpTools } from './tools/acp-tools.mjs';
 import { HOST_TOOLS, registerHostTools } from './tools/host-tools.mjs';
 import { GITHUB_TOOLS, registerGithubTools } from './tools/github-tools.mjs';
 import { AUDIT_TOOLS, registerAuditTools } from './tools/audit-tools.mjs';
@@ -40,7 +41,7 @@ const OBSERVER_TOOLS = ['observe_guardian', 'observe_agents', 'observe_live_stat
 const TOOL_GROUPS = {
   observe: [...BASE_TOOLS, ...OBSERVER_TOOLS],
   coordinate: [...COORDINATOR_TOOLS],
-  run: [...WORKTREE_TOOLS, ...JOB_TOOLS, ...HOST_TOOLS],
+  run: [...WORKTREE_TOOLS, ...JOB_TOOLS, ...ACP_TOOLS, ...HOST_TOOLS],
   github: [...GITHUB_TOOLS],
   audit: [...AUDIT_TOOLS],
   memory: [...MEMORY_TOOLS],
@@ -208,6 +209,7 @@ const counted = READ_ONLY ? withImplicitWorkspace(surface, getRuntime) : withLea
 registerCoordinatorTools(counted, getRuntime);
 registerWorktreeTools(counted, getRuntime);
 registerJobTools(counted, getRuntime);
+registerAcpTools(counted, getRuntime);
 registerHostTools(counted, getRuntime);
 registerGithubTools(counted, getRuntime);
 registerAuditTools(counted, getRuntime);
