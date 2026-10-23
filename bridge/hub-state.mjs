@@ -115,6 +115,15 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
       closeSync(fd);
       fd = null;
       renameSync(tmp, file);
+      // The checkout fence must survive restart after the write is admitted.
+      // Sync the directory entry too; fsync of the temporary file alone does
+      // not make its rename durable. Failure refuses admission.
+      if (name === 'checkout_leases') {
+        fd = openSync(dir, 'r');
+        fsyncSync(fd);
+        closeSync(fd);
+        fd = null;
+      }
       return { ok: true };
     } catch (error) {
       if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } }

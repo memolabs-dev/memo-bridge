@@ -67,19 +67,24 @@ export function createMacCheckoutAuthority({ stateDir, resolver = checkoutRootFo
     now,
     reload: () => state.read('checkout_leases'),
     onChange: data => state.save('checkout_leases', data),
-    transaction: fn => state.exclusive('checkout_leases', fn),
-    requireExplicitRecovery: true
+    transaction: fn => state.exclusive('checkout_leases', fn)
   });
-  function act(kind, { root, session, principal }) {
+  function acquire({ root, session, principal }) {
     if (typeof root !== 'string' || !isAbsolute(root)) return fail('checkout_root_unverified');
     const resolved = resolver(root);
     if (!resolved.ok || !resolved.root) return fail('checkout_root_unverified');
     const input = { host: 'mac', root: resolved.root, principal, clientSession: session };
-    return kind === 'release' ? leases.release(input) : leases.acquire(input);
+    return leases.acquire(input);
   }
   return Object.freeze({
-    acquire(input) { return act('acquire', input); },
-    release(input) { return act('release', input); },
+    acquire,
+    // Neither a session tag nor an empty process group proves quiescence:
+    // arbitrary children can setsid()/detach and keep inherited write access.
+    // No owner recovery API exists yet. Keep the durable fence, never certify
+    // a clean handoff from this cooperative authority.
+    release() { return fail('checkout_recovery_required', {
+      detail: 'automatic release disabled: all descendant writers must be stopped or isolated by reviewed owner recovery'
+    }); },
     guard(op, args, { session, principal } = {}) {
       const target = checkoutTargetFor(op, args);
       if (!target.ok || target.skip) return target;

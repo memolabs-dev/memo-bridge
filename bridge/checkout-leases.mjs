@@ -33,11 +33,10 @@ export function ambiguousGitTarget(argv) {
 }
 
 // A lease is persisted synchronously BEFORE an operator call may be signed.
-// An expired lease may pass to another verified session. The old session is
-// thereafter fenced (revoked), even after the new holder's lease expires.
+// Expiry is not proof that an in-flight call or descendant has stopped.
+// Never transfer an expired lease automatically, including on the hub.
 export function createCheckoutLeases({
-  now = Date.now, reload = null, onChange = () => ({ ok: true }), transaction = null, ttlMs = LEASE_MS,
-  requireExplicitRecovery = false
+  now = Date.now, reload = null, onChange = () => ({ ok: true }), transaction = null, ttlMs = LEASE_MS
 } = {}) {
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 3_600_000) throw new Error('invalid checkout lease TTL');
   let records = new Map();
@@ -47,10 +46,10 @@ export function createCheckoutLeases({
     const next = new Map();
     for (const row of data?.rows ?? []) {
       const root = normalizedCheckout(row.host, row.root);
-      if (!root || root !== row.root || !SESSION_RE.test(row.session) || typeof row.principal !== 'string' ||
-          row.principal.length > 130 || !Number.isSafeInteger(row.expires) ||
+      if (!root || root !== row.root || typeof row.session !== 'string' || !SESSION_RE.test(row.session) || typeof row.principal !== 'string' ||
+          !row.principal || row.principal.length > 130 || !Number.isSafeInteger(row.expires) || Math.abs(row.expires) > 8.64e15 ||
           !Array.isArray(row.revoked) || row.revoked.length > MAX_REVOKED ||
-          row.revoked.some(s => !SESSION_RE.test(s)) || next.has(row.host + '|' + root)) return false;
+          row.revoked.some(s => typeof s !== 'string' || !SESSION_RE.test(s)) || next.has(row.host + '|' + root)) return false;
       next.set(row.host + '|' + root, { ...row, revoked: [...row.revoked] });
     }
     records = next;
@@ -73,35 +72,29 @@ export function createCheckoutLeases({
     if (!ensureState()) return fail('checkout_lease_state_unavailable');
     const safeRoot = normalizedCheckout(host, root);
     if (!safeRoot) return fail('checkout_root_unverified');
-    if (!SESSION_RE.test(clientSession ?? '')) return fail('session_required',
-      { detail: 'a stable ChatGPT session hint is required for multi-step checkout writes while the checkout gate is enabled' });
+    if (typeof clientSession !== 'string' || !SESSION_RE.test(clientSession)) return fail('session_required',
+      { detail: 'a stable client session tag is required for multi-step checkout writes while the checkout gate is enabled' });
     if (typeof principal !== 'string' || !principal || principal.length > 130) return fail('forbidden');
     const key = host + '|' + safeRoot;
     const previous = records.get(key);
     if (previous?.revoked.includes(clientSession)) return fail('checkout_lease_revoked',
       { detail: 'this conversation lost checkout ownership; use a fresh isolated checkout, never continue on another branch' });
     const time = now();
+    if (!Number.isSafeInteger(time) || Math.abs(time + ttlMs) > 8.64e15) return fail('checkout_lease_state_unavailable');
     if (previous && previous.expires > time && (previous.session !== clientSession || previous.principal !== principal)) {
       return fail('locked_by_other_session', { holder: describe(previous),
-        next_step: 'another conversation owns this checkout; use another checkout or ask the owner to release it' });
+        next_step: 'another session owns this checkout; use another checkout or request reviewed owner recovery' });
     }
-    // On the Mac an expired heartbeat is NOT proof that an agent has stopped.
-    // A crashed supervisor can leave descendants writing after expiry.
-    // A successful release tombstones its own session in revoked, distinguishing
-    // an intentional handoff from an uncertain crash or orphan.
-    if (requireExplicitRecovery && previous && previous.expires <= time &&
-        !previous.revoked.includes(previous.session)) {
+    // A heartbeat or a legacy release tombstone cannot prove quiescence.
+    // Older supervisors released after observing only their process group;
+    // escaped descendants may still be writing. Preserve those records too.
+    if (previous && previous.expires <= time) {
       return fail('checkout_recovery_required', {
-        detail: 'lease expired without verified release; stop and inspect the previous process tree before owner recovery'
+        detail: 'expired or released lease requires reviewed owner recovery; TTL and process-group exit do not prove quiescence'
       });
     }
     if (!previous && records.size >= MAX_CHECKOUTS) return fail('checkout_lease_capacity');
     const revoked = previous ? [...previous.revoked] : [];
-    if (previous && (previous.session !== clientSession || previous.principal !== principal)) {
-      if (!revoked.includes(previous.session)) revoked.push(previous.session);
-      if (revoked.length > MAX_REVOKED) return fail('checkout_lease_capacity',
-        { detail: 'revocation history full; owner must explicitly review and clear the checkout lease' });
-    }
     const current = { host, root: safeRoot, principal, session: clientSession, expires: time + ttlMs, revoked };
     records.set(key, current);
     let saved;
@@ -117,15 +110,18 @@ export function createCheckoutLeases({
     if (!ensureState()) return fail('checkout_lease_state_unavailable');
     const safeRoot = normalizedCheckout(host, root);
     if (!safeRoot) return fail('checkout_root_unverified');
-    if (!SESSION_RE.test(clientSession ?? '')) return fail('session_required');
+    if (typeof clientSession !== 'string' || !SESSION_RE.test(clientSession)) return fail('session_required');
     const key = host + '|' + safeRoot;
     const previous = records.get(key);
     if (!previous || previous.session !== clientSession || previous.principal !== principal ||
         previous.revoked.includes(clientSession)) return fail('checkout_lease_not_owned');
+    const time = now();
+    if (!Number.isSafeInteger(time) || Math.abs(time) > 8.64e15) return fail('checkout_lease_state_unavailable');
+    if (previous.expires <= time) return fail('checkout_recovery_required');
     if (previous.revoked.length >= MAX_REVOKED) return fail('checkout_lease_capacity');
-    // Preserve a tombstone, not deletion: the releasing process may have a
-    // delayed write which must remain fenced even after another holder arrives.
-    const current = { ...previous, expires: now(), revoked: [...previous.revoked, clientSession] };
+    // Revocation preserves a tombstone, not deletion. It stops this session;
+    // it does not certify quiescence or authorize a successor session.
+    const current = { ...previous, expires: time, revoked: [...previous.revoked, clientSession] };
     records.set(key, current);
     let saved;
     try { saved = onChange({ schema: 1, rows: [...records.values()] }); } catch { saved = { ok: false }; }

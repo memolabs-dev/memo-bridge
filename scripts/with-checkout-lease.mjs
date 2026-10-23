@@ -94,14 +94,16 @@ const exit = (code, signal) => {
   if (finished) return;
   finished = true;
   clearInterval(heartbeat);
+  // Do not release after arbitrary code ran. An escaped process group can
+  // retain checkout write access even after every observed member exits.
   const released = authority.release(input);
   if (temporary) try { rmSync(temporary, { recursive: true, force: true }); } catch { /* owner cleanup on failure */ }
   if (!released.ok) console.error('Checkout lease release requires review: ' + released.error);
-  process.exitCode = released.ok ? (code ?? (signal ? 128 + (signal === 'SIGINT' ? 2 : 15) : 1)) : 74;
+  process.exitCode = code ?? (signal ? 128 + (signal === 'SIGINT' ? 2 : 15) : 1);
 };
 // Child "exit" does NOT mean all members of its process group have stopped.
- // Keep the lease and heartbeat until the entire group has drained; an
- // orphaned descendant must not silently hand the checkout to another agent.
+// Keep the heartbeat until the observed group drains, then retain its durable
+// fence for owner recovery. An escaped descendant remains unobservable here.
 child.once('exit', (code, signal) => {
   const inspectGroup = () => {
     if (finished) return;
