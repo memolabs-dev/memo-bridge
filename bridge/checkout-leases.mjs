@@ -36,7 +36,8 @@ export function ambiguousGitTarget(argv) {
 // An expired lease may pass to another verified session. The old session is
 // thereafter fenced (revoked), even after the new holder's lease expires.
 export function createCheckoutLeases({
-  now = Date.now, reload = null, onChange = () => ({ ok: true }), transaction = null, ttlMs = LEASE_MS
+  now = Date.now, reload = null, onChange = () => ({ ok: true }), transaction = null, ttlMs = LEASE_MS,
+  requireExplicitRecovery = false
 } = {}) {
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 3_600_000) throw new Error('invalid checkout lease TTL');
   let records = new Map();
@@ -83,6 +84,16 @@ export function createCheckoutLeases({
     if (previous && previous.expires > time && (previous.session !== clientSession || previous.principal !== principal)) {
       return fail('locked_by_other_session', { holder: describe(previous),
         next_step: 'another conversation owns this checkout; use another checkout or ask the owner to release it' });
+    }
+    // On the Mac an expired heartbeat is NOT proof that an agent has stopped.
+    // A crashed supervisor can leave descendants writing after expiry.
+    // A successful release tombstones its own session in revoked, distinguishing
+    // an intentional handoff from an uncertain crash or orphan.
+    if (requireExplicitRecovery && previous && previous.expires <= time &&
+        !previous.revoked.includes(previous.session)) {
+      return fail('checkout_recovery_required', {
+        detail: 'lease expired without verified release; stop and inspect the previous process tree before owner recovery'
+      });
     }
     if (!previous && records.size >= MAX_CHECKOUTS) return fail('checkout_lease_capacity');
     const revoked = previous ? [...previous.revoked] : [];
