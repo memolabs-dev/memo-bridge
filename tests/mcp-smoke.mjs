@@ -69,7 +69,7 @@ const COORDINATOR_TOOLS = ['workspace_open', 'workspace_status', 'workspace_list
   'tasks_list', 'task_status', 'task_claim', 'task_renew', 'task_release', 'task_complete', 'task_checkpoint',
   'batch_create', 'task_next', 'batch_status', 'sessions_overview', 'workspace_delegate', 'delegation_join', 'delegation_status', 'delegation_report', 'delegation_end'];
 const WORKTREE_TOOLS = ['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files', 'worktree_read_file',
-  'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove'];
+  'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove', 'acp_admission_check'];
 const JOB_TOOLS = ['jobs_submit', 'jobs_list', 'job_status', 'job_events', 'job_results', 'job_cancel'];
 const ACP_TOOLS = ['agent_preflight'];
 const HOST_TOOLS = ['host_capabilities', 'host_resources'];
