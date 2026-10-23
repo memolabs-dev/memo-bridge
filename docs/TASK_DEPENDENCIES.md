@@ -33,3 +33,22 @@ Do not enable the flag across production agents, or close #266 as fully accepted
 node --test tests/task-dependencies.test.mjs tests/task-dependency-claim.test.mjs
 pnpm test
 ```
+
+## Private signed acceptance receipts
+
+The runtime now wires an **independent signer-backed verifier** through `server/task-acceptance-receipts.mjs`, using its existing private `stateDir`. This does not generate secrets or attest any work automatically.
+
+- `<stateDir>/dependency-acceptance.key`: exactly 32 random bytes, regular **0600** owner file (never commit, transmit or log this key).
+- `<stateDir>/dependency-acceptance/`: owner-only **0700** directory.
+- `<stateDir>/dependency-acceptance/<sha256(normalized_issue_ref)>.json`: **0600** JSON containing `sealAcceptanceReceipt(payload, secret)` issued by an independent authorized verifier **after** review of the referenced PR, deployment/policy and actual E2E evidence. No API or issue comment is allowed to issue a receipt.
+- The cryptographic signature binds the full Issue reference, `updated_at`, `closed_at`, SHA-256 of Issue body, independent verifier and producer IDs, verified-at time, PR reference, E2E reference and either a deployment receipt or a verified no-deployment policy reference.
+- The gate checks the HMAC, exact issue revision, 30-day evidence age, private file mode and independent verifier identity. A missing, unreadable, forged, stale, edited, symlinked or over-permissive attestation refuses execution.
+- Real proof must come from separately authenticated/verifiable product checks. The HMAC only guarantees *who attested*, not that a reference is truthful. An independent verification workflow is essential. This PR does not autonomously mint attestations from PR merges or CI success.
+
+Additional server-side guards refuse `task_renew`, `task_checkpoint`, and `task_complete` when dependencies are later revoked, while allowing `task_release(outcome=cancelled)` for safe cleanup.
+
+## Two-agent trial
+
+`node --test tests/task-dependency-agents-e2e.test.mjs` runs two separate Node worker processes against a disposable fake-GitHub backend and the real Git-ref claim path: without an acceptance receipt both refuse the task; with a correctly signed receipt exactly one is allowed to claim. The test never modifies real Issues or production hosts.
+
+**Still required before real rollout:** run the same flow with two real external sessions over the deployed connector; prove independently generated receipts based on a genuine new-user E2E, host-wide checkout isolation (#263), and a recovery/rollback procedure. No claim of production readiness or automatic closure from simulated checks.

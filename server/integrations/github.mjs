@@ -260,12 +260,15 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
       const res = await read(scoped.repo, 'repos/' + scoped.repo.full + '/issues/' + number);
       if (!res.ok) return res;
       const data = res.data;
-      if (data?.pull_request || !['open', 'closed'].includes(data?.state) || typeof data.body !== 'string'
-        || Buffer.byteLength(data.body, 'utf8') > 20_000 || Number(data.number) !== number) {
+      // GitHub uses null for an explicitly empty Issue body. Missing body is unknown.
+      const body = data?.body === null ? '' : data?.body;
+      if (data?.pull_request || !['open', 'closed'].includes(data?.state) || typeof body !== 'string'
+        || Buffer.byteLength(body, 'utf8') > 20_000 || Number(data.number) !== number) {
         return fail('github_unavailable', 'issue body or state unavailable');
       }
       return { ok: true, issue: { ref: scoped.repo.full + '#' + number, state: data.state,
-        body: data.body, authorized: true, observed_at: new Date(now()).toISOString() } };
+        body, updated_at: data.updated_at ?? null, closed_at: data.closed_at ?? null,
+        authorized: true, observed_at: new Date(now()).toISOString() } };
     },
 
     async issues(repo, { state = 'open', labels, limit = LIMITS.list.default } = {}) {

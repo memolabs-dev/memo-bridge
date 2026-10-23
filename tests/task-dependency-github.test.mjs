@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGitHub, parseRepo } from '../server/integrations/github.mjs';
 
-const data = { number: 7, state: 'closed',
+const data = { number: 7, state: 'closed', updated_at:'2026-10-23T11:00:00Z', closed_at:'2026-10-23T11:00:00Z',
   body: '<!-- memo-bridge:requires:v1 {"requires":["memolabs-dev/drop#8"]} -->' };
 const make = (response = data) => {
   const calls = [];
@@ -20,7 +20,7 @@ test('scoped single GitHub Issue read returns a fresh observation and the full b
   const r = await api.issue(parseRepo('memolabs-dev/drop'), 7);
   assert.equal(r.ok,true,JSON.stringify(r));
   assert.deepEqual(r.issue, { ref:'memolabs-dev/drop#7', state:'closed',
-    body:data.body, authorized:true, observed_at:'2026-10-23T12:00:00.000Z' });
+    body:data.body, updated_at:data.updated_at, closed_at:data.closed_at, authorized:true, observed_at:'2026-10-23T12:00:00.000Z' });
   assert.equal(calls.length,1);
 });
 test('unknown repository does not hit the GitHub API', async () => {
@@ -29,8 +29,14 @@ test('unknown repository does not hit the GitHub API', async () => {
   assert.deepEqual(calls,[]);
 });
 test('missing body, wrong Issue number and Pull Request objects fail closed', async () => {
-  for(const bad of [{ ...data, body:null }, {...data,number:8}, {...data,pull_request:{url:'x'}}]) {
+  for(const bad of [{ ...data, body:undefined }, {...data,number:8}, {...data,pull_request:{url:'x'}}]) {
     const {api} = make(bad);
     assert.equal((await api.issue(parseRepo('memolabs-dev/drop'),7)).ok,false);
   }
+});
+test('GitHub explicit null body is an empty declaration and not an unavailable issue', async () => {
+  const {api} = make({...data,body:null});
+  const r=await api.issue(parseRepo('memolabs-dev/drop'),7);
+  assert.equal(r.ok,true);
+  assert.equal(r.issue.body,'');
 });

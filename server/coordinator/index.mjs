@@ -466,6 +466,10 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     const held = await heldClaim(args, { requireActive: false });
     if (held.error) return held.error;
     if (guarded && held.claim.state === 'claimed' && inExpiryWindow(held.claim.expires_at, now())) return leaseExpiring();
+    if (guarded && held.claim.state === 'claimed') {
+      const gate = await guardDependencies(held.issue.ref);
+      if (!gate.ok) return gate;
+    }
     // A row closed because another holder took the Issue over: the lease is gone, nothing to release.
     if (held.claim.state === 'released' && held.claim.outcome === 'lost') return fail('stale_lease');
     if (held.claim.state === 'released') {
@@ -1090,6 +1094,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (ttl === undefined) return fail('invalid_input', 'ttl_seconds');
       const held = await heldClaim(args);
       if (held.error) return held.error;
+      const gate = await guardDependencies(held.issue.ref);
+      if (!gate.ok) return gate;
       const worker = workerFor(held.workspace);
       let r;
       const result = await ledger.heartbeat(held.issue, worker, args.claim_id, held.fence, ttl);
@@ -1136,6 +1142,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (note === undefined || (note && !withCommit)) return fail('invalid_input', 'note');
       const held = await heldClaim(args);
       if (held.error) return held.error;
+      const gate = await guardDependencies(held.issue.ref);
+      if (!gate.ok) return gate;
       if (inExpiryWindow(held.claim.expires_at, now())) return leaseExpiring();
       // Git first (it can be slow), then the ledger verify, then the insert at once.
       let check = null;
@@ -1144,6 +1152,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         check = await verifyCheckpoint({ repoPath: project.ok ? project.project.repoPath : null, branch: args.branch, commit });
         if (!check.ok) return fail(check.error);
       }
+      const finalGate = await guardDependencies(held.issue.ref);
+      if (!finalGate.ok) return finalGate;
       const verified = await ledger.verify(held.issue, workerFor(held.workspace), args.claim_id, held.fence);
       if (!verified.ok) return verified;
       return write((repo, at) => {

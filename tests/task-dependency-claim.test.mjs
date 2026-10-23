@@ -69,3 +69,16 @@ test('dependency changes after ledger grant: lease is released and no local task
   const status = await x.coordinator.workspaceStatus({ workspace_id: x.workspace_id });
   assert.deepEqual(status.claims, []);
 });
+test('revoked prerequisite blocks heartbeat, checkpoint and completion; cancellation still works', async t => {
+  let accepted=true;
+  const x=await fixture(t,{dependencyProtection:true,dependencyCheck:async()=>({ok:true,eligible:accepted,reason:'dependency_revoked'})});
+  const claim=await x.coordinator.taskClaim({workspace_id:x.workspace_id,issue:ISSUE});
+  assert.equal(claim.ok,true,JSON.stringify(claim));
+  accepted=false;
+  const args={workspace_id:x.workspace_id,issue:ISSUE,claim_id:claim.claim_id,fence:claim.fence};
+  assert.equal((await x.coordinator.taskRenew(args)).error,'dependency_blocked');
+  assert.equal((await x.coordinator.taskCheckpoint({...args,branch:'feat/test',commit:'a'.repeat(40)})).error,'dependency_blocked');
+  assert.equal((await x.coordinator.taskComplete({...args,summary:'should not be accepted'})).error,'dependency_blocked');
+  const cancelled=await x.coordinator.taskRelease({...args,outcome:'cancelled'});
+  assert.equal(cancelled.ok,true,JSON.stringify(cancelled));
+});

@@ -48,11 +48,12 @@ export async function inspectDependencies(root, { loadIssue, verifyAcceptance, n
     || !Number.isFinite(maxAgeMs) || maxAgeMs < 0 || !Number.isInteger(maxNodes) || maxNodes < 1 || maxNodes > 256) {
     return failure('dependency_invalid_input');
   }
-  const visited = new Map(), active = new Set(), evidence = [];
+  const visited = new Map(), seen = new Set(), active = new Set(), evidence = [];
   async function visit(ref, isRoot = false) {
     if (active.has(ref)) return failure('dependency_cycle', [ref]);
     if (visited.has(ref)) return visited.get(ref);
-    if (visited.size >= maxNodes) return failure('dependency_graph_limit', [ref]);
+    if (seen.size >= maxNodes) return failure('dependency_graph_limit', [ref]);
+    seen.add(ref);
     active.add(ref);
     try {
       let node;
@@ -93,5 +94,5 @@ export async function inspectDependencies(root, { loadIssue, verifyAcceptance, n
     } finally { active.delete(ref); }
   }
   const result = await visit(top, true);
-  return { ...result, issue: top, evidence, evaluated_at: new Date(now).toISOString(), observed_nodes: visited.size };
+  return { ...result, issue: top, evidence, evaluated_at: new Date(now).toISOString(), observed_nodes: seen.size };
 }

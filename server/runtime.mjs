@@ -19,6 +19,7 @@ import { CAPABILITIES, CLIENT_TYPES, OPERATOR_TIER_CAPABILITIES, WRITE_CAPABILIT
 import { remotePolicyFromEnv } from '../bridge/write-gate.mjs';
 import { defaultStateDir, openSqliteStore } from './coordinator/store.mjs';
 import { createProjectSync } from './integrations/project-sync.mjs';
+import { privateReceiptVerifier } from './task-acceptance-receipts.mjs';
 import { createGitHubCredentials } from './integrations/github-app.mjs';
 
 export function currentHost() {
@@ -85,6 +86,8 @@ export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
       coordinators.set(p, createCoordinator({ store: openStore(), principal: p, ledger: sharedLedger, now, catalogOptions, host, readOnly,
         remotePolicy: policy, projectSync: projectSyncOf(), credentials, scratchDir: join(stateDir, 'gh-pr'),
         learningThresholds: learningThresholds(env),
+        dependencyProtection: env.MEMO_BRIDGE_TASK_DEPENDENCIES === 'enabled',
+        dependencyAcceptance: privateReceiptVerifier({ stateDir, now }),
         ...(resolveProject ? { resolveProject } : {}), ...(projectRemote ? { projectRemote } : {}) }));
     }
     return coordinators.get(p);

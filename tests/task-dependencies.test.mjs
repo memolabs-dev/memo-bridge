@@ -74,3 +74,9 @@ test('manifest cannot escalate a privileged action or forge verification',async(
   const r=await graph([issue,node(2)]);
   assert.equal(r.eligible,false);
 });
+test('a long chain of unknown blockers hits the bounded graph limit', async () => {
+  const rows=Array.from({length:80},(_,i)=>node(i+1,i<79?[i+2]:[],'closed'));
+  const r=await graph(rows);
+  assert.equal(r.eligible,false);
+  assert.equal(r.reason,'dependency_graph_limit');
+});
