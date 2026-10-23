@@ -124,10 +124,11 @@ async function fixture(t, { principal = OWNER } = {}) {
   return { base, repo, origin, worktrees, rt, call, tools, ledgerCalls, state, addWorkspace, addClaim, events, row, ready, projectsRoot };
 }
 
-test('registers the ten worktree tools, each mapped to a capability', async t => {
+test('registers the worktree and ACP preflight tools, each mapped to a capability', async t => {
   const f = await fixture(t);
   assert.deepEqual(Object.keys(f.tools).sort(), [...WORKTREE_TOOLS].sort());
-  assert.equal(WORKTREE_TOOLS.length, 10);
+  assert.equal(WORKTREE_TOOLS.length, 11);
+  assert.equal(OPERATION_CAPABILITY.acp_admission_check, CAPABILITIES.READ);
   for (const name of WORKTREE_TOOLS) assert.ok(OPERATION_CAPABILITY[name], `${name} has a capability`);
   for (const name of ['worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push', 'worktree_remove']) {
     assert.equal(OPERATION_CAPABILITY[name], CAPABILITIES.REPO_WRITE);

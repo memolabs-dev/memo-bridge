@@ -4,10 +4,12 @@
 // and the audit journal. The principal comes from the runtime, never from tool arguments.
 import { z } from 'zod/v4';
 import { LIMITS, createWorktreeRunner } from '../runners/worktrees.mjs';
+import { checkAcpAdmission } from '../runners/acp-admission.mjs';
 import { CLIENT_REQUEST_ID_RE } from '../coordinator/store.mjs';
 
 export const WORKTREE_TOOLS = Object.freeze(['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files',
-  'worktree_read_file', 'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove']);
+  'worktree_read_file', 'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove',
+  'acp_admission_check']);
 
 // Operations that change something: their outcome is always journaled. Reads journal refusals only.
 const WRITES = new Set(['worktree_create', 'worktree_write_file', 'worktree_commit', 'worktree_push', 'worktree_remove']);
@@ -68,6 +70,25 @@ export function registerWorktreeTools(server, getRuntime) {
     }
     return result(data);
   };
+
+  server.registerTool('acp_admission_check', {
+    description: 'Use before planning a lease-bound OpenCode ACP session: verify owner, registered Mac worktree, Git link and branch, available executable, current claim and ledger fence. Read-only. A green preflight does NOT launch OpenCode or authorize a later launch; recheck at launch.',
+    inputSchema: z.object({
+      worktree_id: worktreeId,
+      workspace_id: workspaceId.optional()
+    }),
+    annotations: read
+  }, async (args) => {
+    let rt;
+    try { rt = await getRuntime(); } catch { return result({ok:false,error:'store_unavailable'}); }
+    // This is a local-owner-only capability. Refuse remote principals even if a
+    // hub role happens to hold generic read permission.
+    let answer;
+    try { answer = await checkAcpAdmission(rt, args); }
+    catch { answer = {ok:false,error:'internal_error'}; }
+    if (!answer.ok) await rt.audit('acp_admission_check','denied',answer.error,{});
+    return result(answer);
+  });
 
   server.registerTool('worktrees_list', {
     description: 'Use this when you need the worktree_id of your work, or the owner asks which branches this conversation has open: your worktrees, newest first. Read-only.',

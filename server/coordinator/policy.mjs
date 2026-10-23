@@ -55,6 +55,7 @@ export const OPERATION_CAPABILITY = Object.freeze({
   // Worktrees and files inside them
   worktrees_list: CAPABILITIES.READ,
   worktree_status: CAPABILITIES.READ,
+  acp_admission_check: CAPABILITIES.READ,
   worktree_read_file: CAPABILITIES.READ,
   worktree_list_files: CAPABILITIES.READ,
   worktree_diff: CAPABILITIES.READ,
