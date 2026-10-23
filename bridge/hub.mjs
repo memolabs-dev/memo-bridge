@@ -125,7 +125,8 @@ export function createHub(options) {
   if (operator?.checkoutLeasesEnabled === true && !hubState.durable) throw new Error('checkout leases require a durable hub state directory');
   const checkoutLeases = operator?.checkoutLeasesEnabled === true ? createCheckoutLeases({
     ...(operator?.now ? { now: operator.now } : {}), reload: () => hubState.read('checkout_leases'),
-    onChange: data => hubState.save('checkout_leases', data)
+    onChange: data => hubState.save('checkout_leases', data),
+    transaction: fn => hubState.exclusive('checkout_leases', fn)
   }) : null;
   // Repatriated tools (part 2): operator_transfer relayed here, source reads signed for the caller.
   const transfers = createTransfers({ readSource: (host, op, args, principal) => sendInternal(host, op, args, principal),

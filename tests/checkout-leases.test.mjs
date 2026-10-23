@@ -121,8 +121,10 @@ test('hub with opt-in reserves an entire checkout across calls and restarts; wit
     principal, clientSession: session
   });
   const first = createHub(opts);
+  const concurrent = createHub(opts); // independently cached state before first acquisition
   const noHost = await call(first, A);
   assert.equal(noHost.error, 'host_offline', JSON.stringify(noHost));
+  assert.equal((await call(concurrent, B)).error, 'locked_by_other_session', 'second hub re-reads live state');
   assert.equal((await call(first, B)).error, 'locked_by_other_session');
   assert.equal((await call(first, null)).error, 'session_required');
   const second = createHub(opts);
@@ -130,4 +132,56 @@ test('hub with opt-in reserves an entire checkout across calls and restarts; wit
   assert.equal((await call(second, A)).error, 'host_offline', 'first session renews after restart');
   const optOut = createHub({ ...opts, stateDir: join(tmp,'off'), operator: { ...opts.operator, checkoutLeasesEnabled: false } });
   assert.equal((await call(optOut, null)).error, 'host_offline', 'default behavior tolerates absent session hints');
+});
+
+test('two hub-state instances serialize a lease update across processes and refuse stale lockfiles', async t => {
+  const { createHubState } = await import('../bridge/hub-state.mjs');
+  const { mkdtempSync, writeFileSync, unlinkSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'memo-checkout-exclusive-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const first = createHubState({ dir });
+  const second = createHubState({ dir });
+  let collision;
+  const outer = first.exclusive('checkout_leases', () => {
+    collision = second.exclusive('checkout_leases', () => ({ ok: true }));
+    return { ok: true };
+  });
+  assert.equal(outer.ok, true);
+  assert.equal(collision.error, 'checkout_lease_busy');
+  assert.equal(second.exclusive('checkout_leases', () => ({ ok: true })).ok, true,
+    'lock is released after successful transaction');
+  const marker = join(dir, '.checkout_leases.lock');
+  writeFileSync(marker, 'unrecovered previous owner', { flag: 'wx', mode: 0o600 });
+  assert.equal(first.exclusive('checkout_leases', () => ({ ok: true })).error, 'checkout_lease_busy',
+    'crash-like orphaned marker is NOT silently stolen');
+  unlinkSync(marker); // test fixture only: a real reset requires owner review
+});
+
+test('a separate Node process cannot enter a held checkout-state transaction', async t => {
+  const { createHubState } = await import('../bridge/hub-state.mjs');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'memo-checkout-child-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = createHubState({ dir });
+  const url = new URL('../bridge/hub-state.mjs', import.meta.url).href;
+  const runChild = () => {
+    const code = `import { createHubState } from ${JSON.stringify(url)};
+const state = createHubState({ dir: process.argv[1] });
+console.log(JSON.stringify(state.exclusive('checkout_leases', () => ({ok:true}))));`;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', code, dir],
+      { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout.trim());
+  };
+  const outer = state.exclusive('checkout_leases', () => {
+    assert.equal(runChild().error, 'checkout_lease_busy');
+    return { ok: true };
+  });
+  assert.equal(outer.ok, true);
+  assert.equal(runChild().ok, true);
 });

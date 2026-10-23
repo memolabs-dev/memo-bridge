@@ -2,7 +2,7 @@
 
 **Status 2026-10-23: prototype, no production rollout, not a security boundary.**
 
-PR for #263 adds an opt-in checkout lease to the **remote operator path through one Memo Bridge hub**. It complements rather than replaces the existing per-call implicit locks. With one ChatGPT session editing a repository, it does not require a task, coordinator workspace or Git worktree. A second session reaching that same repository through the hub is refused until its owner lease expires or ownership is explicitly recovered. Different repositories remain independent.
+PR for #263 adds an opt-in checkout lease to the **remote operator path through Memo Bridge hub processes sharing one private durable state directory**. It complements rather than replaces the existing per-call implicit locks. With one ChatGPT session editing a repository, it does not require a task, coordinator workspace or Git worktree. A second session reaching that same repository through the hub is refused until its owner lease expires or ownership is explicitly recovered. Different repositories remain independent.
 
 ## Activate only in a controlled canary
 
@@ -13,7 +13,7 @@ Owner rollout prerequisites: confirm that the OAuth remote transport delivers `_
 ## Mechanics and invariants
 
 - Before signing a mutating operator call, the hub discovers the real repository root through a **signed read-only `operator_snapshot` on the target host**, using the directory containing the target file or the command's `cwd`. It validates that the resolved directory is inside that Git root. File writes in different subdirectories of the same repository are protected by one lease.
-- `checkout_leases.json` persists under the hub's private state directory, atomically via `hub-state.mjs`. A corrupt or unreadable document or failed persistence causes a refusal (`checkout_lease_state_unavailable`), not an empty table. A lease lasts 30 minutes and is renewed when the owning session issues a new mutating command.
+- `checkout_leases.json` persists under the hub's private state directory, atomically via `hub-state.mjs`. An exclusive `.checkout_leases.lock` filesystem marker serializes the full read → decision → save across hub processes using that same directory. A contested lock is refused as `checkout_lease_busy`; a crash marker is deliberately *not* stolen automatically and requires owner review. A corrupt or unreadable document or failed persistence causes a refusal (`checkout_lease_state_unavailable`), not an empty table. A lease lasts 30 minutes and is renewed when the owning session issues a new mutating command.
 - A different session gets `locked_by_other_session` until expiry. If it takes the expired lease, the previous holder's session hash is permanently *fenced* for that checkout; its next call returns `checkout_lease_revoked`, even after another hub restart. There is no hidden automatic recovery.
 - Ambiguous mutating `git -C`, `--git-dir` or `--work-tree` usage is refused (`checkout_target_ambiguous`) rather than being scoped to a misleading `cwd`. An operation with no known directory gets `checkout_scope_unknown`. Read-only calls remain unaffected.
 - A reservation can be acquired even when subsequent approval or host execution fails; it expires if unused. This is intentionally conservative. A takeover after expiry is observable through the new session's lease receipt.
@@ -22,7 +22,7 @@ Owner rollout prerequisites: confirm that the OAuth remote transport delivers `_
 
 This **does not** protect writes made by Claude Code, OpenCode, a terminal or any local stdio agent that bypasses the hub. Nor can a process started inside a checkout be proved unable to write into *another* repository from a script, `node`, `python`, `ssh`, `gh --repo`, nested commands or tools outside Memo Bridge. This needs real OS-level process isolation / a common host-side lease, and explicit cooperation by all writers, not more regex checks. The signed snapshot also costs extra time for each mutating tool call. The guard is not a general Git transaction, nor a default-branch safeguard.
 
-The lease store's revival across restart does not protect against two simultaneously running **separate hub processes** sharing one state directory: that requires OS-level inter-process locking and its own test. The true Git checkout may change after the snapshot; verification at operation time or a host-side compare-and-swap is the next layer. The in-flight call may outlive lease expiry in extreme timeouts. For those reasons: **do not call #263 complete** based on this pilot.
+Two hub processes sharing **one private state directory** now coordinate through an exclusive create/unlink marker and a fresh read while holding it; tests exercise both stale caches and contested exclusive access. Hubs using **different directories or hosts** still do not share an authority, and external shell/stdio agents can bypass it. The true Git checkout may change after the snapshot; verification at operation time or a host-side compare-and-swap is the next layer. The in-flight call may outlive lease expiry in extreme timeouts. For those reasons: **do not call #263 complete** based on this pilot.
 
 Do not manually edit or delete the live state file while the hub is running. Emergency recovery requires the owner to stop the hub, preserve and inspect the state file, deliberately reset the affected checkout lease or restore from backup, and restart only after examining other agents' work. The prototype does not yet expose a targeted owner-only reset API; such an API should be added with audited revocation and fencing semantics before rollout.
 
@@ -30,9 +30,20 @@ Do not manually edit or delete the live state file while the hub is running. Eme
 
 1. Test two independent real ChatGPT conversations, plus an absent `openai/session` hint, and prove distinct session hashes without exposing raw IDs.
 2. Test Mac + VPS signed snapshot, path symlinks, subdirectories, checkout deletion, missing folder, and no-repository commands.
-3. Test two concurrent host processes and a stale in-flight operation crossing a lease expiry.
+3. Extend the cross-process unit test into a real multi-host canary, and verify a stale in-flight operation crossing a lease expiry. An orphaned lock marker requires an explicit owner recovery procedure and must never be automatically stolen.
 4. Integrate local stdio writers with the same host-side authority; prevent bypass via scripts or require an explicitly isolated runner.
 5. Add auditable owner recovery and a user-visible lease/status API, with explicit opt-in takeover.
 6. Re-run full CI and external Mac canary (#208). Only then evaluate turning on the flag; default remains **off**.
 
 Source of truth and tests: `bridge/checkout-leases.mjs`, `bridge/hub.mjs`, `tests/checkout-leases.test.mjs`. Separate previous diagnostic PR: [#264](https://github.com/memolabs-dev/memo-bridge/pull/264).
+## Local-agent integration contract (Claude Code / OpenCode)
+
+This pilot protects only requests routed through the remote hub. Before sharing a canonical checkout with local agents, implement one Mac-side authority for all supervised writers:
+
+1. Identity: bind each remote operation to a verified session hash and each local agent to an identity issued by a trusted OS runner. Caller-supplied environment variables or plain MCP arguments do not prove identity.
+2. Location: resolve canonical realpaths and actual Git top-level, including linked worktrees, nested repos, symlinks, case-sensitive volumes and git -C. Separate worktree index ownership from shared Git metadata.
+3. Enforcement: route remote operator calls, local stdio write tools, CI runners and jobs through the same broker. Generic terminals and unsandboxed Node/Python child processes can bypass cooperative locks; for guaranteed multiwriter mode isolate writable roots with OS-enforced sandboxing or refuse the operation.
+4. Lease: persist ownership, heartbeat and fencing token. Never steal a lease while an existing supervised process could still write. After crash/disconnect flag recovery for an authorized owner. Provide audited status/acquire/renew/release/owner-revoke, without leaking private repository details.
+5. Acceptance: drive one remote ChatGPT and two local independent agent principals against a disposable checkout. Prove refusal before mutation, recovery after crash, and concurrency on unrelated repositories. Record an unsupervised shell as a known bypass, never as a passing security test.
+
+The ordinary solo workflow should remain simple. Multiwriter mode must stay explicitly isolated until a common host-side authority and external acceptance tests exist. This is follow-on work for #263, not implemented in this PR.

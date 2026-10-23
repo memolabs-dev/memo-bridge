@@ -36,7 +36,7 @@ export function ambiguousGitTarget(argv) {
 // An expired lease may pass to another verified session. The old session is
 // thereafter fenced (revoked), even after the new holder's lease expires.
 export function createCheckoutLeases({
-  now = Date.now, reload = null, onChange = () => ({ ok: true }), ttlMs = LEASE_MS
+  now = Date.now, reload = null, onChange = () => ({ ok: true }), transaction = null, ttlMs = LEASE_MS
 } = {}) {
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 3_600_000) throw new Error('invalid checkout lease TTL');
   let records = new Map();
@@ -68,7 +68,7 @@ export function createCheckoutLeases({
     return !unavailable;
   }
   const describe = row => ({ host: row.host, root: row.root, expires_at: new Date(row.expires).toISOString() });
-  function acquire({ host, root, principal, clientSession }) {
+  function acquireOnce({ host, root, principal, clientSession }) {
     if (!ensureState()) return fail('checkout_lease_state_unavailable');
     const safeRoot = normalizedCheckout(host, root);
     if (!safeRoot) return fail('checkout_root_unverified');
@@ -101,6 +101,26 @@ export function createCheckoutLeases({
       return fail('checkout_lease_state_unavailable');
     }
     return { ok: true, lease: describe(current), renewed: Boolean(previous && previous.session === clientSession && previous.principal === principal) };
+  }
+  function acquire(input) {
+    if (!transaction) return acquireOnce(input);
+    if (typeof reload !== 'function') return fail('checkout_lease_state_unavailable');
+    try {
+      return transaction(() => {
+        // Re-read while holding the cross-process filesystem lock. A different
+        // hub might have committed an owner change after our last request.
+        let current;
+        try { current = reload(); } catch { current = { ok: false }; }
+        if (!current?.ok || !adopt(current.data)) {
+          unavailable = true;
+          return fail('checkout_lease_state_unavailable');
+        }
+        unavailable = false;
+        return acquireOnce(input);
+      });
+    } catch {
+      return fail('checkout_lease_state_unavailable');
+    }
   }
   return Object.freeze({ acquire, get size() { return records.size; } });
 }
