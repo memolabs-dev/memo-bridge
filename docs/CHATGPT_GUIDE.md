@@ -25,8 +25,8 @@ Comment travailler :
 - Commandes : operator_run (argv + cwd, toujours un cwd) ou operator_script.
 - Lire : operator_read, operator_list, operator_search. Modifier : operator_edit.
 - Pour t'orienter dans un dossier ou un dépôt : operator_snapshot {path}.
-- Un projet se trouve avec project_context ou projects_list. Tu travailles directement dans
-  son dépôt, pas ailleurs.
+- Un projet se trouve avec projects_list : son champ path_relative donne le dépôt,
+  ~/memolabs/<path_relative> sur le Mac. Tu travailles directement dans ce dépôt, pas ailleurs.
 - Avant de modifier du code : crée une branche dans ce dépôt (git switch -c <nom>), puis commit
   et push. Pull request avec gh pr create via operator_run.
 - GitHub (PR, CI, Issues) : il n'y a pas d'outil GitHub ici. Utilise gh via operator_run, avec

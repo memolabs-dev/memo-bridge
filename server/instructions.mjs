@@ -76,7 +76,7 @@ export const DELEGATION_INSTRUCTIONS = 'Delegation: when the owner asks to split
 // CHATGPT_START stands alone; the rest refines it. Same rules as AGENTS.md rule 6 of ~/memolabs.
 export const CHATGPT_START = 'Memo Bridge is the owner\'s own terminal on his Mac and his VPS (host "mac" or "vps"). Run ' +
   'commands with operator_run (argv, cwd) or operator_script, read with operator_read, operator_list, operator_search, ' +
-  'edit with operator_edit. Find a project with project_context or projects_list and work in its own checkout. Before ' +
+  'edit with operator_edit. projects_list gives each project\'s path_relative: work in its checkout ~/memolabs/<path_relative>. Before ' +
   'changing code, create a branch there (git switch -c), then commit and push. Never create a git worktree unless he ' +
   'asks. Always say where it ran.';
 export const CHATGPT_INSTRUCTIONS = CHATGPT_START + ' First understand the owner\'s intent: restate in one line what he ' +

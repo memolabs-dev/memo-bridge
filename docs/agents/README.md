@@ -1,5 +1,7 @@
 # Memo Bridge — guide opérationnel pour agents
 
+> **Depuis le 2026-10-23 (décision de Guillaume)** : on travaille dans le dépôt canonique du projet, sur une branche. `projects_list` donne `path_relative`, le dépôt est `~/memolabs/<path_relative>`. GitHub se lit avec `gh`. Workspace, claim et worktree seulement si Guillaume nomme une Issue ou le demande, ou si une autre conversation écrit dans le même dépôt. Point d'entrée court : [`llms.txt`](../../llms.txt) et [`skills/memo-bridge/SKILL.md`](../../skills/memo-bridge/SKILL.md). Le reste de cette page décrit la chaîne des tâches, à utiliser sur demande.
+
 > État documenté : 2026-10-20. Cette page décrit les contrats MCP observés, et non des fonctionnalités futures. Les descriptions des outils exposés par le serveur restent la source de vérité si elles changent.
 
 ## Modèle mental
@@ -7,7 +9,7 @@
 - **Projet** : dépôt enregistré ; `projects_list` donne son identifiant exact et sa disponibilité.
 - **Tâche** : GitHub Issue canonique, avec labels `agent:ready` et une priorité `priority:p0|p1|p2`.
 - **Workspace** : contexte de conversation et d'exécution, **pas** nécessairement un dossier Git. `task_claim` et `task_next` l'ouvrent implicitement.
-- **Worktree** : checkout Git isolé, aujourd'hui requis pour les écritures de code pilotées par Memo Bridge. Son association à un agent n'est pas une identité durable de projet.
+- **Worktree** : checkout Git isolé, utilisé seulement par la chaîne des tâches, sur demande ; retiré dès la branche poussée. Son association à un agent n'est pas une identité durable de projet.
 - **Lease** : réservation d'une Issue, portée par `claim_id` et `fence`, susceptible d'expirer. Un autre agent ne doit pas écrire dans une tâche déjà réservée.
 - **Operator lock** : verrou obligatoire pour les opérations hôte hors projet. Il ne remplace pas un lease sur une Issue.
 
@@ -28,7 +30,7 @@
 | Reprendre une tâche après interruption | `workspace_recover` | Vérifier lease, état et checkpoint |
 | Voir les conversations concurrentes | `sessions_overview` | Respecter les verrous et tâches des autres |
 
-## Chemin de livraison documenté (état actuel)
+## Chemin de livraison par la chaîne des tâches (sur demande)
 
 1. `projects_list` et `project_context` : vérifier nom du projet, tâches et PR existantes.
 2. `batch_create` seulement si aucune Issue appropriée n'existe ; autrement `task_claim` ou `task_next`.
