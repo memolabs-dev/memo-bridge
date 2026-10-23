@@ -25,7 +25,7 @@ const ALL = Object.values(CAPABILITIES);
 const READ_ONLY = makePrincipal('oidc:reader', [CAPABILITIES.READ]);
 const EVERYTHING = makePrincipal('oidc:owner', ALL);
 const NOT_REMOTE = ['observe_guardian', 'observe_agents', 'observe_live_state', 'observe_focus', 'host_resources', 'worktree_remove',
-  'list_hosts', 'host_status', 'bridge_info', 'project_info', 'project_git_status', 'projects_audit'];
+  'list_hosts', 'host_status', 'bridge_info', 'agent_preflight', 'project_info', 'project_git_status', 'projects_audit'];
 
 test('registry: the collected tools are exactly the policy table and the runtime ops', async () => {
   const defs = await collectToolDefinitions();
@@ -39,7 +39,7 @@ test('registry: the collected tools are exactly the policy table and the runtime
   // Each caller gets its own Map: one surface cannot change another one's list.
   defs.delete('tasks_list');
   assert.ok((await collectToolDefinitions()).has('tasks_list'));
-  assert.equal(TOOL_MODULES.length, 12);
+  assert.equal(TOOL_MODULES.length, 13);
   assert.ok(Object.isFrozen(TOOL_MODULES) && TOOL_MODULES.every(Object.isFrozen));
 });
 

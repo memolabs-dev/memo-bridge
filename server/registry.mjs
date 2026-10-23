@@ -23,6 +23,7 @@ export const TOOL_MODULES = Object.freeze([
   ['./tools/coordinator-tools.mjs', 'registerCoordinatorTools'],
   ['./tools/worktree-tools.mjs', 'registerWorktreeTools'],
   ['./tools/job-tools.mjs', 'registerJobTools'],
+  ['./tools/acp-tools.mjs', 'registerAcpTools'],
   ['./tools/host-tools.mjs', 'registerHostTools'],
   ['./tools/github-tools.mjs', 'registerGithubTools'],
   ['./tools/audit-tools.mjs', 'registerAuditTools'],
