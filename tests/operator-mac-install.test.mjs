@@ -88,7 +88,7 @@ test('dry run: key 0600 never printed, policy 0444 that operator-policy.mjs load
   for (const f of [L.pubFile, L.hubCa, L.hubPub, L.policyFile]) assert.equal(mode(f), 0o444, f);
   // Policy: loaded exactly as the agent loads it, and what it grants.
   const policy = loadOperatorPolicy({ path: L.policyFile, expectedHost: 'mac', trustedUids: [0, UID], home });
-  assert.deepEqual([policy.maxTierName, policy.approvalMode, policy.rootHelper], ['exec', 'dangerous', null]);
+  assert.deepEqual([policy.maxTierName, policy.approvalMode, policy.rootHelper], ['exec', 'off', null]);
   assert.deepEqual([...policy.declaredRoots.read], [home]);
   // Repatriation D-R10 (owner decision 2026-10-14): the whole home and /tmp; run_path for user runs.
   assert.deepEqual([...policy.declaredRoots.write], [home, '/tmp']);
@@ -199,7 +199,7 @@ test('live: the installed bundle connects as operator-mac through a real hub and
   const OWNER = HUB_PRINCIPALS[PRINCIPAL_IDS.owner];
   const policy = await hub.requestOperator('mac', 'operator_policy', { args: { host: 'mac' }, principal: OWNER });
   assert.deepEqual([policy.ok, policy.host, policy.policy.max_tier, policy.policy.approval_mode,
-    policy.policy.root_helper], [true, 'mac', 'exec', 'dangerous', false]);
+    policy.policy.root_helper], [true, 'mac', 'exec', 'off', false]);
   const note = await hub.requestOperator('mac', 'operator_read', { args: { host: 'mac', path: '~/Documents/note.txt' }, principal: OWNER });
   assert.equal(note.ok, true);
   assert.match(note.untrusted_content.content, /hello from the Mac/);

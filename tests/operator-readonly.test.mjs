@@ -197,7 +197,8 @@ test('RR-14: the instructions and the skill teach the work-session grant, the re
   const skill = read(new URL('../plugin/skills/memo-bridge-operations/SKILL.md', import.meta.url), 'utf8');
   const doc = read(new URL('../docs/OPERATOR.md', import.meta.url), 'utf8');
   assert.ok(REMOTE_INSTRUCTIONS.includes(OPERATOR_FLOW_INSTRUCTIONS));
-  for (const word of ['operator_grant', 'ONCE', 'cwd_prefixes', 'ps', 'git status', 'gh pr merge', 'force push', 'as_root', 'root on lab']) {
+  // Owner decision 2026-10-23: approvals off, the model never asks first.
+  for (const word of ['no approval step', 'Do not request an operator_grant', 'ps', 'git status', 'gh pr merge', 'force push', 'as_root', 'root on lab']) {
     assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(word), word);
   }
   for (const word of ['operator_grant', 'operator_docker', 'read-only commands']) assert.ok(skill.includes(word), `skill: ${word}`);

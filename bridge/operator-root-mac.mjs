@@ -5,7 +5,7 @@
 //   /Library/Application Support/MemoBridge/operator-root/     root:wheel 0755, never the owner's home
 //     bin/node                       0555  a copy of an official node (system libraries only)
 //     bridge/operator-root-mac-cli.mjs, bridge/operator-job-supervisor.mjs, package.json   0444
-//     policy.json                    0444  host mac, max_tier root, approval_mode dangerous
+//     policy.json                    0444  host mac, max_tier root, approval_mode off (owner decision 2026-10-23)
 //     operator-hub.pub               0444  the hub's operator signing key (copy)
 //     FROZEN                               created by the owner (sudo touch) to freeze root calls
 //   /var/run/memo-operator/root.sock       directory root:wheel 0755 made at each start (/var/run
@@ -105,7 +105,6 @@ export async function startMacRootHelper({ env = process.env, getuid = () => pro
   }
   const policy = loadOperatorPolicy({ path: L.policy, expectedHost: 'mac', agentUid: getuid(), trustedUids });
   if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('policy does not grant root (max_tier root and root_helper.socket required)');
-  if (policy.approvalMode === 'off') throw new Error('approval_mode off is refused for root on the Mac');
   // The root FROZEN switch sits in the root-owned directory: only root creates or removes it.
   if (dirname(policy.frozenFile) !== L.dir) throw new Error('frozen_file_outside_root_dir');
   const hubKeys = readTrustedFile(L.hubPub, { agentUid: getuid(), trustedUids })
