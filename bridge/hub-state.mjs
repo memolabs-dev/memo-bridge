@@ -22,7 +22,7 @@ import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, ren
 import { isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-export const HUB_STATE_DOCUMENTS = Object.freeze(['freeze', 'grants', 'locks', 'notifications', 'workspace_routes']);
+export const HUB_STATE_DOCUMENTS = Object.freeze(['freeze', 'grants', 'locks', 'notifications', 'workspace_routes', 'checkout_leases']);
 export const HUB_STATE_VERSION = 1;
 // A document larger than this is refused on load and on save (the tables are bounded far below).
 export const HUB_STATE_MAX_BYTES = 4 * 1024 * 1024;
@@ -125,5 +125,29 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
     }
   }
 
-  return Object.freeze({ dir, load, read, save, get durable() { return Boolean(dir); } });
+  // Process-wide coordination for the checkout lease read/modify/save transaction.
+  // 'wx' is exclusive across hub processes sharing the same state directory.
+  // On a crash the lockfile intentionally remains: owner review is required,
+  // rather than guessing a stale timeout and allowing two writers.
+  function exclusive(name, callback) {
+    if (name !== 'checkout_leases' || !dir || typeof callback !== 'function') return fail('exclusive_unavailable');
+    const marker = join(dir, '.checkout_leases.lock');
+    let fd = null;
+    try {
+      fd = openSync(marker, 'wx', 0o600);
+    } catch (error) {
+      return fail(error?.code === 'EEXIST' ? 'checkout_lease_busy' : 'checkout_lease_state_unavailable');
+    }
+    try {
+      return callback();
+    } catch {
+      return fail('checkout_lease_state_unavailable');
+    } finally {
+      try { closeSync(fd); } catch { /* close attempt */ }
+      // This is the only code that removes the lock; no timed automatic steal.
+      try { unlinkSync(marker); } catch { /* locked until owner reviews */ }
+    }
+  }
+
+  return Object.freeze({ dir, load, read, save, exclusive, get durable() { return Boolean(dir); } });
 }

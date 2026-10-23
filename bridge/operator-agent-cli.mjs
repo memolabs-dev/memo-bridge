@@ -40,6 +40,7 @@ import { createTransferSourceTools } from './operator-transfer-source.mjs';
 import { createJobStore } from './operator-jobs.mjs';
 import { createRootHelperClient } from './operator-root-helper.mjs';
 import { createOperatorOperations } from './operator-agent.mjs';
+import { createMacCheckoutAuthority } from './mac-checkout-authority.mjs';
 
 const env = process.env;
 const host = env.MEMO_OPERATOR_HOST;
@@ -82,7 +83,15 @@ const tools = { ...createOperatorTools(policy, { guard, chain }), ...createOpera
   ...createOperatorExecTools(policy, { jobs }),
   // Repatriated from SentinelX (part 2): orientation, media, the source side of operator_transfer.
   ...createSnapshotTool(policy), ...createMediaTool(policy), ...createTransferSourceTools(policy) };
-const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, rootHelper, log });
+if (env.MEMO_OPERATOR_CHECKOUT_AUTHORITY && env.MEMO_OPERATOR_CHECKOUT_AUTHORITY !== 'enabled') {
+  throw new Error('MEMO_OPERATOR_CHECKOUT_AUTHORITY must be enabled or unset');
+}
+if (env.MEMO_OPERATOR_CHECKOUT_AUTHORITY === 'enabled' && host !== 'mac') {
+  throw new Error('checkout authority can only run on Mac');
+}
+const checkoutAuthority = env.MEMO_OPERATOR_CHECKOUT_AUTHORITY === 'enabled'
+  ? createMacCheckoutAuthority({ stateDir }) : null;
+const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, rootHelper, log, checkoutAuthority });
 
 const ca = readSmall(join(dir, 'hub-ca.crt'));
 const credentialsDir = env.CREDENTIALS_DIRECTORY;
