@@ -24,12 +24,16 @@ export function checkoutRootFor(target, { git = execFileSync, realpath = realpat
     if (!statSync(directory).isDirectory()) return fail('checkout_root_unverified');
     const found = git('git', ['-C', directory, '-c', 'core.fsmonitor=false',
       '-c', 'log.showSignature=false', 'rev-parse', '--show-toplevel'],
-      { encoding: 'utf8', timeout: 5_000, env: SAFE_GIT_ENV, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      { encoding: 'utf8', timeout: 5_000, env: SAFE_GIT_ENV, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     const root = realpath(found);
     if (root !== directory && !directory.startsWith(root + '/')) return fail('checkout_root_unverified');
     return { ok: true, root };
   } catch (error) {
-    if (error?.status === 128) return { ok: true, root: null }; // Outside any repository
+    // Git also exits 128 for unsafe ownership, broken config and other failures.
+    // Only a verified "not a git repository" result is outside our scope.
+    if (error?.status === 128 && /not a git repository/i.test(String(error.stderr ?? ''))) {
+      return { ok: true, root: null };
+    }
     return fail('checkout_root_unverified');
   }
 }

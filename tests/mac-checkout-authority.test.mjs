@@ -34,6 +34,11 @@ test('real Git top-level is canonical for nested folders and symlinks', t => {
   assert.equal(checkoutRootFor(tmp).root, null);
   assert.equal(checkoutRootFor(repo + '/../other').error, 'checkout_scope_unknown');
   assert.equal(checkoutRootFor(join(tmp, 'not-present')).error, 'checkout_root_unverified');
+  const unsafe = Object.assign(new Error('unsafe repository'), {
+    status: 128, stderr: Buffer.from('fatal: detected dubious ownership')
+  });
+  assert.equal(checkoutRootFor(repo, { git: () => { throw unsafe; } }).error, 'checkout_root_unverified',
+    'git exit code 128 without a verified non-repo error must fail closed');
 });
 
 test('local and remote principals use the identical persisted lease on the Mac', t => {
