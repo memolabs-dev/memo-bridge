@@ -18,8 +18,8 @@ import { LOCK_TTL, createOperatorLocks, mergeOverview, normalizePath } from '../
 import { createHub } from '../bridge/hub.mjs';
 import { createAgent } from '../bridge/agent.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
-import { REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
-import { MERGE_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_FLOW_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, STOP_CODES } from '../server/instructions.mjs';
+import { REMOTE_FULL_INSTRUCTIONS, REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
+import { MERGE_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_FLOW_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, STOP_CODES, WORK_INSTRUCTIONS } from '../server/instructions.mjs';
 import { REMOTE_TOOLS_READ, REMOTE_OPERATOR_TOOLS } from '../server/registry.mjs';
 import { OWNER, coordinatorOn, journal, tempStateDir } from './helpers/coordinator-fixture.mjs';
 import { memoryLedger } from './helpers/memory-ledger.mjs';
@@ -521,4 +521,21 @@ test('ChatGPT guide: the first 512 characters say what Memo Bridge is and how to
   const guide = readFileSync(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
   for (const word of ['operator_run', 'worktree', 'branche', 'Mac ou VPS', 'gh pr list', 'gh run list']) assert.ok(guide.includes(word), `guide: ${word}`);
   assert.equal(/[\u2013\u2014]/.test(guide), false, 'guide: no dashes');
+});
+
+// Owner, 2026-10-23 22:18: "il faut que chatgpt comprenne via memo bridge que c'est a lui de faire
+// les recherches les plans les taches et le boulot demande". The work is ChatGPT's, from the first
+// 512 characters on, on both remote surfaces, and in the guide pasted into a ChatGPT project.
+test('ChatGPT guide: research, plan, tasks and the work itself are ChatGPT\'s, never handed back to the owner', () => {
+  const head = REMOTE_INSTRUCTIONS.slice(0, 512);
+  for (const word of ['yourself', 'research', 'plan', 'tasks']) assert.ok(head.includes(word), `first 512: ${word}`);
+  for (const text of [REMOTE_INSTRUCTIONS, REMOTE_FULL_INSTRUCTIONS]) {
+    assert.ok(text.includes(WORK_INSTRUCTIONS), 'work rule served');
+    assert.equal(/[\u2013\u2014]/.test(text), false, 'no dashes');
+  }
+  for (const word of ['web search', 'operator_search', 'Never hand him', 'commands to run', 'verified'])
+    assert.ok(WORK_INSTRUCTIONS.includes(word), `work rule: ${word}`);
+  const guide = readFileSync(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
+  for (const word of ['C\'est toi qui fais le travail', 'recherches', 'plan', 'commandes \u00e0 lancer'])
+    assert.ok(guide.includes(word), `guide: ${word}`);
 });
