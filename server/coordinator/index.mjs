@@ -337,7 +337,9 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
   privatePolicyFile = process.env.MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE,
   searchIssues = (query, { env } = {}) => ghSearchIssues(query, { env }),
   remotePolicy: remotePolicyOption = () => remotePolicyFromEnv(), github = null, projectSync = null, credentials = null, scratchDir = null,
-  learningThresholds = thresholdsFromEnv(), readOnly = false }) {
+  learningThresholds = thresholdsFromEnv(), readOnly = false,
+  dependencyProtection = process.env.MEMO_BRIDGE_TASK_DEPENDENCIES === 'enabled',
+  dependencyAcceptance = null, dependencyCheck = null }) {
   if (!store || !principal || !ledger) throw new Error('coordinator_requires_store_principal_and_ledger');
   // A function (the runtime's, rereading remote.json when it changes, #216) or a fixed policy (tests).
   const currentRemotePolicy = typeof remotePolicyOption === 'function' ? remotePolicyOption : () => remotePolicyOption;
@@ -622,6 +624,37 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     const listed = await (await gitHub()).labelledIssues(repo, batchLabel(batch), { limit: BATCH_SCAN });
     if (!listed.ok) return listed;
     return { ok: true, issues: listed.issues.map(i => ({ ...i, ref: `${repo.full}#${i.number}` })) };
+  }
+
+  async function guardDependencies(ref) {
+      // The planner is advisory. Only a fresh, authorized dependency graph checked
+      // here can permit assignment. The receipt checker is server-supplied, never
+      // taken from issue text. Missing sources and receipts fail closed.
+      if (dependencyProtection) {
+        let checked;
+        try {
+          if (typeof dependencyCheck === 'function') checked = await dependencyCheck(ref);
+          else {
+            const { inspectDependencies } = await import('../task-dependencies.mjs');
+            const gh = await gitHub();
+            checked = await inspectDependencies(ref, {
+              now: now(),
+              loadIssue: async ref => {
+                const parsed = parseIssueRef(ref);
+                if (!parsed) return null;
+                const access = await gh.resolveRepo(parsed.repo);
+                if (!access.ok) return null;
+                const current = await gh.issue(access.repo, Number(parsed.number));
+                return current.ok ? current.issue : null;
+              },
+              verifyAcceptance: dependencyAcceptance
+            });
+          }
+        } catch { checked = null; }
+        if (checked?.ok !== true || checked.eligible !== true)
+          return fail('dependency_blocked', checked?.reason ?? 'dependency_preflight_unavailable');
+      }
+    return { ok: true };
   }
 
   const claimRules = { ready: READY_LABEL, priorities: PRIORITIES, blocking: BLOCKING_LABELS };
@@ -952,6 +985,8 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       if (origin && origin.toLowerCase() !== issue.repo.toLowerCase()) return fail('project_mismatch');
       // Remotely the Issue must be proven to belong to the allowlisted project (D9).
       if (remote && !origin) return fail('project_origin_unknown');
+      const preflight = await guardDependencies(issue.ref);
+      if (!preflight.ok) return preflight;
       const worker = workerFor(ws.workspace);
       let receipt; let recovered = false;
       // Clock margin: the ledger judges expiry with the clock of the machine it runs on, which
@@ -981,6 +1016,16 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
         else return result;
       } else {
         return result;
+      }
+      // A dependency may change while the Git-ref claim is in flight. Re-read
+      // after the lease is granted and release it on any uncertainty. This reduces
+      // the claim race window, but cannot provide GitHub+ledger atomicity.
+      if (dependencyProtection) {
+        const postflight = await guardDependencies(issue.ref);
+        if (!postflight.ok) {
+          const back = await ledger.release(issue, worker, receipt.claim_id, receipt.fence_sha, 'cancelled');
+          return fail('dependency_blocked', back.ok ? postflight.detail : 'postclaim_release_unconfirmed');
+        }
       }
       let recorded; const ownStale = [];
       try {
