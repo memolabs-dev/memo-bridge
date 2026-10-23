@@ -19,7 +19,7 @@ import { createHub } from '../bridge/hub.mjs';
 import { createAgent } from '../bridge/agent.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
 import { REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
-import { MERGE_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, STOP_CODES } from '../server/instructions.mjs';
+import { MERGE_INSTRUCTIONS, MULTI_SESSION_INSTRUCTIONS, OPERATOR_FLOW_INSTRUCTIONS, OPERATOR_HOST_INSTRUCTIONS, STOP_CODES } from '../server/instructions.mjs';
 import { REMOTE_TOOLS_READ, REMOTE_OPERATOR_TOOLS } from '../server/registry.mjs';
 import { OWNER, coordinatorOn, journal, tempStateDir } from './helpers/coordinator-fixture.mjs';
 import { memoryLedger } from './helpers/memory-ledger.mjs';
@@ -513,8 +513,12 @@ test('ChatGPT guide: the first 512 characters say what Memo Bridge is and how to
     assert.equal(REMOTE_INSTRUCTIONS.includes(word), false, `no ${word}`);
   for (const word of ['locked_by_other_session', 'pending_approval', 'operator_help', 'operator_snapshot', 'operator_grant'])
     assert.ok(REMOTE_INSTRUCTIONS.includes(word), word);
+  // 2026-10-23 14:06: ChatGPT called the unserved github_* tools 29 times. GitHub goes through gh.
+  for (const word of ['no GitHub tool', 'gh pr list', 'gh pr checks', 'gh run list', 'gh run view'])
+    assert.ok(REMOTE_INSTRUCTIONS.includes(word), word);
+  assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(' gh,') || OPERATOR_FLOW_INSTRUCTIONS.includes(' gh '), 'gh is in the grant list');
   assert.equal(/[\u2013\u2014]/.test(REMOTE_INSTRUCTIONS), false, 'no dashes');
   const guide = readFileSync(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
-  for (const word of ['operator_run', 'worktree', 'branche', 'Mac ou VPS']) assert.ok(guide.includes(word), `guide: ${word}`);
+  for (const word of ['operator_run', 'worktree', 'branche', 'Mac ou VPS', 'gh pr list', 'gh run list']) assert.ok(guide.includes(word), `guide: ${word}`);
   assert.equal(/[\u2013\u2014]/.test(guide), false, 'guide: no dashes');
 });

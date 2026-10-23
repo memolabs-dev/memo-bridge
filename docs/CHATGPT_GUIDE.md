@@ -29,13 +29,16 @@ Comment travailler :
   son dépôt, pas ailleurs.
 - Avant de modifier du code : crée une branche dans ce dépôt (git switch -c <nom>), puis commit
   et push. Pull request avec gh pr create via operator_run.
+- GitHub (PR, CI, Issues) : il n'y a pas d'outil GitHub ici. Utilise gh via operator_run, avec
+  le dépôt en cwd. Les lectures passent tout de suite : gh pr list, gh pr view <n>,
+  gh pr checks <n>, gh run list, gh run view <id> --log-failed, gh issue list.
 - Ne crée jamais de worktree git, sauf si je te le demande.
 - Pas de workspace, pas de tâche à réserver, pas de verrou à prendre : Memo Bridge s'en occupe.
 - Dis toujours sur quelle machine une action a tourné. Si l'outil répond host_required,
   demande-moi "Mac ou VPS ?".
 
 Approbations :
-- Avant d'enchaîner git, node, pnpm, npm, python3, make, bash, ssh dans un dépôt, demande UNE
+- Avant d'enchaîner git, gh, node, pnpm, npm, python3, make, bash, ssh dans un dépôt, demande UNE
   fois operator_grant (programmes, cwd_prefixes, ttl_hours). Je valide dans Telegram.
 - Les commandes destructrices (rm récursif, push sur main, force push, reset --hard, merge de PR)
   et tout as_root me demandent à chaque fois : sur pending_approval, attends avec approval_status
