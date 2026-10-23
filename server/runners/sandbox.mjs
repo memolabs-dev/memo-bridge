@@ -4,10 +4,14 @@
 // worktree_write_file. So every job runs inside a macOS Seatbelt profile (/usr/bin/sandbox-exec)
 // that keeps it to the worktree:
 // - writes: only the worktree (never its `.git` link) and a private per-job temporary folder;
-// - reads: everything a toolchain needs, except the contents of the private state directory,
-//   of other worktrees and repositories, of the owner's notes and agent state (~/.agent,
-//   ~/Vault, iCloud), and of credential stores (~/.ssh, gh, cloud CLIs, keychains, browser and
-//   app data). File metadata (names a job already knows, sizes, dates) stays readable;
+// - reads: nothing under the owner's home except the worktree, the repository's Git data, the
+//   job folder, the toolchain roots derived from PATH (toolRoots) and a few read-only toolchain
+//   caches (HOME_TOOL_READ); the private-data denylist (HOME_DENY_READ: notes, agent state,
+//   credential stores, shell startup files) applies on top, so no tool root re-opens it, and
+//   the state directory, other worktrees and other repositories stay closed. Outside the home a
+//   toolchain reads what it needs. File metadata (names a job already knows, sizes, dates) stays
+//   readable. (Until the fix pass of #258 the recipe read every home file the denylist did not
+//   name, ~/.zshrc and its exported tokens included.);
 // - network: loopback only (tests may start local servers); no DNS, no remote hosts;
 // - no launchd jobs, no Launch Services, no Apple Events, no keychain or pasteboard services,
 //   so nothing can be started outside the sandbox;
@@ -15,13 +19,13 @@
 //   without the owner's global or system configuration (no credential helper, no identity).
 //
 // A job may first run a dependency install (job-runner.mjs, recipes.mjs planLocalInstall), in a
-// second profile, 'install', that differs from the recipe's only in two places:
+// second profile, 'install', that differs from the recipe's in three places:
 // - network: outbound to port 443 only (package registries are HTTPS), DNS through
 //   mDNSResponder, never loopback;
-// - reads: nothing under the owner's home except the worktree, the job folder and the toolchain
-//   roots derived from PATH (toolRoots); the denylist above still applies on top. The install
-//   has the network and may run repository-controlled code (.pnpmfile.cjs is not a script, so
-//   --ignore-scripts does not stop it), so it must not see what the recipe may read offline.
+// - reads: the same closed home, without the repository's Git data and without the toolchain
+//   caches of HOME_TOOL_READ: only the worktree, the job folder and the PATH tool roots. The
+//   install has the network and may run repository-controlled code (.pnpmfile.cjs is not a
+//   script, so --ignore-scripts does not stop it).
 // Writes, services, signals, the state directory and the .git link are as for the recipe.
 //
 // The profile text depends only on how many paths it names; every path is passed with -D, so
@@ -51,7 +55,21 @@ export const HOME_DENY_READ = Object.freeze([
   '.config/configstore', '.config/rclone', '.config/stripe', '.cloudflared', '.wrangler', '.vercel', '.netlify',
   '.fly', '.railway', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml', '.gem/credentials',
   '.zsh_history', '.bash_history', '.python_history', '.node_repl_history',
-  'Library/Mobile Documents', 'Library/CloudStorage', 'Library/Containers', 'Library/Group Containers', 'Library/Safari'
+  // The owner's mail export in the home root (~/AGENTS.md: never read; review of #257).
+  'gmail.json',
+  'Library/Mobile Documents', 'Library/CloudStorage', 'Library/Containers', 'Library/Group Containers', 'Library/Safari',
+  // Shell startup files (they export tokens) and the .config secrets measured on the owner's Mac
+  // (fix pass of #258). The closed home already keeps them out; naming them here keeps them out
+  // even when a PATH entry makes a tool root of a folder around them.
+  '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.bashrc', '.bash_profile', '.profile',
+  '.config/opencode', '.config/memo-bridge', '.config/dify-dataset-key', '.config/resend', '.config/neonctl', '.config/jobs'
+]);
+
+// Read-only toolchain caches under the home a recipe may read besides its PATH tool roots
+// (fix pass of #258): Rust toolchains and the crates already downloaded (no install phase
+// fetches them), Playwright's browsers and SwiftPM's repository cache. None holds a credential.
+export const HOME_TOOL_READ = Object.freeze([
+  '.rustup', '.cargo/registry', '.cargo/git', 'Library/Caches/ms-playwright', 'Library/Caches/org.swift.swiftpm'
 ]);
 
 // Variables a recipe may inherit; everything else is dropped (names like DATABASE_URL carry
@@ -119,8 +137,16 @@ export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home =
   }
   if (worktreesRoot) denyRead.add(real(worktreesRoot));
   // The folder holding the repository itself (the projects root): other repositories and
-  // their .env files stay out of reach.
-  if (common) denyRead.add(dirname(dirname(common)));
+  // their .env files stay out of reach. An owner external checkout sits directly in the home
+  // (#257, server/projects/external-projects.mjs): its folder is the home itself, and closing it
+  // would close every toolchain. Then the checkout itself is closed (its .env and the owner's
+  // working files); the worktree and the Git data are opened again after it, and the rest of
+  // the home is covered by HOME_DENY_READ and, while installing, by the closed home.
+  if (common) {
+    const holder = dirname(dirname(common));
+    const homeReal = real(home);
+    denyRead.add(holder === homeReal || homeReal.startsWith(`${holder}/`) ? dirname(common) : holder);
+  }
   return {
     worktree: wt,
     worktreeGit: join(wt, '.git'),
@@ -129,6 +155,8 @@ export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home =
     stateDir: real(stateDir),
     home: real(home),
     toolRoots: toolRoots(path, home),
+    // Only those that exist: a missing folder needs no rule.
+    toolCaches: HOME_TOOL_READ.map(rel => join(home, rel)).filter(p => existsSync(p)).map(real).sort(),
     // A denied folder that contains the worktree is fine: the worktree is allowed again after it.
     denyRead: [...denyRead].filter(p => p !== '/' && p !== wt).sort()
   };
@@ -137,14 +165,13 @@ export function sandboxPaths({ worktree, stateDir, jobTmp, worktreesRoot, home =
 // Seatbelt rules are matched last-rule-wins: broad denials first, then the exceptions, then the
 // denials no exception may override (the state directory, the .git link).
 //
-// phase 'recipe' (the default) is the profile every job ran before the install phase existed,
-// unchanged. phase 'install' (see the header) needs the HOME and MDNS_SOCKET parameters and
-// toolRootCount TOOL_ROOT_<i> parameters.
+// Both phases need the HOME parameter and toolRootCount TOOL_ROOT_<i> parameters; 'install'
+// also needs MDNS_SOCKET (see the header).
 export function sandboxProfile({ denyReadCount, gitCommon, phase = 'recipe', toolRootCount = 0 }) {
   if (!SANDBOX_PHASES.includes(phase)) throw new Error('sandbox_phase_invalid');
   const install = phase === 'install';
   const denyRead = Array.from({ length: denyReadCount }, (_, i) => `(subpath (param "DENY_READ_${i}"))`).join(' ');
-  const tools = Array.from({ length: install ? toolRootCount : 0 }, (_, i) => `(subpath (param "TOOL_ROOT_${i}"))`).join(' ');
+  const tools = Array.from({ length: toolRootCount }, (_, i) => `(subpath (param "TOOL_ROOT_${i}"))`).join(' ');
   const network = install ? [
     // Network: HTTPS to remote hosts (package registries), DNS through mDNSResponder, never
     // loopback (the owner's local services). Seatbelt filters hosts only as * or localhost.
@@ -160,22 +187,18 @@ export function sandboxProfile({ denyReadCount, gitCommon, phase = 'recipe', too
     '(allow network-outbound (remote unix-socket (subpath (param "WORKTREE"))) (remote unix-socket (subpath (param "JOB_TMP"))))',
     '(deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.mDNSResponder"))'
   ];
-  const reads = install ? [
-    // Reads: nothing under the owner's home, except the toolchains on PATH; then the private
-    // data denylist, which no tool root re-opens; then the worktree and the job folder. The
-    // repository's Git data is not needed to install and stays closed.
+  // Reads: nothing under the owner's home, except the toolchains on PATH (and, for the recipe, a
+  // few read-only toolchain caches); then the private-data denylist, which no tool root re-opens;
+  // then the worktree, the job folder and, for the recipe, the repository's Git data (the install
+  // does not need it). Only contents, listings and extended attributes are denied: metadata
+  // (lstat) stays allowed, because toolchains resolve real paths through these folders (the
+  // worktree lives under the worktrees root, itself under ~/memolabs). Seatbelt does not let a
+  // wildcard allow override these operations, so every rule names the same ones.
+  const reads = [
     '(deny file-read-data file-read-xattr (subpath (param "HOME")))',
     ...(tools ? [`(allow file-read-data file-read-xattr ${tools})`] : []),
     ...(denyReadCount ? [`(deny file-read-data file-read-xattr ${denyRead})`] : []),
-    '(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP")))'
-  ] : [
-    // Reads: no private data, except the worktree, the job folder and the repository's Git data.
-    // Only contents, listings and extended attributes are denied: metadata (lstat) stays
-    // allowed, because toolchains resolve real paths through these folders (the worktree lives
-    // under the worktrees root, itself under ~/memolabs).
-    ...(denyReadCount ? [`(deny file-read-data file-read-xattr ${denyRead})`] : []),
-    // (Same operations as the denial: Seatbelt does not let a wildcard allow override them.)
-    `(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP"))${gitCommon ? ' (subpath (param "GIT_COMMON"))' : ''})`
+    `(allow file-read-data file-read-xattr (subpath (param "WORKTREE")) (subpath (param "JOB_TMP"))${gitCommon && !install ? ' (subpath (param "GIT_COMMON"))' : ''})`
   ];
   return [
     '(version 1)',
@@ -210,17 +233,16 @@ export function sandboxProfile({ denyReadCount, gitCommon, phase = 'recipe', too
 export function sandboxCommand(argv, paths, { phase = 'recipe' } = {}) {
   if (!SANDBOX_PHASES.includes(phase)) throw new Error('sandbox_phase_invalid');
   const install = phase === 'install';
-  // The install closes the owner's home: it needs a real one, never the root.
-  if (install && (!isAbsolute(paths.home ?? '') || paths.home === '/')) throw new Error('sandbox_home_invalid');
+  // Both phases close the owner's home: they need a real one, never the root.
+  if (!isAbsolute(paths.home ?? '') || paths.home === '/') throw new Error('sandbox_home_invalid');
   const params = ['-D', `WORKTREE=${paths.worktree}`, '-D', `WORKTREE_GIT=${paths.worktreeGit}`, '-D', `JOB_TMP=${paths.jobTmp}`,
     '-D', `STATE_DIR=${paths.stateDir}`];
   if (paths.gitCommon && !install) params.push('-D', `GIT_COMMON=${paths.gitCommon}`);
   paths.denyRead.forEach((path, i) => params.push('-D', `DENY_READ_${i}=${path}`));
-  const tools = install ? paths.toolRoots ?? [] : [];
-  if (install) {
-    params.push('-D', `HOME=${paths.home}`, '-D', `MDNS_SOCKET=${MDNS_SOCKET}`);
-    tools.forEach((path, i) => params.push('-D', `TOOL_ROOT_${i}=${path}`));
-  }
+  const tools = [...(paths.toolRoots ?? []), ...(install ? [] : paths.toolCaches ?? [])];
+  params.push('-D', `HOME=${paths.home}`);
+  if (install) params.push('-D', `MDNS_SOCKET=${MDNS_SOCKET}`);
+  tools.forEach((path, i) => params.push('-D', `TOOL_ROOT_${i}=${path}`));
   const profile = sandboxProfile({ denyReadCount: paths.denyRead.length, gitCommon: Boolean(paths.gitCommon) && !install, phase,
     toolRootCount: tools.length });
   return [SANDBOX_EXEC, ['-p', profile, ...params, ...argv]];
