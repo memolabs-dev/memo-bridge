@@ -9,7 +9,7 @@ This change implements:
 - Signature version 2: domain-separated `memo-bridge-operator-v2`, signed `client_session` (32 lowercase hex characters), existing signed fields unchanged. The verifier checks the actual wire metadata value against the signed session. Swaps, omissions and tampering fail with `session_mismatch` or `signature_invalid`.
 - Backward compatibility: v1 signatures are still accepted for **other operations**. A Mac agent with `MEMO_OPERATOR_CHECKOUT_AUTHORITY=enabled` now refuses all tier >0 calls whose signature is unbound (`session_unbound`) before reaching any mutating tool.
 - Hub opt-in `MEMO_BRIDGE_OPERATOR_SESSION_BINDING=enabled`: signs Mac T1/T2 operator requests with the wire session hash. Without a valid session hint, v1 may be signed but the protected Mac agent will refuse it. Root-helper T3 remains v1 and will be **refused in protected Mac mode** pending a compatible root-helper protocol update.
-- The Mac-side lease uses `requireExplicitRecovery: true`. An expired lease without a successful owner-session release is `checkout_recovery_required`; this applies even to a purported continuation of the same session. A real clean release records a fenced tombstone, allowing another session to take over without deleting audit history.
+- Hub and Mac leases always require recovery after expiry, including a purported continuation of the same session. Mac automatic release is disabled even on normal supervisor exit: empty process groups cannot prove detached descendants have stopped. The low-level ledger release primitive is not exposed as a recovery API and also refuses expired owners. There is no automatic takeover.
 
 ## Safe rollout order (do not execute automatically)
 
@@ -29,7 +29,7 @@ This is fail-closed behavior, not a proof that an arbitrary shell cannot write t
 
 ## Evidence and remaining blockers
 
-Tests cover v1 compatibility, v2 valid signature, metadata swap, missing metadata, tampering, nonce replay, refusal of an expired un-released lease, clean handoff, interprocess lock store, and Mac signed-operator simulation. **This is not two real ChatGPT browser sessions.**
+Tests cover v1 compatibility, v2 valid signature, metadata swap, missing metadata, tampering, nonce replay, refusal of expired leases, release refusal with a real escaped orphan, interprocess lock store, branch/index mutation refusal from two persistent clients and Mac signed-operator simulation. **This is not two real ChatGPT browser sessions.** The current execution environment refuses `sandbox_apply`; its containment test is explicitly skipped with the gate UNVERIFIED/OFF. Local TCP integration checks also require a host that permits listeners. See `.agent/project/checkout-fencing-263/` for current evidence and blockers.
 
 Release blockers: cryptographic v2 real deployment compatibility, authenticated owner recovery, OS-enforced write containment for arbitrary subprocesses, two real OAuth conversations, failover of independent hubs/stores, and external Mac/VPS E2E with rollback. See [#263](https://github.com/memolabs-dev/memo-bridge/issues/263).
 

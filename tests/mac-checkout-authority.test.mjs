@@ -9,8 +9,35 @@ import { join } from 'node:path';
 import { createMacCheckoutAuthority, checkoutRootFor, checkoutTargetFor } from '../bridge/mac-checkout-authority.mjs';
 import { createOperatorOperations } from '../bridge/operator-agent.mjs';
 import { z } from 'zod/v4';
+import { createInterface } from 'node:readline';
+import { once } from 'node:events';
 
 const A = 'a'.repeat(32), B = 'b'.repeat(32), C = 'c'.repeat(32);
+
+// Requests and replies are barriers: no sleep determines which client owns
+// the checkout or whether the competing mutation has completed.
+function client(t, stateDir, session) {
+  const module = new URL('../bridge/mac-checkout-authority.mjs', import.meta.url).href;
+  const code = `import {createMacCheckoutAuthority} from ${JSON.stringify(module)};
+import {createInterface} from 'node:readline';
+import {execFileSync} from 'node:child_process';
+const authority = createMacCheckoutAuthority({stateDir:process.argv[1]});
+for await (const line of createInterface({input:process.stdin})) {
+  const args = JSON.parse(line);
+  const gate = authority.guard('operator_run', args, {principal:'local:test',session:process.argv[2]});
+  if (gate.ok) execFileSync('git',args.argv.slice(1),{cwd:args.cwd,stdio:'ignore'});
+  console.log(JSON.stringify(gate));
+}`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code, stateDir, session],
+    { stdio: ['pipe', 'pipe', 'pipe'] });
+  const lines = createInterface({ input: child.stdout });
+  t.after(() => { child.kill(); lines.close(); });
+  return async (cwd, ...argv) => {
+    const reply = once(lines, 'line');
+    child.stdin.write(JSON.stringify({ cwd, argv: ['git', ...argv] }) + '\n');
+    return JSON.parse((await reply)[0]);
+  };
+}
 
 function fixture(t) {
   const tmp = mkdtempSync(join(tmpdir(), 'memo-mac-broker-'));
@@ -24,6 +51,66 @@ function fixture(t) {
   const stateDir = join(tmp, 'private-state');
   return { tmp, repo, other, stateDir };
 }
+
+test('two persistent clients fence branch and index writes across calls, nested cwd and restart',
+  { timeout: 15_000 }, async t => {
+  const { repo, stateDir } = fixture(t);
+  writeFileSync(join(repo, 'owner.txt'), 'owner');
+  writeFileSync(join(repo, 'sub', 'contender.txt'), 'contender');
+  const owner = client(t, stateDir, A), contender = client(t, stateDir, B);
+  assert.equal((await owner(repo, 'switch', '-c', 'owner')).ok, true);
+  assert.equal((await owner(repo, 'add', 'owner.txt')).ok, true);
+  const head = readFileSync(join(repo, '.git', 'HEAD'));
+  const index = readFileSync(join(repo, '.git', 'index'));
+  assert.equal((await contender(join(repo, 'sub'), 'switch', '-c', 'intruder')).error, 'locked_by_other_session');
+  assert.equal((await contender(join(repo, 'sub'), 'add', 'contender.txt')).error, 'locked_by_other_session');
+  assert.deepEqual(readFileSync(join(repo, '.git', 'HEAD')), head);
+  assert.deepEqual(readFileSync(join(repo, '.git', 'index')), index);
+  const restarted = client(t, stateDir, A);
+  assert.equal((await restarted(join(repo, 'sub'), 'add', 'contender.txt')).ok, true);
+  assert.notDeepEqual(readFileSync(join(repo, '.git', 'index')), index);
+});
+
+test('escaped detached orphan cannot authorize release or TTL takeover',
+  { skip: process.platform !== 'darwin', timeout: 15_000 }, async t => {
+  const { repo, stateDir } = fixture(t);
+  const script = new URL('../scripts/with-checkout-lease.mjs', import.meta.url).pathname;
+  const ready = join(repo, 'ORPHAN_READY'), go = join(repo, 'GO'), done = join(repo, 'ORPHAN_WRITE');
+  const orphan = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));
+const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(go)})){
+fs.writeFileSync(${JSON.stringify(done)},'still writing');clearInterval(timer);}},10);`;
+  const parent = `const fs=require('node:fs');const cp=require('node:child_process');
+cp.spawn(process.execPath,['-e',${JSON.stringify(orphan)}],{detached:true,stdio:'ignore'}).unref();
+const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(ready)}))clearInterval(timer);},10);`;
+  const holder = spawn(process.execPath, [script, '--repo', repo, '--state-dir', stateDir,
+    '--', process.execPath, '-e', parent], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  holder.stderr.on('data', data => { stderr += data; });
+  t.after(() => {
+    holder.kill();
+    if (existsSync(ready)) {
+      try { process.kill(Number(readFileSync(ready, 'utf8')), 'SIGKILL'); } catch { /* already exited */ }
+    }
+  });
+  assert.equal((await once(holder, 'exit'))[0], 0, stderr);
+  assert.equal(existsSync(ready), true, 'orphan started before parent exited');
+  assert.match(stderr, /checkout_recovery_required/);
+  const authority = createMacCheckoutAuthority({ stateDir });
+  assert.equal(authority.release({ root: repo, session: B, principal: 'local:test' }).error, 'checkout_recovery_required');
+  assert.equal(authority.acquire({ root: repo, session: B, principal: 'local:test' }).error, 'locked_by_other_session');
+  const saved = readFileSync(join(stateDir, 'checkout_leases.json'), 'utf8');
+  const expires = JSON.parse(saved).data.rows[0].expires;
+  const afterTTL = createMacCheckoutAuthority({ stateDir, now: () => expires });
+  assert.equal(afterTTL.acquire({ root: repo, session: B, principal: 'local:test' }).error, 'checkout_recovery_required');
+  assert.equal(readFileSync(join(stateDir, 'checkout_leases.json'), 'utf8'), saved);
+  writeFileSync(go, 'continue');
+  const deadline = Date.now() + 4_000;
+  while (!existsSync(done)) {
+    assert.ok(Date.now() < deadline, 'orphan did not acknowledge continuation');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(readFileSync(done, 'utf8'), 'still writing', 'actual escaped orphan demonstrates why release must refuse');
+});
 
 test('real Git top-level is canonical for nested folders and symlinks', t => {
   const { tmp, repo, other } = fixture(t);
@@ -58,9 +145,9 @@ test('local and remote principals use the identical persisted lease on the Mac',
   assert.equal(authority.guard('operator_edit', { path: join(other, 'sub', 'x') },
     { session: B, principal: 'oidc:owner' }).ok, true);
   assert.equal(authority.guard('operator_edit', sameRepo, { principal: 'oidc:owner' }).error, 'session_required');
-  assert.equal(authority.release(local).ok, true);
-  assert.equal(authority.guard('operator_edit', sameRepo, { session: B, principal: 'oidc:owner' }).ok, true);
-  assert.equal(authority.acquire(local).error, 'checkout_lease_revoked');
+  assert.equal(authority.release(local).error, 'checkout_recovery_required');
+  assert.equal(authority.guard('operator_edit', sameRepo, { session: B, principal: 'oidc:owner' }).error, 'locked_by_other_session');
+  assert.equal(authority.acquire(local).ok, true, 'single owning session continues without ceremony');
   assert.equal(existsSync(join(stateDir, 'checkout_leases.json')), true);
 });
 
@@ -167,7 +254,7 @@ test('two independent local processes contend and the refused one never launches
   await new Promise(resolve => first.once('exit', resolve));
   const authority = createMacCheckoutAuthority({ stateDir });
   assert.equal(authority.guard('operator_edit', { path: join(repo, 'new') },
-    { principal: 'oidc:owner', session: C }).ok, true);
+    { principal: 'oidc:owner', session: C }).error, 'locked_by_other_session');
 });
 
 test('regression: a supervised child group must retain the checkout until its surviving grandchild exits',
@@ -239,7 +326,8 @@ test('supervisor SIGTERM after the direct child exits stops surviving process-gr
   assert.equal(existsSync(join(repo, 'SHOULD_NOT_WRITE_AFTER_TERM')), false);
   const authority = createMacCheckoutAuthority({ stateDir });
   assert.equal(authority.guard('operator_edit', { path: join(repo, 'after-term') },
-    { principal: 'oidc:owner', session: C }).ok, true, 'group should be stopped before release');
+    { principal: 'oidc:owner', session: C }).error, 'locked_by_other_session',
+    'empty observed process group cannot prove no escaped writers');
 });
 
 test('experimental Seatbelt writer cannot modify another checkout, including through a child process',
@@ -264,6 +352,12 @@ catch (error) { fs.writeFileSync('LINK_DENIED', error?.code ?? 'unknown'); }
   const run = spawnSync(process.execPath,
     [script, '--repo', repo, '--state-dir', stateDir, '--sandbox-strict', '--', process.execPath, '-e', code],
     { encoding: 'utf8', timeout: 15000 });
+  if (run.status !== 0 && /sandbox-exec: sandbox_apply: Operation not permitted/.test(run.stderr)) {
+    assert.equal(existsSync(join(repo, 'ALLOWED')), false, 'sandbox failure never runs the child');
+    assert.equal(existsSync(target), false);
+    t.skip('host forbids sandbox_apply (nested OS sandbox); containment gate remains UNVERIFIED/OFF');
+    return;
+  }
   assert.equal(run.status, 0, JSON.stringify({ stdout: run.stdout, stderr: run.stderr }));
   assert.equal(readFileSync(join(repo, 'ALLOWED'), 'utf8'), 'ok');
   assert.notEqual(readFileSync(join(repo, 'CHILD_EXIT_CODE'), 'utf8'), '0');
