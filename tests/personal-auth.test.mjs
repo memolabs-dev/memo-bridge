@@ -88,3 +88,21 @@ test('tampered, expired, future, old, wrong-typ and unsigned-looking tokens fail
   assert.equal(await verifier.verify(expired), null);
   assert.equal(await verifier.verify('X'.repeat(10000)), null);
 });
+
+test('owner can revoke previously issued access tokens with an explicit personal cutoff', async () => {
+  const { make, jwks } = await fixture();
+  const current = await make();
+  const old = createPersonalVerifier({
+    ...config(), tokensValidAfter: NOW + 1
+  }, { jwks, now: () => NOW * 1000 });
+  assert.equal(await old.verify(current), null,
+    'a previously minted token is rejected even if its signature is valid');
+  const unchanged = createPersonalVerifier({
+    ...config(), tokensValidAfter: NOW
+  }, { jwks, now: () => NOW * 1000 });
+  assert.equal((await unchanged.verify(current))?.sub, 'friend-user');
+  assert.equal(parsePersonalRemoteConfig({ ...RAW, tokens_valid_after: NOW + 1 }).tokensValidAfter, NOW + 1);
+  for (const tokens_valid_after of [-1, 1.5, '1', Number.MAX_SAFE_INTEGER]) {
+    assert.throws(() => parsePersonalRemoteConfig({ ...RAW, tokens_valid_after }), /invalid_token_cutoff/);
+  }
+});

@@ -23,7 +23,7 @@ function requireHttps(text, key, path = null) {
 
 export function parsePersonalRemoteConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid_remote_config');
-  const allowedFields = ['version', 'enabled', 'issuer', 'resource', 'owner_sub', 'allowed_client_ids', 'jwks_uri', 'port'];
+  const allowedFields = ['version', 'enabled', 'issuer', 'resource', 'owner_sub', 'allowed_client_ids', 'jwks_uri', 'port', 'tokens_valid_after'];
   if (Object.keys(raw).some(k => !allowedFields.includes(k)) ||
       raw.version !== 1 || raw.enabled !== true) throw new Error('invalid_remote_config');
   const issuer = requireHttps(raw.issuer, 'issuer');
@@ -40,9 +40,14 @@ export function parsePersonalRemoteConfig(raw) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === 9443 || port === 9445) {
     throw new Error('invalid_remote_port');
   }
+  const validAfter = raw.tokens_valid_after === undefined ? 0 : raw.tokens_valid_after;
+  if (!Number.isSafeInteger(validAfter) || validAfter < 0 || validAfter > 4102444800) {
+    throw new Error('invalid_token_cutoff');
+  }
   return Object.freeze({
     issuer: raw.issuer, resource: resource.href, ownerSub: raw.owner_sub,
-    allowedClientIds: Object.freeze([...clients]), jwksUri: jwks.href, port
+    allowedClientIds: Object.freeze([...clients]), jwksUri: jwks.href, port,
+    tokensValidAfter: validAfter
   });
 }
 
@@ -74,6 +79,7 @@ export function createPersonalVerifier(config, { jwks = null, now = Date.now } =
       if (claims.sub !== config.ownerSub || typeof claims.client_id !== 'string' ||
           !clients.has(claims.client_id) || typeof claims.iat !== 'number' ||
           claims.iat > sec + 30 || claims.iat < sec - 3600 ||
+          claims.iat < (config.tokensValidAfter ?? 0) ||
           !Number.isInteger(claims.exp) || claims.exp - sec > 3630 ||
           typeof claims.scope !== 'string' || !claims.scope.split(/ +/).includes(PERSONAL_SCOPE)) return null;
       return { clientId: claims.client_id, sub: claims.sub, expiresAt: claims.exp };

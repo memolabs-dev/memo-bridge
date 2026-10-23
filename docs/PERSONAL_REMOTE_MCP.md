@@ -40,6 +40,37 @@ The personal remote config file is **never generated with credentials, uploaded 
 
 A successful process starts a **loopback HTTP** listener, but the local listener is *not* a public HTTPS service. For production ChatGPT connectivity, the owner still needs an authenticated, TLS-protected forwarding edge with a personally owned domain and OAuth client setup; **do not redirect the ChatGPT connection to localhost**, reuse the Memo Labs tunnel or publish the local HTTP port directly. The chosen reverse proxy must forward `/mcp` and both `/.well-known/oauth-protected-resource` paths and rewrite/validate Host correctly.
 
+## Personal issuer preflight (does not connect ChatGPT)
+
+After setting up a **separately owned** OAuth identity provider and personal HTTPS domain,
+validate its public capabilities before enabling the remote edge:
+
+```powershell
+pnpm run preflight:personal -- --remote-config "$env:APPDATA\\MemoBridge\\remote-personal.json"
+```
+
+The command makes **read-only HTTPS requests** to the configured issuer's OAuth/OIDC
+discovery and same-origin JWKS endpoints, with hard timeouts, response-size limits,
+redirect refusal, exact issuer comparison and required authorization-code + PKCE S256
+checks. It never requests or stores a client secret, OAuth grant, access token or machine key.
+
+A successful preflight still reports `chatgpt_e2e_verified: false`,
+`remote_https_edge_verified: false` and
+`oauth_client_registration_verified: false`. It does **not** validate the
+public tunnel, client registration, refresh, device enrollment or session revocation.
+
+### Manual token invalidation
+
+An optional `tokens_valid_after` field in `remote-personal.json` (Unix seconds)
+refuses already-issued access JWTs with `iat` earlier than that instant,
+**after restarting** the loopback service. Setting `enabled: false` and restarting
+shuts down the remote service. To revoke a client entirely, remove its
+`allowed_client_ids` entry, restart the local service, and revoke its authorization
+at the **independent** identity provider. JWTs can remain valid in an already-running
+resource server until it is stopped or its policy is reloaded; no hot-reload is
+implemented. This is a staged local kill-switch, **not** proof of end-to-end OAuth
+revocation or multi-device enrollment.
+
 ## Server behavior
 
 - `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp`: public RFC 9728 metadata (resource and authorization server URLs, one scope).
