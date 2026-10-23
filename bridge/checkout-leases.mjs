@@ -102,13 +102,35 @@ export function createCheckoutLeases({
     }
     return { ok: true, lease: describe(current), renewed: Boolean(previous && previous.session === clientSession && previous.principal === principal) };
   }
-  function acquire(input) {
-    if (!transaction) return acquireOnce(input);
+  function releaseOnce({ host, root, principal, clientSession }) {
+    if (!ensureState()) return fail('checkout_lease_state_unavailable');
+    const safeRoot = normalizedCheckout(host, root);
+    if (!safeRoot) return fail('checkout_root_unverified');
+    if (!SESSION_RE.test(clientSession ?? '')) return fail('session_required');
+    const key = host + '|' + safeRoot;
+    const previous = records.get(key);
+    if (!previous || previous.session !== clientSession || previous.principal !== principal ||
+        previous.revoked.includes(clientSession)) return fail('checkout_lease_not_owned');
+    if (previous.revoked.length >= MAX_REVOKED) return fail('checkout_lease_capacity');
+    // Preserve a tombstone, not deletion: the releasing process may have a
+    // delayed write which must remain fenced even after another holder arrives.
+    const current = { ...previous, expires: now(), revoked: [...previous.revoked, clientSession] };
+    records.set(key, current);
+    let saved;
+    try { saved = onChange({ schema: 1, rows: [...records.values()] }); } catch { saved = { ok: false }; }
+    if (saved?.ok !== true) {
+      records.set(key, previous);
+      unavailable = true;
+      return fail('checkout_lease_state_unavailable');
+    }
+    return { ok: true, released: true };
+  }
+  function mutate(input, action) {
+    if (!transaction) return action(input);
     if (typeof reload !== 'function') return fail('checkout_lease_state_unavailable');
     try {
       return transaction(() => {
-        // Re-read while holding the cross-process filesystem lock. A different
-        // hub might have committed an owner change after our last request.
+        // Re-read under the same cross-process exclusive lock.
         let current;
         try { current = reload(); } catch { current = { ok: false }; }
         if (!current?.ok || !adopt(current.data)) {
@@ -116,11 +138,15 @@ export function createCheckoutLeases({
           return fail('checkout_lease_state_unavailable');
         }
         unavailable = false;
-        return acquireOnce(input);
+        return action(input);
       });
     } catch {
       return fail('checkout_lease_state_unavailable');
     }
   }
-  return Object.freeze({ acquire, get size() { return records.size; } });
+  return Object.freeze({
+    acquire: input => mutate(input, acquireOnce),
+    release: input => mutate(input, releaseOnce),
+    get size() { return records.size; }
+  });
 }

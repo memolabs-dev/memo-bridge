@@ -1,0 +1,153 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
+import { createOperatorSigner, createOperatorVerifier } from '../bridge/operator-signing.mjs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createMacCheckoutAuthority, checkoutRootFor, checkoutTargetFor } from '../bridge/mac-checkout-authority.mjs';
+import { createOperatorOperations } from '../bridge/operator-agent.mjs';
+import { z } from 'zod/v4';
+
+const A = 'a'.repeat(32), B = 'b'.repeat(32), C = 'c'.repeat(32);
+
+function fixture(t) {
+  const tmp = mkdtempSync(join(tmpdir(), 'memo-mac-broker-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const repo = join(tmp, 'one'), other = join(tmp, 'other');
+  mkdirSync(repo); mkdirSync(other);
+  for (const dir of [repo, other]) {
+    execFileSync('git', ['init', '-q', dir], { encoding: 'utf8' });
+    mkdirSync(join(dir, 'sub'));
+  }
+  const stateDir = join(tmp, 'private-state');
+  return { tmp, repo, other, stateDir };
+}
+
+test('real Git top-level is canonical for nested folders and symlinks', t => {
+  const { tmp, repo, other } = fixture(t);
+  const symlink = join(tmp, 'link'); symlinkSync(join(repo, 'sub'), symlink);
+  assert.equal(checkoutRootFor(join(repo, 'sub')).root, realpathSync.native(repo));
+  assert.equal(checkoutRootFor(symlink).root, realpathSync.native(repo));
+  assert.equal(checkoutRootFor(other).root, realpathSync.native(other));
+  assert.equal(checkoutRootFor(tmp).root, null);
+  assert.equal(checkoutRootFor(repo + '/../other').error, 'checkout_scope_unknown');
+  assert.equal(checkoutRootFor(join(tmp, 'not-present')).error, 'checkout_root_unverified');
+});
+
+test('local and remote principals use the identical persisted lease on the Mac', t => {
+  const { repo, other, stateDir } = fixture(t);
+  const authority = createMacCheckoutAuthority({ stateDir });
+  const local = { root: repo, session: A, principal: 'local:mac-supervised' };
+  assert.equal(authority.acquire(local).ok, true);
+  const sameRepo = { path: join(repo, 'sub', 'new.txt'), mode: 'write', new_text: 'x' };
+  assert.equal(authority.guard('operator_edit', sameRepo, { session: B, principal: 'oidc:owner' }).error,
+    'locked_by_other_session');
+  assert.equal(authority.guard('operator_edit', sameRepo, { session: A, principal: 'local:mac-supervised' }).ok, true);
+  // A symlinked file within repo two points at repo one: guard its physical target.
+  writeFileSync(join(repo, 'sub', 'shared.txt'), 'original');
+  symlinkSync(join(repo, 'sub', 'shared.txt'), join(other, 'sub', 'alias.txt'));
+  assert.equal(authority.guard('operator_edit', { path: join(other, 'sub', 'alias.txt') },
+    { session: B, principal: 'oidc:owner' }).error, 'locked_by_other_session');
+  assert.equal(authority.guard('operator_edit', { path: join(other, 'sub', 'x') },
+    { session: B, principal: 'oidc:owner' }).ok, true);
+  assert.equal(authority.guard('operator_edit', sameRepo, { principal: 'oidc:owner' }).error, 'session_required');
+  assert.equal(authority.release(local).ok, true);
+  assert.equal(authority.guard('operator_edit', sameRepo, { session: B, principal: 'oidc:owner' }).ok, true);
+  assert.equal(authority.acquire(local).error, 'checkout_lease_revoked');
+  assert.equal(existsSync(join(stateDir, 'checkout_leases.json')), true);
+});
+
+test('failed states, upload completion and ambiguous scripts fail closed', t => {
+  const { repo, stateDir } = fixture(t);
+  const authority = createMacCheckoutAuthority({ stateDir });
+  const ctx = { principal: 'oidc:owner', session: B };
+  assert.equal(authority.guard('operator_script', { cwd: repo }, ctx).error, 'checkout_scope_unknown');
+  assert.equal(authority.guard('operator_upload_complete', { upload_id: 'up_123' }, ctx).error, 'checkout_scope_unknown');
+  assert.equal(authority.guard('operator_run', { argv: ['git', '-C', repo, 'switch', 'branch'], cwd: repo }, ctx).error,
+    'checkout_target_ambiguous');
+  assert.equal(authority.guard('operator_run', { argv: ['git', 'switch', '-c', 'one'] }, ctx).error, 'checkout_scope_unknown');
+  assert.equal(authority.guard('operator_run', { argv: ['git', 'status'], cwd: repo }, ctx).ok, true);
+  assert.equal(checkoutTargetFor('operator_copy', { src: join(repo, 'sub', 'x'), dst: join(repo, 'sub', 'y') }).directories.length, 2);
+});
+
+test('cross-repository move is refused before acquiring any lease', t => {
+  const { repo, other, stateDir } = fixture(t);
+  const authority = createMacCheckoutAuthority({ stateDir });
+  const ctx = { principal: 'oidc:owner', session: A };
+  const out = authority.guard('operator_move', { src: join(repo, 'sub', 'x'), dst: join(other, 'sub', 'x') }, ctx);
+  assert.equal(out.error, 'checkout_cross_repo_not_supported');
+  assert.equal(authority.guard('operator_edit', { path: join(repo, 'sub', 'x') }, { principal: 'local:test', session: B }).ok,
+    true, 'no partially acquired lease');
+});
+
+test('signed operator-agent executes no mutation when local wrapper owns its target', async t => {
+  const { repo, stateDir } = fixture(t);
+  const authority = createMacCheckoutAuthority({ stateDir });
+  assert.equal(authority.acquire({ root: repo, session: A, principal: 'local:mac-supervised' }).ok, true);
+  let writes = 0;
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const signer = createOperatorSigner({ privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }) });
+  const verifier = createOperatorVerifier({
+    publicKeys: [publicKey.export({ type: 'spki', format: 'pem' })], host: 'mac'
+  });
+  const { handlers } = createOperatorOperations({
+    policy: { host: 'mac', maxTier: 2, approvalMode: 'off', permanentGrants: [] },
+    verifier,
+    guard: { admit: () => null, refused: () => false },
+    tools: { broker_test: async () => { writes++; return { ok: true }; } },
+    checkoutAuthority: authority,
+    tierOf: () => 1,
+    schemas: { broker_test: z.object({ host: z.literal('mac'), path: z.string() }) },
+    ops: ['broker_test']
+  });
+  // Distinct signed session B: refuses before invoking the tool.
+  const args = { host: 'mac', path: join(repo, 'sub', 'x') };
+  const id = 'signed-request-1';
+  const ctx = { id, principal: { id: 'oidc:owner' },
+    operator: signer.sign({ id, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args }),
+    meta: { client_session: B } };
+  assert.equal((await handlers.broker_test(args, ctx)).error, 'locked_by_other_session');
+  assert.equal(writes, 0);
+  const forged = { ...args, session: A };
+  // Caller-supplied args are either rejected by signature verification or
+  // discarded by schema parsing; they never become the transport's session.
+  const secondId = 'signed-request-2';
+  const secondCtx = { ...ctx, id: secondId, operator: signer.sign({
+    id: secondId, op: 'broker_test', host: 'mac', tier: 1, principal: 'oidc:owner', args: forged
+  }) };
+  assert.equal((await handlers.broker_test(forged, secondCtx)).error,
+    'locked_by_other_session');
+  assert.equal(writes, 0);
+});
+
+test('two independent local processes contend and the refused one never launches', { skip: process.platform !== 'darwin' }, async t => {
+  const { repo, stateDir } = fixture(t);
+  const script = new URL('../scripts/with-checkout-lease.mjs', import.meta.url).pathname;
+  const launch = code => spawn(process.execPath,
+    [script, '--repo', repo, '--state-dir', stateDir, '--', process.execPath, '-e', code],
+    { stdio: ['ignore', 'ignore', 'pipe'] });
+  const first = launch('setInterval(() => {}, 1000)');
+  t.after(() => { try { first.kill('SIGTERM'); } catch { /* exited */ } });
+  const started = Date.now();
+  while (!existsSync(join(stateDir, 'checkout_leases.json'))) {
+    if (Date.now() - started > 4_000) assert.fail('lease was never acquired');
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const before = execFileSync('git', ['-C', repo, 'status', '--short'], { encoding: 'utf8' });
+  const second = launch("require('node:fs').writeFileSync('SHOULD_NOT_EXIST','bad')");
+  let stderr = '';
+  second.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  const code = await new Promise((resolve, reject) => {
+    second.once('error', reject); second.once('exit', resolve);
+  });
+  assert.equal(code, 73, stderr);
+  assert.equal(existsSync(join(repo, 'SHOULD_NOT_EXIST')), false);
+  assert.equal(execFileSync('git', ['-C', repo, 'status', '--short'], { encoding: 'utf8' }), before);
+  first.kill('SIGTERM');
+  await new Promise(resolve => first.once('exit', resolve));
+  const authority = createMacCheckoutAuthority({ stateDir });
+  assert.equal(authority.guard('operator_edit', { path: join(repo, 'new') },
+    { principal: 'oidc:owner', session: C }).ok, true);
+});

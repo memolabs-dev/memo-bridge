@@ -57,7 +57,8 @@ export const INTERNAL_SCHEMAS = Object.freeze({
 // schemas     op -> zod schema
 export function createOperatorOperations({ policy, verifier, guard, chain = null, tools, rootHelper = null, tierOf = operatorCallTier,
   schemas = { ...OPERATOR_SCHEMAS, ...INTERNAL_SCHEMAS },
-  ops = [...Object.keys(OPERATOR_OPERATION_CAPABILITY), ...Object.keys(INTERNAL_SCHEMAS)], now = Date.now, log = () => {} } = {}) {
+  ops = [...Object.keys(OPERATOR_OPERATION_CAPABILITY), ...Object.keys(INTERNAL_SCHEMAS)], now = Date.now, log = () => {},
+  checkoutAuthority = null } = {}) {
   if (!policy || !verifier || !guard || !tools) throw new Error('operator agent needs policy, verifier, guard and tools');
   const internal = {
     async operator_audit_head({ since_seq: since }) {
@@ -121,6 +122,15 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       const parsed = schema ? schema.safeParse(args ?? {}) : { success: false };
       if (!parsed.success) return refuse('invalid_arguments');
       if (parsed.data.host !== policy.host) return refuse('host_mismatch');
+      // Mac-side authority: the same private ledger used by supervised local agents.
+      // The remote caller cannot choose the session through tool arguments: only the
+      // trusted transport metadata is read, after signature and schema verification.
+      if (checkoutAuthority && tier > 0) {
+        const admission = checkoutAuthority.guard(op, parsed.data, {
+          principal, session: ctx.meta?.client_session ?? null
+        });
+        if (!admission?.ok) return refuse(admission?.error ?? 'checkout_lease_state_unavailable');
+      }
 
       // operator_docker goes to the root helper whatever its tier (repatriation D-R11), on lab only.
       const toRoot = tier === 3 || (op === 'operator_job_status' && String(parsed.data.job_id).startsWith('rj_')) || op === 'operator_docker';
