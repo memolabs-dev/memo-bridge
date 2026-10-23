@@ -506,7 +506,7 @@ test('MS-R11: stdio carries the start sequence and the stop codes; the canonical
 // (developers.openai.com/plugins/build/mcp-server).
 test('ChatGPT guide: the first 512 characters say what Memo Bridge is and how to work; no dev flow anywhere', () => {
   const head = REMOTE_INSTRUCTIONS.slice(0, 512);
-  for (const word of ['"mac"', '"vps"', 'operator_run', 'operator_read', 'operator_edit', 'project_context', 'branch', 'worktree'])
+  for (const word of ['"mac"', '"vps"', 'operator_run', 'operator_read', 'operator_edit', 'projects_list', 'path_relative', 'branch', 'worktree'])
     assert.ok(head.includes(word), `first 512: ${word}`);
   for (const word of ['workspace_open', 'workspace_id', 'task_claim', 'task_next', 'batch_create', 'worktree_create', 'jobs_submit',
     'github_create_pr', 'operator_lock', 'delegation', 'memory_save', 'use_dev_flow'])
