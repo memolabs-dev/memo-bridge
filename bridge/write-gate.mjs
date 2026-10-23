@@ -42,7 +42,7 @@ const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 // that an Issue belongs to the project's real GitHub origin before any claim.
 const REPO_RE = /^[A-Za-z0-9-]{1,39}\/([A-Za-z0-9._-]{1,100})$/;
 const SUB_RE = /^[A-Za-z0-9._@-]{1,120}$/;
-const MAX_PROJECTS = 50;
+const MAX_PROJECTS = 100; // the owner's every project (#257)
 
 function projectName(entry) {
   if (typeof entry !== 'string') return null;

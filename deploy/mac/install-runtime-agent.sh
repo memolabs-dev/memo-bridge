@@ -13,9 +13,11 @@
 #   --owner-sub       the owner's Pocket ID user id (lab-infra memo_bridge_remote_owner_sub)
 #   --governance-ref  the memolabs-dev/.github commit the ledger runs (scripts/issue_lease.py,
 #                     issue_preflight.py, private_owner_allowlist.py); 40 hex
-#   --from-registry   enroll every project of ~/memolabs/PROJECTS.md whose Mac checkout has a
-#                     memolabs-dev origin that GitHub reports private and not archived
-#   --repo            enroll one such repository (repeatable)
+#   --from-registry   enroll every project of ~/memolabs/PROJECTS.md, and every owner external
+#                     project of owner-policy/external-projects.json (#257, provisioned by the
+#                     owner), whose Mac checkout has an origin in the owner's namespaces
+#                     (memolabs-dev, guillaume-flambard) that GitHub reports private and not archived
+#   --repo            enroll one such repository, or opt in one public one (repeatable)
 #   --bridge-ref      the memo-bridge commit to run (default: HEAD of this checkout); 40 hex
 #   --governance-src  where to clone the governance repository from (default GitHub)
 #   --app-key         the memo-labs-automation App private key (lab-infra memo_runner_github_app_key_path),
@@ -31,11 +33,17 @@
 #                     probe identity, so the hub sees the same agent), ledger-gh and push-gh
 #                     (the token of the owner's own `gh` login, read from the Keychain, never
 #                     printed, never in the plist or the environment)
-#   ~/.local/share/memo-bridge/owner-policy/                    0700: private-repos.json and
-#                     remote.json (deploy/mac/runtime-mac.mjs configure)
+#   ~/.local/share/memo-bridge/launchd/owner-policy/            0700, STAGED: private-repos.json,
+#                     remote.json, stage.json and, when the owner has none yet, lease-key.json
+#                     (deploy/mac/runtime-mac.mjs configure). The live owner-policy/ files the
+#                     running agent reads are not touched by a stage run (fix pass of #258);
+#                     external-projects.json is read, never written
 #   ~/.local/share/memo-bridge/launchd/dev.memolabs.memo-bridge-agent.plist   staged plist
+# A stage run still refreshes the ledger-gh and push-gh credentials (the same gh login token).
 # --install keeps the current plist as .../launchd/dev.memolabs.memo-bridge-agent.plist.probe
-# (once), installs the staged one and restarts the agent; --rollback puts the probe one back.
+# (once), installs the staged one, promotes the staged policies into owner-policy/ (each live
+# one kept as .bak-<time>; a live lease-key.json is never replaced; refused if a live policy
+# changed since the stage run) and restarts the agent; --rollback puts the probe plist back.
 # The hub side (lab-infra memo_bridge_mac_runtime_routing: true) is a separate, reviewed deploy.
 set -euo pipefail
 umask 077
@@ -227,6 +235,10 @@ fi
 if [ -f "$TARGET" ] && [ ! -f "$PROBE_BACKUP" ]; then /bin/cp -p "$TARGET" "$PROBE_BACKUP"; fi
 /bin/cp -f "$STAGING/$LABEL.plist" "$TARGET.tmp"
 /bin/chmod 0644 "$TARGET.tmp"
+# The staged policies go live now, right before the restart (fix pass of #258): a stage run
+# never changes what the running agent reads.
+"$NODE" "$REPO/deploy/mac/runtime-mac.mjs" promote --home "$HOME" --out "$STAGING" \
+  || { /bin/rm -f "$TARGET.tmp"; die "promote refused (see the JSON line above); the agent and its policy are unchanged"; }
 /bin/mv -f "$TARGET.tmp" "$TARGET"
 LOG="$HOME/Library/Logs/memo-bridge/stderr.log"
 START_LINES="$( [ -f "$LOG" ] && /usr/bin/wc -l < "$LOG" | /usr/bin/tr -d ' ' || echo 0)"

@@ -121,3 +121,9 @@ test('remote policy: validation, defaults, and an unreadable file fails closed',
     { readFile: () => JSON.stringify({ projects: ['drop'], session_binding: 'block' }) });
   assert.deepEqual([policy.configured, policy.projects, policy.session_binding], [true, ['drop'], 'block']);
 });
+
+test('#257 the remote project allowlist holds up to 100 projects, not more', () => {
+  const names = Array.from({ length: 100 }, (_, i) => `p${i}`);
+  assert.equal(parseRemotePolicy({ projects: names }).projects.length, 100);
+  assert.throws(() => parseRemotePolicy({ projects: [...names, 'one-more'] }), /invalid_remote_policy/);
+});

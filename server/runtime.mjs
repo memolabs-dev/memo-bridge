@@ -57,7 +57,7 @@ export function gateRemotePrincipal(p, policy) {
 export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
   principal = readOnly ? readerPrincipal() : localOwnerPrincipal(), ledger, now = Date.now,
   catalogOptions = {}, host = currentHost(), resolveProject, projectRemote, hubGrants, env = process.env, remotePolicy,
-  projectSync, githubCredentials } = {}) {
+  projectSync, githubCredentials, ledgerChildDefaults = {} } = {}) {
   if (readOnly && holdsWriteCapability(principal)) throw new Error('read_only_principal_writes');
   let store;
   const coordinators = new Map();
@@ -73,7 +73,8 @@ export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
   // nothing at all on the Mac (no $CREDENTIALS_DIRECTORY). The ledger, the worktree runner and
   // github_create_pr share it.
   const credentials = githubCredentials ?? createGitHubCredentials({ env });
-  const sharedLedger = ledger ?? createIssueLeaseClient({ env, scratchDir: join(stateDir, 'ledger-gh'), credentials });
+  const sharedLedger = ledger ?? createIssueLeaseClient({ env, scratchDir: join(stateDir, 'ledger-gh'), credentials,
+    childDefaults: ledgerChildDefaults });
 
   const openStore = () => { store ??= openSqliteStore({ dir: stateDir, readOnly }); return store; };
   // One GitHub Projects sync per runtime, shared by every principal's coordinator and by
@@ -177,6 +178,10 @@ export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
 let shared;
 export function getRuntime() {
   // The stdio process is read-only when started with --read-only or MEMO_BRIDGE_READ_ONLY (#252).
-  shared ??= createRuntime({ readOnly: readOnlyRequested() });
+  // Its ledger child says it is the owner's stdio server on this host (#257): the ledger then
+  // reads the owner's Mac enrollment files for it as it does for the Mac runtime. Variables the
+  // owner set himself win.
+  shared ??= createRuntime({ readOnly: readOnlyRequested(),
+    ledgerChildDefaults: { MEMO_BRIDGE_AGENT_MODE: 'stdio', MEMO_BRIDGE_HOST: currentHost() } });
   return shared;
 }

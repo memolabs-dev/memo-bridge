@@ -10,7 +10,7 @@
 //    private repository it created or verified on GitHub (server/projects/create.mjs);
 //  - only files the readers would trust (regular, not a link, 0600, this uid, the expected owner),
 //    so a file someone else could have written is never extended;
-//  - at most 50 entries, the readers' limit (owner-private-repos.mjs, write-gate.mjs);
+//  - at most 100 entries, the readers' limit (owner-private-repos.mjs, write-gate.mjs);
 //  - under a lock, read, append, write through a temporary sibling and one rename; private-repos.json
 //    first (the ledger's file), then remote.json (the gate's), so a crash between the two leaves a
 //    repository the gate still refuses, which the next call finishes.
@@ -24,7 +24,7 @@ import { parseRemotePolicy } from '../../bridge/write-gate.mjs';
 import { acquireLock } from './registry-writer.mjs';
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,79}$/;
-const MAX_ENTRIES = 50;
+const MAX_ENTRIES = 100;
 const MAX_BYTES = 16384;
 // An enrollment holds the lock for milliseconds; one older than this was left by a crashed runtime.
 const STALE_LOCK_MS = 2 * 60_000;
