@@ -17,6 +17,18 @@ is, what "every project" means, and what stays out.
 The local principal is minted by the stdio server for the OS user running it; the hub can only
 carry `hub:` and `oidc:` ids, so a remote caller can never present `local:`.
 
+The stdio server now detects the **installed local Mac runtime** automatically when it starts,
+without using information from a repository, request or plugin argument. It reads only the
+known owner-owned LaunchAgent and 0600 owner-policy files under the current OS account,
+verifies that all policy paths and owner IDs agree with the running runtime configuration,
+and copies only six allowlisted **non-secret** settings into its own process. It also
+checks the pinned governance code for the safe passwd-database home lookup (incident E-16).
+If the installation is missing, untrusted, inconsistent, read-only, running on a
+different OS, or the caller supplied any owner configuration explicitly, discovery
+stays disabled; there is **no privilege escalation or implicit private allowance**.
+
+For hermetic tests, `MEMO_BRIDGE_DISABLE_OWNER_AUTOLOAD=1` prevents discovery.
+
 Two checks hold that table (fix pass of #258):
 
 - The owner namespaces below are a pre-filter for the owner's principals only
@@ -49,10 +61,12 @@ Two checks hold that table (fix pass of #258):
 
 The ledger accepts `MEMO_BRIDGE_AGENT_MODE=runtime` (with `MEMO_BRIDGE_MAC_RUNTIME_ENABLED=enabled`)
 or `stdio`. The stdio server gives its ledger child `MEMO_BRIDGE_AGENT_MODE=stdio` and
-`MEMO_BRIDGE_HOST=<this host>` unless the owner set them. The owner adds to the stdio server's
-environment: `MEMO_BRIDGE_GOVERNANCE_ROOT`, `MEMO_BRIDGE_REMOTE_CONFIG`, `MEMO_BRIDGE_OWNER_SUB`,
+`MEMO_BRIDGE_HOST=<this host>` unless the owner set them. When a verified owner runtime is installed, its six settings are discovered
+automatically. If the owner chooses explicit configuration instead, he sets
+`MEMO_BRIDGE_GOVERNANCE_ROOT`, `MEMO_BRIDGE_REMOTE_CONFIG`, `MEMO_BRIDGE_OWNER_SUB`,
 `MEMO_BRIDGE_OWNER_PRIVATE_REPOS_FILE`, `MEMO_BRIDGE_OWNER_EXTERNAL_PROJECTS_FILE`,
-`MEMO_BRIDGE_OWNER_LEASE_KEY_FILE` (the same values as the Mac runtime's plist).
+`MEMO_BRIDGE_OWNER_LEASE_KEY_FILE` (the same values as the Mac runtime's plist);
+a partial explicit configuration will never be silently completed.
 
 ## Privacy of the lease ledger
 

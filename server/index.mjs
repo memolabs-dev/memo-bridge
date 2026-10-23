@@ -8,6 +8,7 @@ import { collectHost, listHosts } from './probe.mjs';
 import { listProjects, projectInfo, projectGitStatus, auditProjectRegistry } from './catalog.mjs';
 import { CAPABILITIES, readOnlyRequested } from './coordinator/policy.mjs';
 import { getRuntime } from './runtime.mjs';
+import { bootstrapStdioMacOwnerPolicy } from './stdio-owner-policy.mjs';
 import { runnerInfo } from './runners/hosts.mjs';
 import { sandboxMode } from './runners/sandbox.mjs';
 import { COORDINATOR_TOOLS, registerCoordinatorTools } from './tools/coordinator-tools.mjs';
@@ -52,6 +53,7 @@ const ALL_TOOLS = Object.values(TOOL_GROUPS).flat();
 // Read-only process (#252, docs/READER_CONTRACT.md): started with --read-only or
 // MEMO_BRIDGE_READ_ONLY. Its principal is reader:<OS user>, its store is opened read-only, every
 // write tool answers read_only and nothing it does leaves a trace.
+if (!readOnlyRequested()) bootstrapStdioMacOwnerPolicy();
 const READ_ONLY = readOnlyRequested();
 const READ_ONLY_INSTRUCTIONS = 'This Memo Bridge process is READ-ONLY: every write tool answers read_only and changes nothing; ' +
   'reads leave no trace. Use reader_activity and reader_job_events (docs/READER_CONTRACT.md) for every conversation\'s ' +
