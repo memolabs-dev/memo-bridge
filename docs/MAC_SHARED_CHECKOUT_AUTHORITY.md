@@ -19,7 +19,7 @@ On the Mac operator service, only after a real user/session compatibility test:
 
 `MEMO_OPERATOR_CHECKOUT_AUTHORITY=enabled`
 
-This must use the private directory already used by `MEMO_OPERATOR_STATE` (or the validated policy `state_dir`). The default is **off**. On the VPS the existing `MEMO_BRIDGE_CHECKOUT_LEASES=enabled` remains a separate, optional hub-side control. An active Mac control may refuse a request after the hub already granted its own lease; that is a safe refusal, but the remote reservation can then remain until expiry.
+This must use the private directory already used by `MEMO_OPERATOR_STATE` (or the validated policy `state_dir`). The default is **off**. On the VPS the existing `MEMO_BRIDGE_CHECKOUT_LEASES=enabled` remains a separate, optional hub-side control. An active Mac control may refuse a request after the hub already granted its own lease; that reservation also requires recovery after expiry.
 
 A supervised local agent is launched in a new session with an explicit absolute checkout and matching state directory, e.g.:
 
@@ -41,7 +41,7 @@ node scripts/with-checkout-lease.mjs \
 
 - A local supervisor owns checkout A; a different local supervisor targeting A refuses to run its child at all. An operator write from remote session B to A returns `locked_by_other_session` **before** the underlying tool is invoked. Repo B remains independent.
 - An existing file symlinked across checkout boundaries is resolved to the physical target; for new files the parent is resolved. Ambiguous `git -C`/external Git roots and arbitrary scripts without a defensible scope are refused by the pilot.
-- A supervisor heartbeat renews the lease. Normal exit writes a tombstone that fences its previous session, then another writer can acquire the checkout. A crash leaves the lease until expiry; after takeover the previous identity remains fenced.
+- A supervisor heartbeat renews the lease. Normal exit retains the durable fence and reports `checkout_recovery_required`, while preserving the child's exit status. Mac authority release is disabled: descendants can escape the observed process group, even with the strict write sandbox. Both normal exit and crash require reviewed owner recovery before another session can take over. TTL never authorizes takeover. The current owning session continues automatically before expiry; no workspace/task/lock ceremony is added.
 - A missing/invalid remote session hash refuses protected Git writes rather than treating all owner conversations as one principal. Read-only commands can proceed.
 - A corrupted lock state, failed save or orphaned transaction marker fails closed. No automatic stealing or silent resetting of unknown work.
 
@@ -49,7 +49,7 @@ node scripts/with-checkout-lease.mjs \
 
 This is **cooperative protection**, not an operating-system security boundary. Claude Code or OpenCode run as the same macOS user, can launch unsupervised tools, reach other directories, or bypass the wrapper entirely. The wrapper does not isolate their filesystem permissions. A generic Node/Python/shell child can modify another checkout even when its starting `cwd` is protected. Enforced multiwriter isolation requires separate authorized worktrees or OS-level sandbox rules, plus a common host-side mediation layer for *all* writers.
 
-A session hash in protocol metadata is not bound into the signed Ed25519 argument digest. Only the authenticated operator transport supplies this metadata, but the identity binding should be strengthened in the signing contract before production. The same-UID wrapper identity is randomly minted but not OS-cryptographically protected against another process owned by the user. Unrelated local agents that do not use the wrapper remain a known bypass.
+Session-bound v2 signatures bind the session hash after the hub receives it; they do not authenticate the original client-supplied hint. The same-UID wrapper identity is randomly minted but not OS-cryptographically protected against another process owned by the user. Unrelated local agents that do not use the wrapper remain a known bypass.
 
 Remote uploads that complete without a path are currently **refused** under the pilot, even outside Git; mixed-repository moves are refused. Background child jobs, TTL expiry with a still-running child, forced termination, forked subprocesses and crash recovery need further validation. The pilot does not implement owner-only targeted recovery or status commands and must not change installed service settings. The code in PR #265 (hub leases) and this PR (Mac authority) is not production-ready.
 
