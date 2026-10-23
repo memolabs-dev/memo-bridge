@@ -79,3 +79,11 @@ sessions locales (stdio). ChatGPT voit 26 outils : `projects_list`, `project_con
 `operator_*` (exécuter, lire, écrire y compris les gros fichiers, s'orienter, copier entre machines,
 les opérations du VPS, les approbations et l'aide). La surface complète d'avant revient avec
 `"surface": "full"` dans le `remote.json` du hub.
+
+## Concurrence : limite en cours de correction (#263)
+
+Les verrous implicites du mode ChatGPT simple ne couvrent que **l'appel courant** : ils n'isolent pas une transaction Git à plusieurs étapes. Tant que [#263](https://github.com/memolabs-dev/memo-bridge/issues/263) n'est pas validée de bout en bout, ne lance pas deux agents **écrivains** sur le même checkout canonique. Deux lectures parallèles ne posent pas ce problème.
+
+Avant `git switch -c`, relève `git status --short --branch` et les changements non suivis. Si des changements d'une autre session existent, **arrête le travail dans ce checkout** et signale le conflit au propriétaire; ne change pas de branche, ne déplace/supprime rien. Le propriétaire peut autoriser une copie Git isolée pour ce travail, sans imposer de worktree dans le parcours normal.
+
+Pour une branche suivie pendant plusieurs appels, relis `git branch --show-current`, `git status --short` et `git diff --cached --stat` immédiatement avant `git commit` ou `git push`. Une divergence non expliquée est un **stop**, jamais une occasion de `git add -A`, `reset`, `stash`, `clean` ou de forcer. Ces contrôles de conduite réduisent le risque mais **ne remplacent pas** un verrou transactionnel côté serveur; un test CI vert n'implique aucune garantie multi-sessions.
