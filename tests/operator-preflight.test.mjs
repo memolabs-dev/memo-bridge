@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOperatorTools } from '../bridge/operator-tools.mjs';
@@ -8,7 +8,8 @@ import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { CAPABILITIES, operationCapability } from '../server/coordinator/policy.mjs';
 
 async function fixture(fn, { rootEnabled = true } = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'memo-preflight-'));
+  // Canonical, as the roots of a parsed policy are (macOS tmpdir is a symlink under /private).
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'memo-preflight-')));
   const write = join(dir, 'editable');
   const readonly = join(dir, 'maintenance');
   const project = join(write, 'project');
@@ -26,7 +27,6 @@ async function fixture(fn, { rootEnabled = true } = {}) {
     rootHelper: rootEnabled ? { socket: '/unit-test-only' } : null
   };
   const tools = createOperatorTools(policy, {
-    projects: async () => [{ name: 'sample-project', path: project }],
     maintenanceFiles: [join(readonly, 'lab-backup')]
   });
   try { await fn({ tools, write, readonly, project, secret, policy }); }
@@ -78,7 +78,8 @@ test('secret paths always stop before any administrator maintenance route', () =
     assert.equal(result.authorized, false);
   }));
 
-test('registered default-branch checkout routes to safe task/worktree/PR flow', () =>
+// Owner decision 2026-10-23: a checkout on its default branch is edited in place, no worktree flow.
+test('a project checkout on its default branch routes to a normal operator edit', () =>
   fixture(async ({ tools, project }) => {
     const git = join(project, '.git');
     await mkdir(join(git, 'refs', 'remotes', 'origin'), { recursive: true });
@@ -86,7 +87,7 @@ test('registered default-branch checkout routes to safe task/worktree/PR flow', 
     await writeFile(join(git, 'refs', 'remotes', 'origin', 'HEAD'), 'ref: refs/remotes/origin/main\n');
     await writeFile(join(project, 'README.md'), 'fixture\n');
     const result = await tools.operator_preflight({ path: join(project, 'README.md') });
-    assert.equal(result.route, 'project_worktree');
-    assert.equal(result.project, 'sample-project');
-    assert.equal(result.authorized, false);
+    assert.equal(result.route, 'operator_edit');
+    assert.equal(result.authorized, true);
+    assert.deepEqual(result.requires, []);
   }));

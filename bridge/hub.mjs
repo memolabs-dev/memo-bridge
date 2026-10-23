@@ -125,21 +125,13 @@ export function createHub(options) {
       requestId: ctx.requestId }),
     frozen: () => hubFrozen(), record: (event, details) => record(event, null, details),
     ...(operator?.transferLimits ? { limits: operator.transferLimits } : {}) });
-  // Repatriation D-R14 (live bench 2026-10-14): a remote operator write or command without a
-  // workspace gets the conversation's own one (sessions_overview "you"), or a new one on
-  // autoWorkspaceProject, opened through the runtime for that conversation and journaled
-  // workspace_auto_open. Needs the conversation's session hint; without it, one explicit step.
-  const autoProject = typeof operator?.autoWorkspaceProject === 'string' ? operator.autoWorkspaceProject : 'ops';
+  // Repatriation D-R14, simplified by the owner on 2026-10-23 ("ça me crée un workspace"): a
+  // remote operator write or command without a workspace uses the conversation's own one when it
+  // already has one (sessions_overview "you", a delegated child for instance), and never opens one.
   const sessionWorkspace = operator?.sessionWorkspace ?? (async (principal, clientSession) => {
-    const runtime = runtimeHost ?? 'vps';
-    const seen = await sendAgent(runtime, 'sessions_overview', { args: {}, principal, clientSession });
+    const seen = await sendAgent(runtimeHost ?? 'vps', 'sessions_overview', { args: {}, principal, clientSession });
     const mine = seen?.ok === true ? seen.you?.workspaces?.[0] : null;
-    if (typeof mine === 'string') return { ok: true, workspace_id: mine, opened: false };
-    const opened = await sendAgent(runtime, 'workspace_open', { args: { project: autoProject, client_type: principal.client_type ?? 'chatgpt',
-      client_label: 'operator (auto)', host: 'vps' }, principal, clientSession });
-    return opened?.ok === true && typeof opened.workspace?.workspace_id === 'string'
-      ? { ok: true, workspace_id: opened.workspace.workspace_id, opened: true, project: opened.workspace.project }
-      : { ok: false, error: opened?.error ?? seen?.error ?? 'workspace_unavailable' };
+    return typeof mine === 'string' ? { ok: true, workspace_id: mine } : { ok: false, error: seen?.error ?? 'no_workspace' };
   });
   // Repatriation D-R4: standing approvals. Durable with a state directory (pending approvals are not).
   const grants = createGrantStore({ ...(operator?.now ? { now: operator.now } : {}), homes: operator?.homes ?? DEFAULT_HOMES,
@@ -510,12 +502,11 @@ export function createHub(options) {
   }
 
   // D-R14 (bench 2026-10-14 19:57 and 20:04): the conversation's workspace, keyed by its session
-  // hash: its own active one (runtime sessions_overview "you"), else one opened on
-  // autoWorkspaceProject (journaled workspace_auto_open), else a coordination id derived from the
-  // session (the runtime could not open one; journaled workspace_implicit). Then implicit locks on
-  // what the call touches, the global one for root calls, scripts and commands without cwd,
-  // released when the call returns (journaled lock_implicit). Without a session hint nothing can be
-  // bound: one explicit next step.
+  // hash: its own active one (runtime sessions_overview "you"), else a coordination id derived from
+  // the session (journaled workspace_implicit), else, without a session hint, an id derived from
+  // the principal. Nothing is opened. Then implicit locks on what the call touches, the global one for root
+  // calls, scripts and commands without cwd, released when the call returns (journaled
+  // lock_implicit).
   // Delegation (#47, spec D7): the runtime says whether a workspace is a delegated child (its
   // workspace_status carries the delegation, scope included) and refuses a child conversation that
   // names another workspace (outside_delegation_scope) or whose delegation ended (delegation_ended),
@@ -552,23 +543,19 @@ export function createHub(options) {
     return delegationTargetRefusal(delegation, host, targets.unknownUpload ? [] : targets, homes) ?? { ok: true };
   }
 
-  const sessionWorkspaces = new Map(); // session hash -> {workspaceId, opened}
+  const sessionWorkspaces = new Map(); // session hash -> {workspaceId}
   async function implicitGate(host, op, args, principal, clientSession) {
     let workspaceId = args.workspace_id;
-    let opened = false;
     if (workspaceId === undefined) {
-      if (!clientSession) {
-        return { ok: false, error: 'workspace_required', next_step: `call workspace_open {"project":"${autoProject}"}, then repeat this call with its workspace_id` };
-      }
-      const known = sessionWorkspaces.get(clientSession);
-      if (known) workspaceId = known.workspaceId;
+      const known = clientSession ? sessionWorkspaces.get(clientSession) : null;
+      // Without a session hint: one stable id per principal, so its parallel calls never lock each other out.
+      if (!clientSession) workspaceId = `ws_${createHash('sha256').update(`memo-bridge/no-session|${principal.id}`).digest('base64url').slice(0, 16)}`;
+      else if (known) workspaceId = known.workspaceId;
       else {
         let found;
         try { found = await sessionWorkspace(principal, clientSession); } catch { found = { ok: false }; }
         if (found?.ok && /^ws_[A-Za-z0-9_-]{16}$/.test(String(found.workspace_id))) {
           workspaceId = found.workspace_id;
-          opened = found.opened === true;
-          if (opened) record('workspace_auto_open', null, { principal: principal.id, workspace_id: workspaceId, project: found.project ?? autoProject, op });
         } else {
           workspaceId = `ws_${createHash('sha256').update(`memo-bridge/implicit-workspace|${clientSession}`).digest('base64url').slice(0, 16)}`;
           record('workspace_implicit', null, { principal: principal.id, workspace_id: workspaceId, code: typeof found?.error === 'string' ? found.error.slice(0, 64) : null });
@@ -590,7 +577,7 @@ export function createHub(options) {
     if (held.ids.length) record('lock_implicit', OPERATOR_AGENT_IDS[host], { principal: principal.id, workspace_id: workspaceId, op,
       kinds: targets.map(t => t.kind) });
     return { ok: true, workspace_id: workspaceId, implicit: held,
-      auto: { workspace_id: workspaceId, workspace_opened: opened, lock: 'implicit, released after this call' } };
+      auto: { workspace_id: workspaceId, lock: 'implicit, released after this call' } };
   }
 
   // operator_grant (D-R4): list, request (the owner decides in Telegram), revoke. Answered here,

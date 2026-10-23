@@ -1,0 +1,25 @@
+# Memo Bridge
+
+> The owner's terminal and file editor on his Mac and his VPS (host "mac" or "vps"), plus the register of his Memo Labs projects, served as an MCP server: stdio for agents on the Mac, an OAuth-protected remote connector for ChatGPT. Find a project with projects_list (its checkout is ~/memolabs/<path_relative>), work in that checkout on a branch you create, read GitHub with gh. No workspace, claim or worktree unless the owner asks.
+
+The MCP server sends its own instructions at connection time: ChatGPT gets `CHATGPT_INSTRUCTIONS` (server/instructions.mjs), stdio clients the instructions of server/index.mjs. The files below say the same thing at more length; read the skill first.
+
+## Start here
+
+- [Agent skill](skills/memo-bridge/SKILL.md): the method in four steps and its rules, for any agent
+- [ChatGPT guide](docs/CHATGPT_GUIDE.md): the same rules in French, to paste into a ChatGPT project
+- [Claude Code skill](plugin/skills/memo-bridge-operations/SKILL.md): the default way of working, then the full task flow on request
+
+## Reference
+
+- [Operator tools](docs/OPERATOR.md): hosts, tiers, roots, locks, Telegram approvals, playbooks
+- [ChatGPT connector](docs/REMOTE_CHATGPT.md): the public endpoint, OAuth, the write gate and the `surface` setting
+- [Agent guide (French)](docs/agents/README.md): tool routing by intent, error cases, limits
+- [README](README.md): architecture, phases and every tool
+
+## Optional
+
+- [Coordinator](docs/COORDINATOR.md): Issue claims, leases and batches, used only on request
+- [Mac runner](docs/RUNNER.md): worktrees and sandboxed jobs on the Mac
+- [VPS runner](docs/RUNNER_VPS.md): queued jobs on the VPS
+- [Hub security](docs/HUB_SECURITY.md): trust boundaries of the hub

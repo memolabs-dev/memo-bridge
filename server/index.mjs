@@ -62,11 +62,15 @@ const server = new McpServer({
   version: VERSION
 }, {
   instructions: (READ_ONLY ? READ_ONLY_INSTRUCTIONS : '') + 'Memo Bridge observes registered local projects, the Mac running this plugin and a VPS reachable via SSH alias lab, ' +
-    'coordinates work between AI sessions, and runs that work on this machine. Flow for one task: workspace_open (pass its id ' +
-    'explicitly afterwards) -> sessions_overview -> task_next, or tasks_list -> task_claim (keep claim_id and the latest fence; renew with task_renew) -> ' +
-    'worktree_create with the issue -> worktree_read_file / worktree_write_file -> jobs_submit test|build|lint, then ' +
-    'job_status / job_results -> worktree_commit -> worktree_push (records a checkpoint) -> github_create_pr -> task_complete -> ' +
-    'workspace_close. After losing context call workspace_recover. Stop writing as soon as a call returns stale_lease or ' +
+    'and coordinates work between AI sessions. You already have a shell on this Mac: projects_list gives each project\'s ' +
+    'path_relative, so work in its checkout ~/memolabs/<path_relative> (or proj path <name>) on a branch you create there, with your own git; no ' +
+    'worktree by default (owner decision 2026-10-23). Use Memo Bridge to see the VPS (list_hosts, host_status), the other ' +
+    'conversations (sessions_overview) and GitHub. Its task flow is for when the owner names an Issue or asks for it, or another ' +
+    'session writes in the same checkout: workspace_open (pass its id explicitly afterwards) -> sessions_overview -> task_next, or ' +
+    'tasks_list -> task_claim (keep claim_id and the latest fence; renew with task_renew) -> worktree_create with the issue -> ' +
+    'worktree_read_file / worktree_write_file -> jobs_submit test|build|lint, then job_status / job_results -> worktree_commit -> ' +
+    'worktree_push (records a checkpoint) -> github_create_pr -> task_complete -> worktree_remove -> workspace_close. After losing ' +
+    'context call workspace_recover. Stop writing as soon as a call returns stale_lease or ' +
     'no_live_claim. Memo Bridge\'s own tools use no shell, never write outside its worktrees (project_create aside: one PROJECTS.md row and the new checkout), never write the default ' +
     'branch, never force-push, never merge and never deploy (you land your own PR yourself, as said below). Jobs run the repository\'s own test/build/lint scripts, which you ' +
     'can edit, so they are code you wrote: on macOS they run in a sandbox (writes to the worktree only, loopback network ' +

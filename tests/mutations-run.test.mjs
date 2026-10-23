@@ -64,6 +64,10 @@ function toy(t, patches, extra = {}) {
     ...extra
   });
   git(repo, 'init', '-q', '-b', 'main');
+  // No background maintenance: it can leave .git/objects/maintenance.lock in the "before" listing
+  // of the untouched-repository check and remove it afterwards (CI flake of 2026-10-23, Node 22).
+  git(repo, 'config', 'maintenance.auto', 'false');
+  git(repo, 'config', 'gc.auto', '0');
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'toy');
   const governance = temp(t, 'memo-mutations-gov-');

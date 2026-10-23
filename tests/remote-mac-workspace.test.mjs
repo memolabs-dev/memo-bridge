@@ -4,7 +4,7 @@ import { remoteStack } from './helpers/remote-stack.mjs';
 
 test('OIDC ChatGPT to authenticated Mac runtime retains workspace host across tools', async t => {
   const stack = await remoteStack(t, { runtimeHost:'mac', remote:{
-    mac_runtime_routing:'enabled', remote_writes:'enabled'
+    mac_runtime_routing:'enabled', remote_writes:'enabled', surface:'full'
   } });
   const client = await stack.client(await stack.mint());
   const opened = (await client.call('workspace_open', {

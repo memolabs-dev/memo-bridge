@@ -218,6 +218,26 @@ test('task_status, tasks_list and batch_create without a workspace follow a Mac-
     ['vps','projects_list'], ['mac','batch_create'],
     ['vps','projects_list'], ['vps','task_status']]);
 });
+// The VPS checks project_context against its own allowlist, so a Mac-only project got
+// project_not_allowed there (memo-orbit, 2026-10-22) while workspace_open placed it on the Mac.
+test('project_context follows a Mac-only project, and stays on the VPS for a VPS project', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'mac-host-context-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const calls = [];
+  const requestAgent = async (host, op, envelope) => {
+    calls.push([host, op]);
+    if (host === 'vps' && op === 'projects_list')
+      return envelope.args.search === 'cuesheet' ? { ok:true, projects:[{ name:'cuesheet', available:true }] } : macOnlyListing(envelope.args.search);
+    return { ok:true };
+  };
+  const route = createWorkspaceHostRouter({ enabled:true, stateDir:dir, requestAgent });
+  await route.call('vps','project_context',{ args:{ project:'memo-orbit', goal:'fix the activity view' }, principal });
+  await route.call('vps','project_context',{ args:{ project:'cuesheet' }, principal });
+  assert.deepEqual(calls, [
+    ['vps','projects_list'], ['mac','project_context'],
+    ['vps','projects_list'], ['vps','project_context']]);
+  assert.equal(route.bindingsCount(), 0, 'a read binds nothing');
+});
 
 // Owner console T-A2 (D-A2-1): project_create always runs on the Mac runtime, whatever host it names.
 test('project_create goes to the Mac when routing is on, and to the runtime it was sent to otherwise', async t => {

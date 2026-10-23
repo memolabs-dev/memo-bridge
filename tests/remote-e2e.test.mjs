@@ -16,7 +16,7 @@ const S1 = 'conversation-one';
 const S2 = 'conversation-two';
 
 test('stage R (remote_writes disabled): tools/list is the read set, a read works, a forged write is refused and journaled', async t => {
-  const s = await remoteStack(t);
+  const s = await remoteStack(t, { remote: { surface: 'full' } });
   const chat = await s.client(await s.mint());
   const tools = await chat.tools();
   assert.deepEqual(tools.map(tool => tool.name).sort(), sorted(REMOTE_TOOLS_READ), 'no write tool while the gate is closed');
@@ -46,7 +46,7 @@ test('stage R (remote_writes disabled): tools/list is the read set, a read works
 });
 
 test('stage W (remote_writes enabled, no root runner): a conversation claims, writes, commits and pushes; invariants hold', async t => {
-  const s = await remoteStack(t, { remote: { remote_writes: 'enabled' }, systemctl: SYSTEMCTL_NO_RUNNER });
+  const s = await remoteStack(t, { remote: { remote_writes: 'enabled', surface: 'full' }, systemctl: SYSTEMCTL_NO_RUNNER });
   const chat = await s.client(await s.mint());
   assert.deepEqual((await chat.tools()).map(tool => tool.name).sort(), sorted(REMOTE_TOOLS));
 

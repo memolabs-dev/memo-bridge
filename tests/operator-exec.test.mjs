@@ -46,7 +46,7 @@ test('environment allowlist, timeouts, working directory guard', async t => {
   assert.equal((await tools.operator_run({ argv: ['true'], timeout_s: 601 })).error, 'timeout_too_long');
   const slow = await tools.operator_run({ argv: ['sleep', '5'], timeout_s: 1 });
   assert.deepEqual([slow.ok, slow.timed_out], [true, true]);
-  // cwd: inside the read roots, a directory, not a default-branch checkout (D11).
+  // cwd: inside the read roots and a directory.
   assert.equal((await tools.operator_run({ argv: ['pwd'], cwd: p('outside') })).error, 'path_not_allowed');
   assert.equal((await tools.operator_run({ argv: ['pwd'], cwd: p('home/op/.ssh') })).error, 'path_secret');
   const ok = await tools.operator_run({ argv: ['pwd'], cwd: p('srv/app') });
@@ -57,10 +57,10 @@ test('environment allowlist, timeouts, working directory guard', async t => {
   writeFileSync(p('srv/rw/PROJECTS.md'), ['# r', '## Projets appartenant à Memo Labs', '| Name | Path | Kind | Status | Nature | Stack | Vault note |',
     '|---|---|---|---|---|---|---|', '| project | project | repo | active | infra | Node.js | - |', '## Dépôts de référence'].join('\n'));
   const guarded = createOperatorExecTools(parseOperatorPolicy({ ...raw, max_tier: 'exec', repositories: { projects_root: p('srv/rw'), layout_root: p('srv/rw') } }));
-  // D11: a write-capable command in a default-branch checkout goes to the worktree flow.
-  assert.equal((await guarded.operator_run({ argv: ['git', 'commit', '-m', 'x'], cwd: checkout })).error, 'use_dev_flow');
-  // A read-only command cannot edit tracked code: it runs, with the read roots and the secret
-  // denylist applying exactly as everywhere else (2026-10-18, owner console golden prompt D13).
+  // Owner decision 2026-10-23: a write-capable command runs in a default-branch checkout too.
+  const committed = await guarded.operator_run({ argv: ['git', 'status'], cwd: checkout });
+  assert.notEqual(committed.error, 'use_dev_flow');
+  assert.equal((await guarded.operator_run({ argv: ['touch', join(checkout, 'new.txt')], cwd: checkout })).ok, true);
   const inspected = await guarded.operator_run({ argv: ['pwd'], cwd: checkout });
   assert.equal(inspected.untrusted_content.stdout.trim(), checkout);
   // as_root never runs here: the agent sends it to the root helper (or answers this on the Mac).
