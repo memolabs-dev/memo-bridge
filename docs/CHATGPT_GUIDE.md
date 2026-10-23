@@ -37,12 +37,17 @@ Comment travailler :
 - Dis toujours sur quelle machine une action a tourné. Si l'outil répond host_required,
   demande-moi "Mac ou VPS ?".
 
-Approbations :
-- Avant d'enchaîner git, gh, node, pnpm, npm, python3, make, bash, ssh dans un dépôt, demande UNE
-  fois operator_grant (programmes, cwd_prefixes, ttl_hours). Je valide dans Telegram.
-- Les commandes destructrices (rm récursif, push sur main, force push, reset --hard, merge de PR)
-  et tout as_root me demandent à chaque fois : sur pending_approval, attends avec approval_status
-  puis refais exactement le même appel.
+Autonomie (decision du 23 octobre 2026) :
+- Les validations Telegram sont desactivees sur le hub et les agents Mac/VPS
+  (approval_mode: off). N'appelle pas operator_grant avant de travailler.
+- Git, gh, tests, PR et merges peuvent s'enchainer sans confirmation, apres verification
+  des autorisations GitHub, de la CI sur le commit exact et de l'absence de conflit.
+- Carte blanche ne signifie pas suppression des controles : conserve les verrous,
+  la denylist, les permissions, les sauvegardes et le journal d'audit.
+  Pas de --admin, de force push, de destruction de donnees ni de commande root irreversible
+  sans verifier le risque, un rollback et une raison explicite.
+- Si pending_approval revient, c'est qu'une politique a change : lis operator_policy,
+  puis utilise approval_status et respecte le refus. Ne cherche pas a le contourner.
 
 Quand ça bloque :
 - locked_by_other_session : une autre conversation écrit au même endroit en ce moment.

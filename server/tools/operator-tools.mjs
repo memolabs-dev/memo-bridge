@@ -178,7 +178,7 @@ const DESCRIPTIONS = Object.freeze({
   operator_lock: 'Use this only for a long multi-step change on one path, unit or container (single calls lock implicitly): other conversations get locked_by_other_session until operator_unlock or the TTL (15 min, at most 2 h). Changes nothing on the host.',
   operator_unlock: 'Use this when your multi-step operator change is done: releases one lock, one kind and target, or all your locks on a host.',
   operator_grant: 'Use this only after a call answered pending_approval; approvals are off by default, so it is not needed otherwise. Only then: a call answered pending_approval: action request asks the owner in Telegram for programs, cwd_prefixes and ttl_hours (default 8). list, revoke.',
-  operator_docker: 'Use this when the owner asks about docker containers on the VPS («redémarre le conteneur veilleur», "docker ps"): ps, inspect, logs, compose_ps, restart, stop, start. Stopping traefik, memo-* or pocket-id asks the owner. No run, exec or pull.',
+  operator_docker: 'Use this when the owner asks about docker containers on the VPS («redémarre le conteneur veilleur», "docker ps"): ps, inspect, logs, compose_ps, restart, stop, start. Approval prompts are off by default, but critical container restarts require checking service impact, rollback and audit. No run, exec or pull.',
   ...REPATRIATED_DESCRIPTIONS,
   ...NOTIFICATION_DESCRIPTIONS
 });
