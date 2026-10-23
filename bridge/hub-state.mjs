@@ -22,7 +22,7 @@ import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, ren
 import { isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-export const HUB_STATE_DOCUMENTS = Object.freeze(['freeze', 'grants', 'locks', 'notifications', 'workspace_routes']);
+export const HUB_STATE_DOCUMENTS = Object.freeze(['freeze', 'grants', 'locks', 'notifications', 'workspace_routes', 'checkout_leases']);
 export const HUB_STATE_VERSION = 1;
 // A document larger than this is refused on load and on save (the tables are bounded far below).
 export const HUB_STATE_MAX_BYTES = 4 * 1024 * 1024;

@@ -45,6 +45,7 @@ import { createTransfers } from './operator-transfer.mjs';
 import { operatorContent } from './operator-content.mjs';
 import { NOTIFY_LIMITS, createNotifier } from './operator-notifications.mjs';
 import { createHubState } from './hub-state.mjs';
+import { ambiguousGitTarget, createCheckoutLeases, verifiedCheckoutRoot } from './checkout-leases.mjs';
 import { NOTIFICATION_TOOLS } from '../server/tools/operator-notifications.mjs';
 import { untrusted } from './operator-output.mjs';
 
@@ -119,6 +120,13 @@ export function createHub(options) {
   });
   const locks = createOperatorLocks({ ...(operator?.now ? { now: operator.now } : {}), verifyWorkspace,
     homes: operator?.homes ?? DEFAULT_HOMES, reload: () => hubState.read('locks'), onChange: data => hubState.save('locks', data) });
+  // Opt-in until the session hint and end-to-end lease behavior have been verified on the
+  // live ChatGPT connector. A failed or corrupt durable read refuses all guarded writes.
+  if (operator?.checkoutLeasesEnabled === true && !hubState.durable) throw new Error('checkout leases require a durable hub state directory');
+  const checkoutLeases = operator?.checkoutLeasesEnabled === true ? createCheckoutLeases({
+    ...(operator?.now ? { now: operator.now } : {}), reload: () => hubState.read('checkout_leases'),
+    onChange: data => hubState.save('checkout_leases', data)
+  }) : null;
   // Repatriated tools (part 2): operator_transfer relayed here, source reads signed for the caller.
   const transfers = createTransfers({ readSource: (host, op, args, principal) => sendInternal(host, op, args, principal),
     writeDest: (host, op, args, ctx) => operatorCall(host, op, { args, principal: ctx.principal, clientSession: ctx.clientSession,
@@ -325,6 +333,49 @@ export function createHub(options) {
       options.args?.host === host
       ? { ...out, host } : out;
   }
+  // Scoped, opt-in checkout ownership. Discover the repository root from the signed
+  // read-only host snapshot, not the caller's cwd string (which may be a subdirectory).
+  // The ordinary per-call operator lock remains in place while this async check runs.
+  async function checkoutGuard(host, op, args, principal, clientSession) {
+    if (!checkoutLeases) return { ok: true };
+    if (op === 'operator_run' && ambiguousGitTarget(args.argv)) {
+      return fail('checkout_target_ambiguous'); // git -C/--git-dir can point outside cwd
+    }
+    const touched = locks.targetsOf(op, args);
+    if (touched?.error || touched?.unknownUpload) return fail('checkout_root_unverified');
+    const dirs = [];
+    for (const target of touched) {
+      if (target.kind === 'global') return fail('checkout_scope_unknown');
+      if (target.kind !== 'path') continue;
+      // A command's cwd is a directory; a file operation names a file (possibly new).
+      const isRun = op === 'operator_run' || op === 'operator_script';
+      const candidate = isRun ? target.shown : target.shown.slice(0, target.shown.lastIndexOf('/')) || '/';
+      if (!dirs.includes(candidate)) dirs.push(candidate);
+    }
+    const roots = [];
+    for (const dir of dirs) {
+      const probeArgs = { host, path: dir };
+      const id = newId();
+      const signature = signer.sign({ id, op: 'operator_snapshot', host, tier: 0, principal: principal.id, args: probeArgs });
+      const data = operator?.checkoutProbe
+        ? await operator.checkoutProbe({ host, path: dir, principal: principal.id, clientSession })
+        : await sendAgent(OPERATOR_AGENT_IDS[host], 'operator_snapshot', {
+          args: probeArgs, principal, id, operator: signature, clientSession });
+      if (data?.ok !== true) return fail('checkout_root_unverified');
+      if (!data.git?.repository) continue;
+      const root = verifiedCheckoutRoot(host, data.git.root, data.path);
+      if (!root) return fail('checkout_root_unverified');
+      if (!roots.includes(root)) roots.push(root);
+    }
+    let last = null;
+    for (const root of roots.sort()) {
+      const outcome = checkoutLeases.acquire({ host, root, principal: principal.id, clientSession });
+      if (!outcome.ok) return outcome;
+      last = outcome.lease;
+    }
+    return { ok: true, ...(last ? { checkout: { expires_at: last.expires_at, scope: 'git_checkout' } } : {}) };
+  }
+
   async function operatorCall(host, op, { args = {}, principal, requestId = null, clientSession = null } = {}) {
     if (!Object.hasOwn(OPERATOR_AGENT_IDS, host) || args?.host !== host) return fail('invalid_arguments');
     // The call's tier: operator_run with as_root is T3 and needs operator:root (spec D1).
@@ -380,6 +431,11 @@ export function createHub(options) {
       }
     }
     try {
+      if (checkoutLeases && tier > 0 && !readOnly) {
+        const lease = await checkoutGuard(host, op, args, principal, clientSession);
+        if (!lease.ok) return lease;
+        if (lease.checkout) auto = { ...auto, checkout: lease.checkout };
+      }
       return await signedCall(host, op, { args, lockedArgs, principal, requestId, clientSession, tier, readOnly, auto, frozen });
     } finally { implicit?.release(); }
   }
