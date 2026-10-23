@@ -9,14 +9,14 @@
 //  5. root check on the canonical path against the canonical roots of the policy: "r" needs a
 //     read or write root, "rw" a write root;
 //  6. for "rw" only: anything inside a .git directory is refused (git config and hooks are
-//     code: SentinelX finding, research §2), and a registered project checkout on its default
-//     branch answers use_dev_flow (D11): tracked code keeps worktree, CI and pull request.
+//     code: SentinelX finding, research §2). A project checkout is writable on any branch (owner
+//     decision 2026-10-23: the agent works in the canonical checkout; the default branch is
+//     protected on GitHub, not by a worktree flow here).
 // Matching is case-insensitive: APFS is by default, and a denylist must not be bypassed by
 // writing ".SSH". A time-of-check to time-of-use window remains between realpath and open
 // (SentinelX states the same, research §2); the tools reopen with O_NOFOLLOW to narrow it.
-import { readFile, realpath as fsRealpath, stat as fsStat } from 'node:fs/promises';
+import { realpath as fsRealpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { readProjectRegistry } from '../server/catalog.mjs';
 
 const MAX_PATH_CHARS = 4096;
 
@@ -79,53 +79,12 @@ export function lexicalPath(raw, policy) {
 
 const insideGit = path => path.split('/').some(part => part.toLowerCase() === '.git');
 
-// Read a symbolic ref file ("ref: refs/heads/main") without running Git: a checkout's
-// .git/config can name programs (core.fsmonitor, core.sshCommand) and Git is never run here.
-async function refName(file, prefix) {
-  try {
-    const text = (await readFile(file, 'utf8')).slice(0, 512).trim();
-    return text.startsWith(`ref: ${prefix}`) ? text.slice(`ref: ${prefix}`.length) : null;
-  } catch { return null; }
-}
-
-// D11. projects: async () => [{name, path}] (canonical paths of registered checkouts); by
-// default the catalog (server/catalog.mjs) of the policy's repositories section, the single
-// registry Memo Bridge already uses. Returns null or {error:'use_dev_flow', project, branch}.
-export async function repositoryGuard(canonical, { projects }) {
-  let list;
-  try { list = await projects(); } catch { return { error: 'repository_guard_unavailable' }; }
-  for (const project of list ?? []) {
-    if (typeof project?.path !== 'string' || !contained(project.path, canonical)) continue;
-    const gitDir = join(project.path, '.git');
-    let info;
-    try { info = await fsStat(gitDir); } catch { continue; }
-    if (!info.isDirectory()) continue;
-    const branch = await refName(join(gitDir, 'HEAD'), 'refs/heads/');
-    const defaultBranch = await refName(join(gitDir, 'refs', 'remotes', 'origin', 'HEAD'), 'refs/remotes/origin/');
-    const defaults = defaultBranch ? [defaultBranch] : ['main', 'master'];
-    // A detached HEAD (branch null) is treated as the default branch: fail towards the dev flow.
-    if (branch === null || defaults.includes(branch)) {
-      return { error: 'use_dev_flow', project: project.name, branch: branch ?? 'detached' };
-    }
-  }
-  return null;
-}
-
-// The registered checkouts from the catalog, for the policy's repositories section.
-export function catalogProjects(repositories, read = readProjectRegistry) {
-  if (!repositories) return async () => [];
-  return async () => {
-    const catalog = await read({ projectsRoot: repositories.projects_root, registryFile: repositories.registry_file,
-      layoutRoot: repositories.layout_root });
-    return catalog.projects.filter(p => p.available && p.path).map(p => ({ name: p.name, path: p.path }));
-  };
-}
 
 // Resolve one requested path. access: 'r' | 'rw'. mustExist: false lets a write name a new
 // file (its parent must exist). Returns {ok:true, path, requested} or {ok:false, error}.
-// Options: denylist (createDenylist(policy)), projects (repositoryGuard), realpath (tests).
+// Options: denylist (createDenylist(policy)), realpath (tests).
 export async function resolveOperatorPath(policy, raw, { access = 'r', mustExist = true, denylist = createDenylist(policy),
-  projects = catalogProjects(policy.repositories), realpath = fsRealpath } = {}) {
+  realpath = fsRealpath } = {}) {
   const requested = lexicalPath(raw, policy);
   if (requested === null) return { ok: false, error: 'invalid_path' };
   if (denylist.denied(requested)) return { ok: false, error: 'path_secret' };
@@ -145,10 +104,6 @@ export async function resolveOperatorPath(policy, raw, { access = 'r', mustExist
   if (denylist.denied(canonical)) return { ok: false, error: 'path_secret' };
   const roots = access === 'rw' ? policy.writeRoots : policy.readRoots;
   if (!roots.some(root => contained(root, canonical))) return { ok: false, error: 'path_not_allowed' };
-  if (access === 'rw') {
-    if (insideGit(canonical)) return { ok: false, error: 'git_internal' };
-    const guard = await repositoryGuard(canonical, { projects });
-    if (guard) return { ok: false, ...guard };
-  }
+  if (access === 'rw' && insideGit(canonical)) return { ok: false, error: 'git_internal' };
   return { ok: true, path: canonical, requested };
 }

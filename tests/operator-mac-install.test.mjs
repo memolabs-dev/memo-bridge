@@ -11,7 +11,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPrivateKey } from 'node:crypto';
 import { loadOperatorPolicy } from '../bridge/operator-policy.mjs';
-import { catalogProjects, createDenylist, repositoryGuard, resolveOperatorPath } from '../bridge/operator-paths.mjs';
+import { createDenylist, resolveOperatorPath } from '../bridge/operator-paths.mjs';
 import { createHub } from '../bridge/hub.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
 import { HUB_PRINCIPALS, PRINCIPAL_IDS } from '../bridge/ops.mjs';
@@ -98,11 +98,9 @@ test('dry run: key 0600 never printed, policy 0444 that operator-policy.mjs load
   assert.deepEqual([policy.frozenFile, policy.auditFile, policy.stateDir], [L.frozenFile, L.auditFile, L.stateDir]);
   assert.equal(mode(L.stateDir), 0o700);
   assert.equal(mode(L.logs), 0o700);
-  // D11 through the catalog's own reader: the registered checkout on main answers use_dev_flow.
+  // Owner decision 2026-10-23: the registered checkout on main is writable in place.
   assert.equal(out.steps.policy.registered_projects, 1);
-  const projects = catalogProjects(policy.repositories);
-  assert.deepEqual(await repositoryGuard(p('memolabs/os/app/README.md'), { projects }), { error: 'use_dev_flow', project: 'app', branch: 'main' });
-  assert.deepEqual(await resolveOperatorPath(policy, '~/memolabs/os/app/README.md', { access: 'rw' }), { ok: false, error: 'use_dev_flow', project: 'app', branch: 'main' });
+  assert.equal((await resolveOperatorPath(policy, '~/memolabs/os/app/README.md', { access: 'rw' })).ok, true);
   assert.equal((await resolveOperatorPath(policy, '~/Documents/note.txt', { access: 'rw' })).ok, true);
   // Secrets of the brief, denied on the lexical path.
   const denied = createDenylist(policy).denied;
@@ -200,8 +198,8 @@ test('live: the installed bundle connects as operator-mac through a real hub and
   assert.match(stderr, /"event":"operator_ready","host":"operator-mac","max_tier":"exec"/);
   const OWNER = HUB_PRINCIPALS[PRINCIPAL_IDS.owner];
   const policy = await hub.requestOperator('mac', 'operator_policy', { args: { host: 'mac' }, principal: OWNER });
-  assert.deepEqual([policy.ok, policy.host, policy.policy.max_tier, policy.policy.approval_mode, policy.policy.repository_guard,
-    policy.policy.root_helper], [true, 'mac', 'exec', 'dangerous', true, false]);
+  assert.deepEqual([policy.ok, policy.host, policy.policy.max_tier, policy.policy.approval_mode,
+    policy.policy.root_helper], [true, 'mac', 'exec', 'dangerous', false]);
   const note = await hub.requestOperator('mac', 'operator_read', { args: { host: 'mac', path: '~/Documents/note.txt' }, principal: OWNER });
   assert.equal(note.ok, true);
   assert.match(note.untrusted_content.content, /hello from the Mac/);

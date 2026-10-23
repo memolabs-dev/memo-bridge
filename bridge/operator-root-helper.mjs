@@ -50,7 +50,7 @@ import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 import { operatorCallTier } from '../server/coordinator/policy.mjs';
 import { isGrantApproval, needsApproval } from './operator-dangerous.mjs';
 import { checkCwd, checkRun } from './operator-exec.mjs';
-import { createDenylist, catalogProjects } from './operator-paths.mjs';
+import { createDenylist } from './operator-paths.mjs';
 import { finalizeResult, untrusted } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
 import { createDockerActions } from './operator-docker.mjs';
@@ -115,7 +115,7 @@ export function systemdRunArgv({ unit, description, argv, cwd = '/', env = {}, t
 // (createJobStore prefix 'rj'), executor (argv runner: runArgv on lab through systemd-run,
 // runArgvGroup on the Mac; tests inject a recorder).
 export function createRootHelper({ policy, verifier, guard, chain, jobs = null, executor, scriptDir,
-  projects = catalogProjects(policy.repositories), now = Date.now, random = randomBytes, log = () => {},
+  now = Date.now, random = randomBytes, log = () => {},
   docker = policy?.host === 'vps' ? createDockerActions({ now }) : null }) {
   if (!policy || !verifier || !guard || !chain || !scriptDir) throw new Error('root helper needs policy, verifier, guard, chain, scriptDir');
   if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('root helper needs a policy with max_tier root and root_helper');
@@ -189,7 +189,7 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const checked = checkRun(op === 'operator_script' ? { argv: program, timeout_s: a.timeout_s, background: a.background } : a, policy,
       { baseEnv: systemd ? {} : MAC_ROOT_ENV });
     if (!checked.ok) { if (script) await unlink(script).catch(() => {}); return checked; }
-    const cwd = await checkCwd(policy, a.cwd, { denylist, projects });
+    const cwd = await checkCwd(policy, a.cwd, { denylist });
     if (!cwd.ok) { if (script) await unlink(script).catch(() => {}); return cwd; }
     if (!systemd) return executeDirect(op, checked, cwd.path, script);
     const unit = `memo-op-${random(6).toString('hex')}`;

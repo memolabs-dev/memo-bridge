@@ -15,7 +15,7 @@ import { registerCoordinatorTools } from '../server/tools/coordinator-tools.mjs'
 import { END_OPS, LEARNING_DEFAULTS, LEARNING_REASONS, LEARNING_REVIEW_MAX_BYTES, TURN_GAP_MS, advance, learningReview,
   learningThresholds } from '../server/coordinator/learning.mjs';
 import { MULTI_SESSION_INSTRUCTIONS, LEARNING_INSTRUCTIONS } from '../server/instructions.mjs';
-import { REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
+import { REMOTE_FULL_INSTRUCTIONS as REMOTE_INSTRUCTIONS } from '../bridge/remote-surface.mjs';
 import { PROJECT_ORIGINS, coordinatorOn, sequentialLedger, stubLedger, stubProjects, tempStateDir } from './helpers/coordinator-fixture.mjs';
 
 const ISSUE = 'memolabs-dev/drop#7';

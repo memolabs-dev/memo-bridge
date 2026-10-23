@@ -22,6 +22,8 @@
 //                       clock_tolerance_sec?, ceiling?}
 //   projects           remote project allowlist (names or owner/repo), REQ-P5-09
 //   remote_writes      "disabled" | "enabled" (D7)
+//   surface            "simple" | "full" (default "simple"): what ChatGPT is served, the operator
+//                       tools and the project register, or the dev-flow tools too (2026-10-23)
 //   session_binding    "warn" | "block" | "enforce" (D8; enforce: multi-session D-MS3)
 //   client_cert        {mode: "require" | "log" | "off", info_header, expected_san} (U-P5-08):
 //                       require refuses any request carrying credentials without Traefik's
@@ -31,6 +33,7 @@
 //   rate_limits        {read_per_min, write_per_min, execute_per_min, in_flight,
 //                       unauthorized_per_min_per_ip}
 import { CAPABILITIES } from '../server/coordinator/policy.mjs';
+import { REMOTE_SURFACES } from '../server/registry.mjs';
 import { BASELINE_SCOPE, REMOTE_WRITES, createOidcVerifier } from './oidc.mjs';
 import { parseRemotePolicy, SOFT_DEADLINE } from './write-gate.mjs';
 import { RATE_DEFAULTS } from './ratelimit.mjs';
@@ -52,7 +55,7 @@ export const CLIENT_CERT_MODES = Object.freeze(['off', 'log', 'require']);
 
 const KEYS = Object.freeze({
   top: ['version', 'managed_by', 'remote_enabled', 'listen', 'public_host', 'allowed_origins', 'trusted_proxies', 'oidc', 'projects',
-    'remote_writes', 'session_binding', 'client_cert', 'budgets', 'rate_limits', 'mac_runtime_routing'],
+    'remote_writes', 'surface', 'session_binding', 'client_cert', 'budgets', 'rate_limits', 'mac_runtime_routing'],
   listen: ['host', 'port'],
   oidc: ['issuer', 'jwks_uri', 'audience', 'owner_sub', 'allowed_client_ids', 'required_scope', 'max_token_age_sec',
     'clock_tolerance_sec', 'ceiling'],
@@ -133,6 +136,8 @@ function parse(raw) {
   if (!['enabled', 'disabled'].includes(macRuntimeRouting)) bad('mac_runtime_routing');
   const remoteWrites = raw.remote_writes ?? 'disabled';
   if (!REMOTE_WRITES.includes(remoteWrites)) bad('remote_writes');
+  const servedSurface = raw.surface ?? 'simple';
+  if (!REMOTE_SURFACES.includes(servedSurface)) bad('surface');
   const verifierOptions = {
     issuer: oidc.issuer, resource, ownerSub: oidc.owner_sub, allowedClientIds: oidc.allowed_client_ids,
     ...(oidc.jwks_uri !== undefined ? { jwksUri: oidc.jwks_uri } : {}),
@@ -170,7 +175,7 @@ function parse(raw) {
   try { policy = parseRemotePolicy(raw); } catch { bad('projects or session_binding'); }
   if (policy.projects.length === 0) bad('projects');
   const surface = Object.freeze({
-    owner_sub: oidc.owner_sub, allowed_client_ids: oidc.allowed_client_ids, remote_writes: remoteWrites,
+    owner_sub: oidc.owner_sub, allowed_client_ids: oidc.allowed_client_ids, remote_writes: remoteWrites, surface: servedSurface,
     ...(raw.mac_runtime_routing !== undefined ? { mac_runtime_routing: macRuntimeRouting } : {}),
     ...(oidc.ceiling !== undefined ? { ceiling: [...oidc.ceiling] } : {}),
     ...(budgets.result_max_bytes !== undefined ? { result_budget_bytes: budgets.result_max_bytes } : {}),

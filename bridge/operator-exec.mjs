@@ -3,8 +3,7 @@
 // operator_run takes an argv array and spawns it with shell:false: ";", "|", "$()" and newlines
 // are argument bytes (R-P6-03, AC-P6-01). The environment is a fixed safe base plus only the
 // names the host policy allows (never PATH, LD_*, NODE_* and the like, operator-policy.mjs). The
-// working directory must be inside the read roots and not inside a registered project checkout
-// on its default branch (use_dev_flow, D11). Foreground runs default to 30 s, at most 600 s;
+// working directory must be inside the read roots. Foreground runs default to 30 s, at most 600 s;
 // longer runs need background (up to 3600 s) and are read back with operator_job_status from
 // results stored on disk (operator-jobs.mjs). as_root runs never reach this module: the agent
 // forwards them to the root helper (bridge/operator-root-helper.mjs).
@@ -14,7 +13,7 @@ import { userInfo } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { UNIT_RE } from './operator-policy.mjs';
 import { readOnlyCommand } from './operator-dangerous.mjs';
-import { createDenylist, catalogProjects, repositoryGuard, resolveOperatorPath } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath } from './operator-paths.mjs';
 import { SAFE_ENV, runArgv } from './operator-tools.mjs';
 import { untrusted } from './operator-output.mjs';
 
@@ -61,24 +60,14 @@ export function checkRun(args, policy, { baseEnv = SAFE_ENV } = {}) {
   return { ok: true, argv: [...argv], env, timeoutS, background };
 }
 
-// The working directory: inside the read roots, a directory, and for a write-capable command
-// not a default-branch checkout (D11).
-//
-// D11 protects tracked code from being edited outside the worktree flow. A read-only command
-// cannot edit it, and it has already passed the read roots and the secret denylist above; the
-// same classification already dispenses it from owner approval at the hub, so it is not sent
-// to the heavy flow for an inspection either (2026-10-18: `git status` in a checkout on main
-// answered `use_dev_flow`, while the owner console's golden prompt D13 expects it to run).
-// `readOnly` is passed by the caller, never guessed here: a script is never read-only.
-export async function checkCwd(policy, raw, { denylist, projects, readOnly = false }) {
+// The working directory: inside the read roots and a directory. A project checkout is a valid
+// cwd on any branch (owner decision 2026-10-23: no worktree flow is imposed).
+export async function checkCwd(policy, raw, { denylist }) {
   if (raw === undefined) return { ok: true, path: '/' };
-  const at = await resolveOperatorPath(policy, raw, { access: 'r', denylist, projects });
+  const at = await resolveOperatorPath(policy, raw, { access: 'r', denylist });
   if (!at.ok) return at;
   const info = await lstat(at.path);
   if (!info.isDirectory()) return fail('not_a_directory');
-  if (readOnly) return { ok: true, path: at.path };
-  const guard = await repositoryGuard(at.path, { projects });
-  if (guard) return fail(guard.error, guard.project ? { project: guard.project, branch: guard.branch } : {});
   return { ok: true, path: at.path };
 }
 
@@ -86,11 +75,11 @@ export async function checkCwd(policy, raw, { denylist, projects, readOnly = fal
 // policy (read roots, secret denylist, symlinks resolved), relative ones from cwd. A missing
 // file is the program's to report. Returns null or a refusal.
 const PATH_REFUSALS = new Set(['path_secret', 'path_not_allowed', 'invalid_path', 'permission_denied']);
-export async function readOnlyPaths(policy, paths, cwd, { denylist, projects }) {
+export async function readOnlyPaths(policy, paths, cwd, { denylist }) {
   for (const raw of paths.slice(0, 64)) {
     if (typeof raw !== 'string' || raw === '') continue;
     const candidate = raw.startsWith('/') || raw === '~' || raw.startsWith('~/') ? raw : join(cwd, raw);
-    const at = await resolveOperatorPath(policy, candidate, { access: 'r', denylist, projects });
+    const at = await resolveOperatorPath(policy, candidate, { access: 'r', denylist });
     if (!at.ok && PATH_REFUSALS.has(at.error)) return fail(at.error, { path: raw.slice(0, 200) });
   }
   return null;
@@ -110,7 +99,7 @@ export function hardenReadOnlyGit(argv, env) {
     GIT_CONFIG_KEY_1: 'core.pager', GIT_CONFIG_VALUE_1: 'cat' } };
 }
 
-export function createOperatorExecTools(policy, { run = runArgv, jobs, projects = catalogProjects(policy.repositories),
+export function createOperatorExecTools(policy, { run = runArgv, jobs,
   platform = process.platform, now = Date.now, baseEnv = userRunEnv(policy), random = randomBytes,
   scriptDir = join(policy.stateDir, 'scripts') } = {}) {
   const denylist = createDenylist(policy);
@@ -137,10 +126,10 @@ export function createOperatorExecTools(policy, { run = runArgv, jobs, projects 
       let checked = checkRun(args, policy, { baseEnv });
       if (!checked.ok) return checked;
       const ro = readOnlyCommand(checked.argv);
-      const cwd = await checkCwd(policy, args.cwd, { denylist, projects, readOnly: ro !== null });
+      const cwd = await checkCwd(policy, args.cwd, { denylist });
       if (!cwd.ok) return cwd;
       if (ro) {
-        const refused = await readOnlyPaths(policy, ro.paths, cwd.path, { denylist, projects });
+        const refused = await readOnlyPaths(policy, ro.paths, cwd.path, { denylist });
         if (refused) return refused;
         if (ro.program === 'git') checked = { ...checked, ...hardenReadOnlyGit(checked.argv, checked.env) };
       }
@@ -156,7 +145,7 @@ export function createOperatorExecTools(policy, { run = runArgv, jobs, projects 
       if (!interp) return fail('invalid_arguments');
       const shape = checkRun({ argv: [interp.program], env: args.env, timeout_s: args.timeout_s, background: args.background }, policy, { baseEnv });
       if (!shape.ok) return shape;
-      const cwd = await checkCwd(policy, args.cwd, { denylist, projects });
+      const cwd = await checkCwd(policy, args.cwd, { denylist });
       if (!cwd.ok) return cwd;
       await mkdir(scriptDir, { recursive: true, mode: 0o700 });
       const file = join(scriptDir, `${random(12).toString('hex')}.${interp.ext}`);

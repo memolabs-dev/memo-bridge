@@ -1,8 +1,7 @@
 // T1 operator tools: file writes inside the write roots (Phase 6, TODO-P6-08, spec D9, D11).
 //
 // Every path goes through resolveOperatorPath with access "rw": canonical path inside a write
-// root, secret denylist, nothing inside a .git directory, and no file of a registered project
-// checkout on its default branch (use_dev_flow). On top of that:
+// root, secret denylist and nothing inside a .git directory. On top of that:
 //  - edits are computed in memory, optionally checked by a named validator preset (a fixed
 //    argv run on a temporary copy, never a caller string), then written to a temporary file in
 //    the same directory with the original mode and owner, fsynced and renamed over the file:
@@ -18,7 +17,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { constants as fsConstants, createReadStream } from 'node:fs';
 import { chmod, copyFile, cp, lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { createDenylist, catalogProjects, resolveOperatorPath, contained } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath, contained } from './operator-paths.mjs';
 import { runArgv, searchMatcher } from './operator-tools.mjs';
 import { UPLOAD_CHUNK_BYTES, UPLOAD_MAX_BYTES } from '../server/tools/operator-tools.mjs';
 
@@ -98,12 +97,17 @@ export function applyEdit(current, args) {
   }
 }
 
-// deps: run (argv runner, validators and tar), projects (D11 source), now, uid (process uid),
+// deps: run (argv runner, validators and tar), now, uid (process uid),
 // random (ids), stateDir (uploads).
-export function createOperatorWriteTools(policy, { run = runArgv, projects = catalogProjects(policy.repositories), now = Date.now,
+// A checkout's root (the directory holding .git) is never moved, overwritten or deleted: since the
+// repository guard went (owner decision 2026-10-23) this keeps a whole repository out of reach of
+// one call, as .git internals already are (resolveOperatorPath, git_internal).
+const isCheckout = path => lstat(join(path, '.git')).then(() => true, () => false);
+
+export function createOperatorWriteTools(policy, { run = runArgv, now = Date.now,
   uid = process.getuid?.() ?? -1, random = randomBytes, stateDir = policy.stateDir } = {}) {
   const denylist = createDenylist(policy);
-  const resolve = (raw, mustExist = true) => resolveOperatorPath(policy, raw, { access: 'rw', mustExist, denylist, projects });
+  const resolve = (raw, mustExist = true) => resolveOperatorPath(policy, raw, { access: 'rw', mustExist, denylist });
   const tmpName = dir => join(dir, `.memo-tmp-${random(8).toString('hex')}`);
   const isRoot = path => policy.writeRoots.includes(path);
 
@@ -297,9 +301,11 @@ export function createOperatorWriteTools(policy, { run = runArgv, projects = cat
       const from = await resolve(src);
       if (!from.ok) return from;
       if (isRoot(from.path)) return fail('root_protected');
+      if (await isCheckout(from.path)) return fail('git_internal');
       const to = await resolve(dst, false);
       if (!to.ok) return to;
       if (contained(from.path, to.path)) return fail('invalid_arguments', { detail: 'destination inside source' });
+      if (await isCheckout(to.path)) return fail('git_internal');
       const exists = await lstat(to.path).then(s => s, () => null);
       let backupPath = null;
       if (exists) {
@@ -321,6 +327,7 @@ export function createOperatorWriteTools(policy, { run = runArgv, projects = cat
       const info = await lstat(from.path);
       if (info.isDirectory() && !recursive) return fail('recursive_required');
       if (contained(from.path, to.path)) return fail('invalid_arguments', { detail: 'destination inside source' });
+      if (await isCheckout(to.path)) return fail('git_internal');
       const exists = await lstat(to.path).then(s => s, () => null);
       let backupPath = null;
       if (exists) {
@@ -348,6 +355,7 @@ export function createOperatorWriteTools(policy, { run = runArgv, projects = cat
       const at = await resolve(path);
       if (!at.ok) return at;
       if (isRoot(at.path)) return fail('root_protected');
+      if (await isCheckout(at.path)) return fail('git_internal');
       const info = await lstat(at.path);
       if (info.isDirectory() && !recursive) return fail('recursive_required');
       let backupPath;
