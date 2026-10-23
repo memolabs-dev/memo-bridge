@@ -71,6 +71,14 @@ A separate [personal remote OAuth resource-server prototype](PERSONAL_REMOTE_MCP
 
 The GPU inventory tool detects names and driver versions, as available, for NVIDIA, AMD, Intel or unknown manufacturers. The underlying read-only Windows CIM query is not proof of GPU compute support. VRAM is intentionally unknown when the source cannot provide a trustworthy measure. NVIDIA-specific `nvidia-smi` is only an optional fallback. **CUDA, DirectML, Vulkan, ROCm and GPU workloads are not installed or enabled by W1.** They belong to later capability-driven, explicitly authorized runner work (#73).
 
+## Native Windows acceptance
+
+A dedicated **real-Windows** smoke test (not a Linux simulation) and proposed
+GitHub Actions workflow are prepared in [WINDOWS_NATIVE_ACCEPTANCE.md](WINDOWS_NATIVE_ACCEPTANCE.md).
+On Windows after building both bundles, run `pnpm run smoke:windows`.
+The workflow must still be installed through the approved protected-path process;
+until that happens, native Windows CI is **not** green or proven.
+
 ## Validation and known limitations
 
 ```powershell

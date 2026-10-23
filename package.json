@@ -31,7 +31,8 @@
     "build:standalone": "esbuild standalone/index.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/standalone/index.mjs",
     "install:standalone": "node scripts/install-standalone.mjs",
     "smoke:standalone": "node tests/standalone-smoke.mjs",
-    "build:personal-remote": "esbuild standalone/personal-cli.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/standalone/personal-cli.mjs"
+    "build:personal-remote": "esbuild standalone/personal-cli.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/standalone/personal-cli.mjs",
+    "smoke:windows": "node scripts/windows-native-check.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
