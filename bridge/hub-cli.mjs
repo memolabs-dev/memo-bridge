@@ -65,7 +65,10 @@ for (const id of ['operator-mac', 'operator-vps']) if (existsSync(`${dir}/${id}.
 const freezeFile = env.MEMO_BRIDGE_OPERATOR_FREEZE_FILE || '/etc/memo-bridge/operator-FROZEN';
 if (!isAbsolute(freezeFile)) throw new Error('MEMO_BRIDGE_OPERATOR_FREEZE_FILE must be an absolute path');
 const approvalModes = env.MEMO_BRIDGE_OPERATOR_APPROVAL ? JSON.parse(env.MEMO_BRIDGE_OPERATOR_APPROVAL) : undefined;
-const operator = existsSync(`${dir}/operator-signing.key`) ? { signingKeyPem: get('operator-signing.key'), freezeFile, approvalModes } : null;
+const operator = existsSync(`${dir}/operator-signing.key`) ? {
+  signingKeyPem: get('operator-signing.key'), freezeFile, approvalModes,
+  checkoutLeasesEnabled: env.MEMO_BRIDGE_CHECKOUT_LEASES === 'enabled'
+} : null;
 const stateDir = env.MEMO_BRIDGE_HUB_STATE_DIR || (env.STATE_DIRECTORY ? env.STATE_DIRECTORY.split(':')[0] : '') || null;
 if (stateDir && !isAbsolute(stateDir)) throw new Error('MEMO_BRIDGE_HUB_STATE_DIR must be an absolute path');
 const hub = createHub({ tlsKey, tlsCert, tokenSha256, readOnlyTokenSha256, allowedAgentKeys, runtimeHost, mutatingOps, audit, operator, stateDir });
