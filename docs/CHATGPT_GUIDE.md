@@ -79,7 +79,11 @@ vraiment différents. Ne sors jamais du projet que j'ai nommé.
 
 ChatGPT garde en mémoire la liste d'outils et les instructions du connecteur. Après chaque mise à
 jour du hub, rafraîchir le connecteur Memo Bridge dans les réglages de ChatGPT, pour qu'il récupère
-les nouveaux outils et les nouvelles instructions. OpenAI le dit pour les métadonnées d'un serveur
+les nouveaux outils et les nouvelles instructions.
+
+La procédure de validation réelle est dans `CHATGPT_CATALOG_CONTRACT.md` : confirmer 26 outils
+**effectivement visibles et appelables** avant de déclarer le déploiement validé.
+Ne pas confondre catalogue du code et métadonnées en cache côté ChatGPT. OpenAI le dit pour les métadonnées d'un serveur
 MCP : « refresh the custom MCP server connection ».
 
 ## Exemples de demandes
