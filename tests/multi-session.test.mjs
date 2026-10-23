@@ -516,7 +516,7 @@ test('ChatGPT guide: the first 512 characters say what Memo Bridge is and how to
   // 2026-10-23 14:06: ChatGPT called the unserved github_* tools 29 times. GitHub goes through gh.
   for (const word of ['no GitHub tool', 'gh pr list', 'gh pr checks', 'gh run list', 'gh run view'])
     assert.ok(REMOTE_INSTRUCTIONS.includes(word), word);
-  assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(' gh,') || OPERATOR_FLOW_INSTRUCTIONS.includes(' gh '), 'gh is in the grant list');
+  assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(' gh,') || OPERATOR_FLOW_INSTRUCTIONS.includes(' gh '), 'gh runs without approval');
   assert.equal(/[\u2013\u2014]/.test(REMOTE_INSTRUCTIONS), false, 'no dashes');
   const guide = readFileSync(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
   for (const word of ['operator_run', 'worktree', 'branche', 'Mac ou VPS', 'gh pr list', 'gh run list']) assert.ok(guide.includes(word), `guide: ${word}`);

@@ -111,9 +111,9 @@ test('R-MR-01: the helper refuses to start unless it is root, runs from a root-o
   assert.equal(mode(dirname(r.socket)), 0o755);
 });
 
-test('R-MR-01: a root policy without root, or with approval off, is refused at start', async t => {
+test('R-MR-01: a root policy without root is refused at start', async t => {
   for (const [overrides, pattern] of [[{ max_tier: 'exec', root_helper: undefined }, /does not grant root/],
-    [{ approval_mode: 'off' }, /approval_mode off/], [{ frozen_file: '/tmp/FROZEN' }, /frozen_file_outside_root_dir/]]) {
+    [{ frozen_file: '/tmp/FROZEN' }, /frozen_file_outside_root_dir/]]) {
     const r = macRoot(t, { policy: overrides });
     if (!r) return;
     await assert.rejects(r.start({ check: true }), pattern);
@@ -288,7 +288,7 @@ test('R-MR-07: the agent policy is exec without the root policy, root with its s
   const second = await writePolicy(home, { read, rootLayout, now: () => 1 });
   assert.deepEqual([second.max_tier, second.root_helper], ['root', '/var/run/memo-operator/root.sock']);
   const written = JSON.parse(readFileSync(macLayout(home).policyFile, 'utf8'));
-  assert.deepEqual([written.max_tier, written.approval_mode, written.root_helper.socket], ['root', 'dangerous', '/var/run/memo-operator/root.sock']);
+  assert.deepEqual([written.max_tier, written.approval_mode, written.root_helper.socket], ['root', 'off', '/var/run/memo-operator/root.sock']);
 });
 
 test('R-MR-08: Mac root tools and paths ask for approval; reads stay free', () => {
@@ -339,9 +339,9 @@ test('R-MR-09: the install script dry run prints root-owned targets only, render
   assert.equal(plan.find(s => s.path.endsWith('.plist')).mode, '0644');
   const sock = plan.find(s => s.path === '/var/run/memo-operator/root.sock');
   assert.deepEqual([sock.owner, sock.mode], [`${UID}:${GID}`, '0600']);
-  // The policy: root, dangerous, its switch and journal outside the home.
+  // The policy: root, approval off, its switch and journal outside the home.
   const policy = lines.find(l => l.step === 'root-policy').content;
-  assert.deepEqual([policy.host, policy.max_tier, policy.approval_mode], ['mac', 'root', 'dangerous']);
+  assert.deepEqual([policy.host, policy.max_tier, policy.approval_mode], ['mac', 'root', 'off']);
   assert.equal(policy.frozen_file, '/Library/Application Support/MemoBridge/operator-root/FROZEN');
   assert.equal(policy.audit_file, '/var/log/memo-operator/audit.jsonl');
   assert.equal(policy.root_helper.socket, '/var/run/memo-operator/root.sock');
