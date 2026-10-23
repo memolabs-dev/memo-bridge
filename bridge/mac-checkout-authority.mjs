@@ -67,7 +67,8 @@ export function createMacCheckoutAuthority({ stateDir, resolver = checkoutRootFo
     now,
     reload: () => state.read('checkout_leases'),
     onChange: data => state.save('checkout_leases', data),
-    transaction: fn => state.exclusive('checkout_leases', fn)
+    transaction: fn => state.exclusive('checkout_leases', fn),
+    requireExplicitRecovery: true
   });
   function act(kind, { root, session, principal }) {
     if (typeof root !== 'string' || !isAbsolute(root)) return fail('checkout_root_unverified');
