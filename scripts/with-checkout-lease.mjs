@@ -32,9 +32,21 @@ if (!first.ok) stop('Checkout is unavailable: ' + first.error, 73);
 
 let child;
 let finished = false;
+// A descendant may remain in the detached process group after the direct
+// child exits. Always target the group, including during that interval.
+const groupAlive = () => {
+  if (!Number.isSafeInteger(child?.pid) || child.pid <= 0) return false;
+  try { process.kill(-child.pid, 0); return true; }
+  catch (error) { return error?.code !== 'ESRCH'; }
+};
 const signalChild = sig => {
-  if (!child || child.exitCode !== null) return;
-  try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* exited */ } }
+  if (!child) return;
+  try {
+    if (groupAlive()) process.kill(-child.pid, sig);
+    else if (child.exitCode === null) child.kill(sig);
+  } catch {
+    if (child.exitCode === null) try { child.kill(sig); } catch { /* exited */ }
+  }
 };
 const heartbeat = setInterval(() => {
   if (finished) return;
@@ -63,7 +75,20 @@ const exit = (code, signal) => {
   if (!released.ok) console.error('Checkout lease release requires review: ' + released.error);
   process.exitCode = released.ok ? (code ?? (signal ? 128 + (signal === 'SIGINT' ? 2 : 15) : 1)) : 74;
 };
-child.once('exit', exit);
+// Child "exit" does NOT mean all members of its process group have stopped.
+ // Keep the lease and heartbeat until the entire group has drained; an
+ // orphaned descendant must not silently hand the checkout to another agent.
+child.once('exit', (code, signal) => {
+  const inspectGroup = () => {
+    if (finished) return;
+    if (groupAlive()) {
+      setTimeout(inspectGroup, 200);
+      return;
+    }
+    exit(code, signal);
+  };
+  inspectGroup();
+});
 child.once('error', error => {
   console.error('Supervised agent failed to launch: ' + (error?.code || 'spawn_failed'));
   exit(1, null);

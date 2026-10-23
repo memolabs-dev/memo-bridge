@@ -156,3 +156,75 @@ test('two independent local processes contend and the refused one never launches
   assert.equal(authority.guard('operator_edit', { path: join(repo, 'new') },
     { principal: 'oidc:owner', session: C }).ok, true);
 });
+
+test('regression: a supervised child group must retain the checkout until its surviving grandchild exits',
+  { skip: process.platform !== 'darwin' }, async t => {
+  const { repo, stateDir } = fixture(t);
+  const script = new URL('../scripts/with-checkout-lease.mjs', import.meta.url).pathname;
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const workerCode = "setTimeout(() => require('node:fs').writeFileSync('GRANDCHILD_DONE', 'ok'), 850)";
+  const parentCode = "const {spawn}=require('node:child_process');" +
+    "spawn(process.execPath,['-e'," + JSON.stringify(workerCode) + "],{stdio:'ignore'}).unref();";
+  const wrap = code => spawn(process.execPath,
+    [script, '--repo', repo, '--state-dir', stateDir, '--', process.execPath, '-e', code],
+    { stdio: ['ignore','ignore','pipe'] });
+  const holder = wrap(parentCode);
+  let holderErr = '';
+  holder.stderr.on('data', data => { holderErr += data.toString(); });
+  t.after(() => { try { holder.kill('SIGTERM'); } catch { /* already finished */ } });
+  const leaseFile = join(stateDir, 'checkout_leases.json');
+  const started = Date.now();
+  while (!existsSync(leaseFile)) {
+    if (Date.now() - started > 4000) assert.fail('holder did not acquire checkout');
+    await delay(25);
+  }
+  await delay(250); // parent has exited; grandchild should still be writing later
+  const contender = wrap("require('node:fs').writeFileSync('UNAUTHORIZED_CONTENDER','bad')");
+  let refusedErr = '';
+  contender.stderr.on('data', data => { refusedErr += data.toString(); });
+  const contenderExit = await new Promise((resolve, reject) => {
+    contender.once('error', reject);
+    contender.once('exit', resolve);
+  });
+  assert.equal(contenderExit, 73, refusedErr);
+  assert.equal(existsSync(join(repo, 'UNAUTHORIZED_CONTENDER')), false);
+  const done = await Promise.race([
+    new Promise(resolve => holder.once('exit', code => resolve({ code }))),
+    delay(4000).then(() => ({ timeout: true }))
+  ]);
+  assert.equal(done.timeout, undefined, 'wrapper must finish once its process group drains');
+  assert.equal(existsSync(join(repo, 'GRANDCHILD_DONE')), true,
+    'supervisor must not release before its descendant has finished');
+  assert.equal(done.code, 0, holderErr);
+});
+
+test('supervisor SIGTERM after the direct child exits stops surviving process-group descendants',
+  { skip: process.platform !== 'darwin' }, async t => {
+  const { repo, stateDir } = fixture(t);
+  const script = new URL('../scripts/with-checkout-lease.mjs', import.meta.url).pathname;
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const grandchildCode = "setTimeout(() => require('node:fs').writeFileSync('SHOULD_NOT_WRITE_AFTER_TERM','bad'), 1800)";
+  const parentCode = "const {spawn}=require('node:child_process');" +
+    "spawn(process.execPath,['-e'," + JSON.stringify(grandchildCode) + "],{stdio:'ignore'}).unref();";
+  const holder = spawn(process.execPath, [script, '--repo', repo, '--state-dir', stateDir,
+    '--', process.execPath, '-e', parentCode], { stdio: ['ignore','ignore','pipe'] });
+  t.after(() => { try { holder.kill('SIGTERM'); } catch { /* finished */ } });
+  let stderr = '';
+  holder.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  const start = Date.now();
+  while (!existsSync(join(stateDir, 'checkout_leases.json'))) {
+    if (Date.now() - start > 4000) assert.fail('supervisor failed to acquire checkout');
+    await delay(25);
+  }
+  await delay(280); // direct parent has exited; grandchild is still in the group
+  holder.kill('SIGTERM');
+  const outcome = await Promise.race([
+    new Promise(resolve => holder.once('exit', code => resolve({ code }))),
+    delay(3500).then(() => ({ timeout: true }))
+  ]);
+  assert.equal(outcome.timeout, undefined, stderr);
+  assert.equal(existsSync(join(repo, 'SHOULD_NOT_WRITE_AFTER_TERM')), false);
+  const authority = createMacCheckoutAuthority({ stateDir });
+  assert.equal(authority.guard('operator_edit', { path: join(repo, 'after-term') },
+    { principal: 'oidc:owner', session: C }).ok, true, 'group should be stopped before release');
+});
