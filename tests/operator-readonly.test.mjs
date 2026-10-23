@@ -190,7 +190,7 @@ test('RR-17 hub: when the runtime cannot give a workspace, the session still get
   assert.notEqual(other.auto.workspace_id, out.auto.workspace_id);
 });
 
-test('RR-14: the instructions and the skill teach the work-session grant, the read-only path and the destructive list', async () => {
+test('RR-14: instructions and skills teach approval-free execution, read-only paths and safety checks', async () => {
   const { OPERATOR_FLOW_INSTRUCTIONS } = await import('../server/instructions.mjs');
   const { REMOTE_INSTRUCTIONS } = await import('../bridge/remote-surface.mjs');
   const { readFileSync: read } = await import('node:fs');
@@ -202,6 +202,13 @@ test('RR-14: the instructions and the skill teach the work-session grant, the re
     assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(word), word);
   }
   for (const word of ['operator_grant', 'operator_docker', 'read-only commands']) assert.ok(skill.includes(word), `skill: ${word}`);
+  assert.ok(skill.includes('Approvals are off on both hosts'), 'no stale per-session Telegram approval instruction in skill');
+  assert.ok(!skill.includes('Start a work session with ONE'), 'obsolete grant instruction must be removed');
+  const guide = read(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
+  assert.ok(guide.includes("N'appelle pas operator_grant"), 'guide must explain approval-free workflow');
+  assert.ok(!guide.includes('Je valide dans Telegram'), 'guide must not ask for Telegram confirmation');
+  const security = read(new URL('../docs/HUB_SECURITY.md', import.meta.url), 'utf8');
+  assert.ok(security.includes('80-operator.conf'), 'live hub override must be documented');
   for (const word of ['Standing approvals', '/grant', '/revoke', 'operator_docker', 'Read-only commands']) assert.ok(doc.includes(word), `doc: ${word}`);
   for (const text of [OPERATOR_FLOW_INSTRUCTIONS, skill, doc]) assert.equal(/[\u2013\u2014]/.test(text), false, 'no dashes');
 });

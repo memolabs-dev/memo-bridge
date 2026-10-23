@@ -183,6 +183,16 @@ Live bench of 2026-10-14 (19:57 and 20:04): "the 5 most CPU-hungry processes on 
   result says so in `note`. Operator tools still act on the host they name.
 - Refusals that the model can fix carry `next_step`.
 
+## Standing approvals (historical workflow, superseded 2026-10-23)
+
+The owner turned approvals off on both host policies and explicitly set the hub's
+`MEMO_BRIDGE_OPERATOR_APPROVAL` to `{"vps":"off","mac":"off"}` (PR #274).
+Do **not** request an `operator_grant` or wait for Telegram while those policies
+remain off. The steps below document the legacy flow if approvals are re-enabled;
+they are not current operating instructions. Root and destructive actions can now
+execute without a Telegram prompt: enforce risk review, tests, safeguards and audit
+before choosing an irreversible action.
+
 ## Standing approvals (owner decision 2026-10-14)
 
 Measured on SentinelX over 1.5 days: `gh` 632, `git` 441, `ssh` 185 calls. Asking Telegram for

@@ -18,9 +18,15 @@ Operator tools and their rules: `docs/OPERATOR.md`.
   `MEMO_BRIDGE_HUB_MUTATING_OPS=owner`. The read-only bearer reaches none.
 - **Freeze.** The hub refuses every operator call above T0 while `/etc/memo-bridge/operator-FROZEN`
   exists (`MEMO_BRIDGE_OPERATOR_FREEZE_FILE`) or the owner sent `/freeze` to the Telegram bot.
-- **Approvals.** `MEMO_BRIDGE_OPERATOR_APPROVAL` (default `dangerous` for both hosts) parks a
-  dangerous call until the owner answers in Telegram (`MEMO_BRIDGE_TELEGRAM_CHAT_ID`, credential
-  `telegram-bot`). Pending approvals live in memory.
+- **Approvals.** The built-in default of `MEMO_BRIDGE_OPERATOR_APPROVAL` is `dangerous`, but
+  the owner explicitly chose `{"vps":"off","mac":"off"}` on 2026-10-23. The lab-infra managed
+  systemd drop-in `80-operator.conf` sets that value for the live hub. Mac and VPS host policies
+  also report `approval_mode: off`; Telegram confirmations are not required in this mode.
+  The Telegram bot may still deliver notifications and freeze commands. Changing the approval
+  mode does NOT change OAuth permissions, host path denylist, freeze controls, rate limits,
+  signatures or GitHub protections. It DOES remove the human checkpoint from destructive
+  operations; preserve independent CI/merge checks, reversible deployment plans and auditing.
+  A missing override on a fresh installation still means the built-in `dangerous` default.
 - **Mac transport.** `operator-mac` is a third launchd job, `dev.memolabs.memo-operator-agent`,
   through the existing tunnel (`wss://127.0.0.1:9444/agent`, same pinned CA as the probe agent).
   No new port, no new route. Installed by `deploy/mac/install-operator-agent.sh`.
