@@ -62,3 +62,18 @@ test('path-scoped per-call locks allow unrelated repositories, which a durable f
   a.release();
   other.release();
 });
+
+test('reproduction #263: when no session identity is available, a principal-scoped workspace cannot distinguish two callers', () => {
+  const locks = createOperatorLocks({ verifyWorkspace: async () => ({ ok: true }) });
+  // hub implicitGate uses one derived workspace for a principal when there is no clientSession.
+  // This is a failure mode to resolve, not an assertion that the calls are safely isolated.
+  const sharedWorkspace = 'ws_CCCCCCCCCCCCCCCC';
+  const args = { principal, workspaceId: sharedWorkspace, clientSession: null };
+  const a = locks.acquireImplicit('mac', targets, args);
+  assert.equal(a.ok, true);
+  const b = locks.acquireImplicit('mac', targets, args);
+  assert.equal(b.ok, true, 'the same implicit workspace is currently treated as one writer');
+  assert.equal(b.ids.length, 0, 'second logical caller obtains no independent lock');
+  a.release();
+  b.release();
+});
