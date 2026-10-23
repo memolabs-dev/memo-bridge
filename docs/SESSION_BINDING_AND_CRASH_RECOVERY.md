@@ -50,3 +50,7 @@ node scripts/with-checkout-lease.mjs --repo /absolute/disposable/checkout \
 **Not a production Claude Code/OpenCode profile:** authentication and plugin caches may require writes outside the checkout, which the strict profile intentionally denies. The profile currently permits reads and outbound network, so it **does not protect secrets against exfiltration**. A descendant that deliberately creates a different process group may keep writing **inside its originally authorized checkout** after its supervisor exits; the Seatbelt read/write rules do not fence its file descriptors or revoke its operating-system write permissions. Therefore, concurrent untrusted agents must still use **distinct isolated clones/worktrees**, each with its own sandboxed writable root. Never claim the shared canonical checkout is safe for unsupervised multiwriter workloads.
 
 Both `--sandbox-strict` and session-signing feature flags are off unless explicitly selected; the rollout was not performed.
+
+### Important identity trust distinction
+
+The hub signs the **hash it received** from `_meta["openai/session"]`. This prevents changing that hash after signing, but it does **not** prove the original client could not choose or spoof that hint. Session hints must never confer GitHub, filesystem or owner permissions. The OAuth principal and the host's existing policies remain the authorization boundary. A verified, stable session identity provided by the trusted client/runtime is still required before this mechanism is used as exclusive coordination in production.
