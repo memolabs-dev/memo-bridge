@@ -22,7 +22,7 @@
 //                       clock_tolerance_sec?, ceiling?}
 //   projects           remote project allowlist (names or owner/repo), REQ-P5-09
 //   remote_writes      "disabled" | "enabled" (D7)
-//   surface            "simple" | "full" (default "simple"): what ChatGPT is served, the operator
+//   surface            "simple" | "full" | "intent" (experimental, default "simple"): what ChatGPT is served, the operator
 //                       tools and the project register, or the dev-flow tools too (2026-10-23)
 //   session_binding    "warn" | "block" | "enforce" (D8; enforce: multi-session D-MS3)
 //   client_cert        {mode: "require" | "log" | "off", info_header, expected_san} (U-P5-08):

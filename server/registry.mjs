@@ -77,7 +77,7 @@ export const isRemoteOperatorTool = name => REMOTE_OPERATOR_SET.has(name);
 // 2026-10-23: from ChatGPT, Memo Bridge is a terminal and a file editor on the Mac and the VPS,
 // plus the project register to find a checkout; no workspace, task, batch, delegation, worktree,
 // job, pull request or memory tool. "surface": "full" serves the lists above again.
-export const REMOTE_SURFACES = Object.freeze(['simple', 'full']);
+export const REMOTE_SURFACES = Object.freeze(['simple', 'full', 'intent']);
 export const SIMPLE_REMOTE_TOOLS = Object.freeze(['projects_list', 'project_context']);
 export const SIMPLE_REMOTE_OPERATOR_TOOLS = Object.freeze([
   'operator_run', 'operator_script', 'operator_job_status',
@@ -88,7 +88,7 @@ export const SIMPLE_REMOTE_OPERATOR_TOOLS = Object.freeze([
   'operator_grant', 'approval_status', 'operator_help'
 ]);
 const SIMPLE_SET = new Set([...SIMPLE_REMOTE_TOOLS, ...SIMPLE_REMOTE_OPERATOR_TOOLS]);
-const onSurface = (name, surface) => surface === 'full' || SIMPLE_SET.has(name);
+const onSurface = (name, surface) => surface === 'full' || (surface === 'simple' && SIMPLE_SET.has(name));
 export function operatorToolsFor(principal, { remoteWrites = false, surface = 'simple' } = {}) {
   return REMOTE_OPERATOR_TOOLS.filter(name => onSurface(name, surface) && authorize(principal, name)
     && (operatorTier(name) === 0 || remoteWrites === true)).sort();
