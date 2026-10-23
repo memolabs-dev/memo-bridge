@@ -17,8 +17,8 @@
 //   rate_limits     {write, exec, root}                calls per minute per tier (D6 defaults 120, 60, 20)
 //   frozen_file     abs path                           FROZEN switch, checked on every call (D6)
 //   audit_file      abs path                           hash-chained host journal (D7)
-//   repositories    {projects_root, registry_file?, layout_root?}  for the D11 repository guard;
-//                   required from max_tier "write" up (Lot 2): no write tool without the guard
+//   repositories    {projects_root, registry_file?, layout_root?}  accepted for existing policy files;
+//                   the D11 repository guard it fed was removed on 2026-10-23
 //   state_dir       abs path, writable by the agent: background runs, uploads, auto-freeze
 //                   marker (default: the directory of audit_file)
 //   run_env_allow   ["NAME", ...] environment names a caller may set on operator_run, on top of
@@ -171,8 +171,6 @@ export function parseOperatorPolicy(raw, { home = homedir(), realpath = realpath
     repositories = Object.freeze(Object.fromEntries(Object.entries(raw.repositories)
       .map(([key, value]) => [key, policyPath(value, `repositories.${key}`, ctx)])));
   }
-  // Lot 2 rule: no write tier without the repository guard (DEV-P6-12).
-  if (maxTier >= TIERS.indexOf('write') && repositories === null) throw invalid('repositories');
   const runEnvAllow = list(raw.run_env_allow, 'run_env_allow', n => typeof n === 'string' && ENV_NAME_RE.test(n) && !FORBIDDEN_ENV_RE.test(n));
   let rootHelper = null;
   if (raw.root_helper !== undefined) {
@@ -277,7 +275,6 @@ export function policySummary(policy) {
     approval_mode: policy.approvalMode,
     extra_denylist: [...policy.denylist],
     rate_limits_per_minute: { ...policy.rateLimits },
-    repository_guard: policy.repositories !== null,
     run_env_allow: [...policy.runEnvAllow],
     root_helper: policy.rootHelper !== null,
     run_path: [...(policy.runPath ?? [])],

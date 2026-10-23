@@ -24,7 +24,7 @@ import { stubLedger, stubProjects, tempDir, tempStateDir, PROJECT_ORIGINS } from
 const ALL = Object.values(CAPABILITIES);
 const SUB = '4b9f6c3e-1a2d-4e5f-8a7b-9c0d1e2f3a4b';
 const CHATGPT = 'https://chatgpt.com/connector/oauth/abc/client.json';
-const CONFIG = { owner_sub: SUB, allowed_client_ids: [CHATGPT] };
+const CONFIG = { owner_sub: SUB, allowed_client_ids: [CHATGPT], surface: 'full' };
 const auth = (overrides = {}) => ({ token: 'not-a-real-token', clientId: CHATGPT, scopes: ['coordinator:read'], extra: { sub: SUB },
   ...overrides });
 

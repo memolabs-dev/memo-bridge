@@ -16,7 +16,7 @@ import { lstat, open, readdir, statfs } from 'node:fs/promises';
 import { cpus, freemem, loadavg, totalmem, uptime } from 'node:os';
 import { join } from 'node:path';
 import { CONTAINER_RE, UNIT_RE, policySummary } from './operator-policy.mjs';
-import { createDenylist, resolveOperatorPath, catalogProjects, lexicalPath } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath, lexicalPath } from './operator-paths.mjs';
 import { untrusted } from './operator-output.mjs';
 
 export const LIMITS = Object.freeze({
@@ -108,13 +108,13 @@ export function decodeSlice(buf, { atStart }) {
   }
 }
 
-// deps: run (argv runner), projects (D11 guard source), platform, now, guard (freeze status),
+// deps: run (argv runner), platform, now, guard (freeze status),
 // chain (audit chain), statfsImpl, resolve (path resolver; tests).
-export function createOperatorTools(policy, { run = runArgv, projects = catalogProjects(policy.repositories),
+export function createOperatorTools(policy, { run = runArgv,
   platform = process.platform, now = Date.now, guard = null, chain = null, statfsImpl = statfs,
   maintenanceFiles = REVIEWED_ROOT_MAINTENANCE } = {}) {
   const denylist = createDenylist(policy);
-  const resolve = (raw, access = 'r') => resolveOperatorPath(policy, raw, { access, denylist, projects });
+  const resolve = (raw, access = 'r') => resolveOperatorPath(policy, raw, { access, denylist });
 
   // Issue #44: the last `n` lines of a file already resolved by the read policy, read backwards
   // in 16 KiB chunks, never more than min(cap, readMaxBytes) bytes: a 10 MB log costs one window.
@@ -215,15 +215,12 @@ export function createOperatorTools(policy, { run = runArgv, projects = catalogP
       // The host agent still enforces all policy checks when the real operation is submitted.
       if (intent !== 'edit') return fail('invalid_arguments');
       if (!lexicalPath(path, policy)) return { ok: true, host: policy.host, route: 'invalid_path', authorized: false };
-      const result = await resolveOperatorPath(policy, path, { access: 'rw', denylist, projects });
+      const result = await resolveOperatorPath(policy, path, { access: 'rw', denylist });
       if (result.ok) return { ok: true, host: policy.host, route: 'operator_edit',
-        authorized: true, requires: ['workspace', 'path_lock'], note: 'Operating-system permissions are checked again at write time.' };
-      if (result.error === 'use_dev_flow') return { ok: true, host: policy.host, route: 'project_worktree',
-        authorized: false, project: result.project, branch: result.branch,
-        requires: ['task_claim', 'worktree_create', 'tests', 'pull_request'] };
+        authorized: true, requires: [], note: 'Operating-system permissions are checked again at write time.' };
       if (result.error === 'path_not_allowed') {
         // Checking the *read* path still applies both denylist passes and symlink resolution.
-        const readable = await resolveOperatorPath(policy, path, { access: 'r', denylist, projects });
+        const readable = await resolveOperatorPath(policy, path, { access: 'r', denylist });
         if (readable.ok && policy.host === 'vps' && policy.maxTierName === 'root' && policy.rootHelper
           && maintenanceFiles.includes(readable.path)) {
           return { ok: true, host: policy.host, route: 'reviewed_root_maintenance', authorized: false,
@@ -236,7 +233,7 @@ export function createOperatorTools(policy, { run = runArgv, projects = catalogP
       }
       // Never recommend an alternative technique for secret, symlink, immutable or otherwise denied paths.
       return { ok: true, host: policy.host, route: 'stop', authorized: false, reason:
-        ['path_secret', 'git_internal', 'repository_guard_unavailable', 'not_found',
+        ['path_secret', 'git_internal', 'not_found',
           'permission_denied', 'invalid_path'].includes(result.error) ? result.error : 'policy_denied' };
     },
 

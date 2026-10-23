@@ -78,16 +78,16 @@ async function until(fn, ms = 5000) {
 
 // A hub with a fake Mac operator agent that records what reaches it, and a stubbed runtime.
 // operator_edit waits for `gate` when the test sets one, to observe a call in flight.
-async function hubWith(t, { sessionWorkspace } = {}) {
+async function hubWith(t, { sessionWorkspace, runtime } = {}) {
   const { tlsKey, tlsCert } = tls(t);
   const id = generateAgentIdentity();
   const audit = []; const reached = []; const opened = [];
   const ctl = { gate: null };
   const verifyWorkspace = async (principal, ws) => ({ ok: true, workspace: { workspace_id: ws, status: 'active', session_tag: null, project: 'ops' } });
   const hub = createHub({ tlsKey, tlsCert, tokenSha256: 'a'.repeat(64), port: 0, audit: ev => audit.push(ev),
-    allowedAgentKeys: { mac: generateAgentIdentity().publicKey, vps: generateAgentIdentity().publicKey, 'operator-mac': id.publicKey },
+    allowedAgentKeys: { mac: generateAgentIdentity().publicKey, vps: runtime?.publicKey ?? generateAgentIdentity().publicKey, 'operator-mac': id.publicKey },
     operator: { signingKeyPem: operatorKeys().privateKeyPem, anchorIntervalMs: 0, verifyWorkspace,
-      sessionWorkspace: sessionWorkspace ?? (async (principal, session) => { opened.push(session); return { ok: true, workspace_id: `ws_auto${session.slice(0, 12)}`, opened: true, project: 'ops' }; }) } });
+      ...(sessionWorkspace === null ? {} : { sessionWorkspace: sessionWorkspace ?? (async (principal, session) => { opened.push(session); return { ok: true, workspace_id: `ws_auto${session.slice(0, 12)}` }; }) }) } });
   const { port } = await hub.start();
   t.after(() => hub.stop());
   const record = op => async args => { reached.push({ op, args }); if (ctl.gate) await ctl.gate; return { ok: true, op }; };
@@ -98,7 +98,7 @@ async function hubWith(t, { sessionWorkspace } = {}) {
   await until(() => hub.agentInfo('operator-mac')?.version === 2);
   const call = (op, args, session) => hub.requestOperator(op === 'operator_script' ? 'mac' : undefined, op,
     { args: op === 'operator_script' ? { host: 'mac', ...args } : args, principal: CHAT, clientSession: session });
-  return { hub, audit, reached, opened, call, ctl };
+  return { hub, audit, reached, opened, call, ctl, port, tlsCert };
 }
 
 test('RR-16 hub: ps on the Mac from a remote chat needs no workspace and no lock, and is journaled as a read', async t => {
@@ -118,20 +118,19 @@ test('RR-16 hub: ps on the Mac from a remote chat needs no workspace and no lock
   assert.match(refused.next_step, /tell the owner/);
 });
 
-test('RR-17 hub: a remote write just works: the chat\'s workspace, an implicit lock held for the call only, both journaled', async t => {
+test('RR-17 hub: a remote write just works: the chat\'s existing workspace, an implicit lock held for the call only, journaled', async t => {
   const s = await hubWith(t);
   // Bench 20:04: "create ~/memolabs/workspace/bench-mb/note.md on the Mac" in one call.
   const out = await s.call('operator_edit', { path: '~/memolabs/workspace/bench-mb/note.md', mode: 'write', new_text: 'x', create: true }, SA);
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.equal(out.auto.workspace_id, `ws_auto${SA.slice(0, 12)}`);
-  assert.equal(out.auto.workspace_opened, true);
-  assert.ok(s.audit.some(e => e.event === 'workspace_auto_open' && e.workspace_id === out.auto.workspace_id));
+  assert.equal(out.auto.workspace_opened, undefined);
   assert.ok(s.audit.some(e => e.event === 'lock_implicit' && e.kinds.includes('path')));
   assert.equal(s.hub.operatorLocks.size, 0, 'the implicit lock is released after the call');
   assert.equal(s.reached[0].args.workspace_id, undefined, 'the workspace never reaches the agent');
   // The same chat again: the workspace is remembered, not reopened.
   assert.equal((await s.call('operator_edit', { path: '~/memolabs/a.md', mode: 'write', new_text: 'y', create: true }, SA)).ok, true);
-  assert.equal(s.opened.length, 1);
+  assert.equal(s.opened.length, 1, 'looked up once per chat');
   // While a call is in flight, its target is held: another chat on it is refused, elsewhere it runs.
   let open; s.ctl.gate = new Promise(r => { open = r; });
   const slow = s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'x' }, SA);
@@ -155,10 +154,29 @@ test('RR-17 hub: a remote write just works: the chat\'s workspace, an implicit l
     principal: CHAT, clientSession: SA })).ok, true);
   assert.equal((await s.call('operator_edit', { workspace_id: out.auto.workspace_id, path: '/Users/memo/long/f', mode: 'append', new_text: 'x' }, SA)).ok, true);
   assert.equal(s.hub.operatorLocks.size, 1);
-  // No session hint: nothing to bind, one explicit next step.
+  // No session hint (owner decision 2026-10-23): the call runs anyway, under a lock for this call only.
   const blind = await s.call('operator_edit', { path: '/Users/memo/other/b.md', mode: 'append', new_text: 'x' }, undefined);
-  assert.equal(blind.error, 'workspace_required');
-  assert.match(blind.next_step, /workspace_open/);
+  assert.equal(blind.ok, true, JSON.stringify(blind));
+  assert.equal(s.hub.operatorLocks.size, 1, 'only the explicit lock remains');
+});
+
+// Owner decision 2026-10-23 ("ça me crée un workspace"): an operator call never opens a workspace.
+// The hub asks the runtime only whether the chat already has one.
+test('RR-17 hub: a remote write never asks the runtime to open a workspace', async t => {
+  const id = generateAgentIdentity();
+  const asked = [];
+  const s = await hubWith(t, { sessionWorkspace: null, runtime: id });
+  const runtime = createAgent({ host: 'vps', url: `wss://127.0.0.1:${s.port}/agent`, privateKey: id.privateKey, ca: s.tlsCert, reconnectMs: 100_000,
+    operations: { host_status: async () => ({ host: 'vps', online: true }),
+      sessions_overview: async () => { asked.push('sessions_overview'); return { ok: true, you: { workspaces: [] } }; },
+      workspace_open: async () => { asked.push('workspace_open'); return { ok: true, workspace: { workspace_id: 'ws_opened00000001' } }; } } });
+  t.after(() => runtime.stop());
+  await until(() => s.hub.agentInfo('vps')?.version === 2);
+  const out = await s.call('operator_edit', { path: '/Users/memo/notes/a.md', mode: 'append', new_text: 'x' }, SA);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(asked.includes('workspace_open'), false);
+  assert.notEqual(out.auto.workspace_id, 'ws_opened00000001');
+  assert.equal(s.audit.some(e => e.event === 'workspace_auto_open'), false);
 });
 
 test('RR-17 hub: when the runtime cannot give a workspace, the session still gets a coordination id and the call runs', async t => {
@@ -183,6 +201,6 @@ test('RR-14: the instructions and the skill teach the work-session grant, the re
     assert.ok(OPERATOR_FLOW_INSTRUCTIONS.includes(word), word);
   }
   for (const word of ['operator_grant', 'operator_docker', 'read-only commands']) assert.ok(skill.includes(word), `skill: ${word}`);
-  for (const word of ['Standing approvals', '/grant', '/revoke', 'operator_docker', 'Read-only commands', 'workspace_auto_open']) assert.ok(doc.includes(word), `doc: ${word}`);
+  for (const word of ['Standing approvals', '/grant', '/revoke', 'operator_docker', 'Read-only commands']) assert.ok(doc.includes(word), `doc: ${word}`);
   for (const text of [OPERATOR_FLOW_INSTRUCTIONS, skill, doc]) assert.equal(/[\u2013\u2014]/.test(text), false, 'no dashes');
 });

@@ -11,7 +11,7 @@ import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 const ALL = Object.values(CAPABILITIES);
 const SUB = 'owner-sub';
 const CLIENT = 'https://chatgpt.com/c.json';
-const CONFIG = { owner_sub: SUB, allowed_client_ids: [CLIENT] };
+const CONFIG = { owner_sub: SUB, allowed_client_ids: [CLIENT], surface: 'full' };
 const jsonRpcBody = text => JSON.parse(/^(event|data):/m.test(text)
   ? text.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('') : text);
 

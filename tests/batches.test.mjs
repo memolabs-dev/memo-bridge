@@ -252,9 +252,9 @@ test('remote: classification, allowlists, annotations, project allowlist and ses
   assert.equal(OPS.batch_status.mutating, false);
   assert.ok(RETRY_SAFE_OPS.has('task_next') && RETRY_SAFE_OPS.has('batch_create'));
   // Gate layer 1: writes closed, only batch_status is listed.
-  const listed = toolsFor(CHAT, { remoteWrites: false });
+  const listed = toolsFor(CHAT, { remoteWrites: false, surface: 'full' });
   assert.ok(listed.includes('batch_status') && !listed.includes('batch_create') && !listed.includes('task_next'));
-  assert.ok(toolsFor(CHAT, { remoteWrites: true }).includes('task_next'));
+  assert.ok(toolsFor(CHAT, { remoteWrites: true, surface: 'full' }).includes('task_next'));
 
   // A read-only remote principal is refused (and journaled) by the runtime too.
   const reader = makePrincipal('oidc:owner-sub', [CAPABILITIES.READ], { client_type: 'chatgpt', via: 'hub' });

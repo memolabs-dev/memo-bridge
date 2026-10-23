@@ -367,7 +367,7 @@ export function installHubPub(home, from) {
 }
 
 // The policy: built, checked against the schema, the registry read through the catalog's own
-// reader (D11 needs at least one registered checkout), written 0444, then loaded back exactly
+// reader (an install sanity check: at least one registered checkout), written 0444, then loaded back exactly
 // as the agent will load it. A changed file keeps the previous one as policy.json.<ts>.bak.
 // With the root helper's policy installed (root-owned, /Library/Application Support/MemoBridge/
 // operator-root/policy.json), the agent's policy grants root and names the helper's socket;

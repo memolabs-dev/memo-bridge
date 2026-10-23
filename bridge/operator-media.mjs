@@ -22,7 +22,7 @@ import { constants as fsConstants } from 'node:fs';
 import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDenylist, catalogProjects, resolveOperatorPath } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath } from './operator-paths.mjs';
 import { SAFE_ENV, runArgv } from './operator-tools.mjs';
 import { untrusted } from './operator-output.mjs';
 
@@ -102,9 +102,9 @@ export function imageSize(buf, mime) {
   return { width: null, height: null };
 }
 
-export function createMediaTool(policy, { run = runArgv, projects = catalogProjects(policy.repositories), platform = process.platform } = {}) {
+export function createMediaTool(policy, { run = runArgv, platform = process.platform } = {}) {
   const denylist = createDenylist(policy);
-  const resolve = raw => resolveOperatorPath(policy, raw, { access: 'r', denylist, projects });
+  const resolve = raw => resolveOperatorPath(policy, raw, { access: 'r', denylist });
   const exec = argv => run(argv, { timeoutMs: MEDIA_LIMITS.timeoutMs, maxBytes: 4 * 1024 * 1024, env: SAFE_ENV });
   const parseJson = text => { try { return JSON.parse(text.trim().split('\n').pop()); } catch { return null; } };
 

@@ -1,5 +1,11 @@
 # Memo Bridge for ChatGPT conversations (Phase 5, v0.6.0)
 
+> **Since 2026-10-23 (owner decision)** ChatGPT is served only the operator tools and the project
+> register: a terminal and a file editor on the Mac and the VPS, working in each project's own
+> checkout on a branch. The workspace, task, batch, delegation, worktree, job, pull request and
+> memory tools described below stay on stdio and are no longer listed to ChatGPT. Current guide:
+> `docs/CHATGPT_GUIDE.md`.
+
 ChatGPT Chat conversations reach Memo Bridge through one public, OAuth-protected MCP endpoint,
 `https://bridge.memolabs.dev/mcp`, served by the hub on the VPS. Each conversation opens its own
 workspace and works through Memo Bridge tools only; the Coordinator in the VPS runtime stays the

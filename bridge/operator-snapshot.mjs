@@ -13,7 +13,7 @@
 import { constants as fsConstants } from 'node:fs';
 import { lstat, open, readdir } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
-import { createDenylist, catalogProjects, resolveOperatorPath } from './operator-paths.mjs';
+import { createDenylist, resolveOperatorPath } from './operator-paths.mjs';
 import { NOISE_DIRS, SAFE_ENV, runArgv } from './operator-tools.mjs';
 import { untrusted } from './operator-output.mjs';
 
@@ -53,9 +53,9 @@ export function parseStatusV2(text) {
   return out;
 }
 
-export function createSnapshotTool(policy, { run = runArgv, projects = catalogProjects(policy.repositories), now = Date.now } = {}) {
+export function createSnapshotTool(policy, { run = runArgv, now = Date.now } = {}) {
   const denylist = createDenylist(policy);
-  const resolve = raw => resolveOperatorPath(policy, raw, { access: 'r', denylist, projects });
+  const resolve = raw => resolveOperatorPath(policy, raw, { access: 'r', denylist });
   const git = (dir, args) => run(['git', '-C', dir, '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', ...args],
     { timeoutMs: SNAPSHOT_LIMITS.gitTimeoutMs, maxBytes: SNAPSHOT_LIMITS.gitMaxBytes, env: GIT_ENV });
 

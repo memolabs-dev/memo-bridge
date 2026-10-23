@@ -2,11 +2,10 @@
 
 Operator tools let the owner, from a ChatGPT Chat conversation (connector "Memo Bridge VPS")
 or from the 9443 hub, read, write and run commands on the VPS `lab` and on the Mac, root
-included on both (on the Mac once its root helper is installed, owner decision 2026-10-14). They are for the machine. Code in tracked repositories keeps the
-worktree, job, pull request flow (`docs/REMOTE_CHATGPT.md`): a write, or a write-capable command,
-inside a registered checkout on its default branch answers `use_dev_flow`. A read-only command
-(`git status`, `git log`, `ls`, `rg`) runs there: it cannot edit tracked code, and it already
-passes the read roots and the secret denylist like any other read.
+included on both (on the Mac once its root helper is installed, owner decision 2026-10-14). Since
+2026-10-23 (owner decision) they are also how ChatGPT works on code: in the project's own checkout,
+on a branch it creates there, without a worktree. The `use_dev_flow` refusal is gone; `.git`
+internals stay unwritable. How ChatGPT is told to work: `docs/CHATGPT_GUIDE.md`.
 
 Specification: `.agent/project/phase-6/spec.md` (decisions D1 to D11, deviations DEV-P6-01 to
 39; the Mac root follow-up is DEV-P6-32 to 39). Server side on lab: lab-infra role `memo-operator`, `docs/memo-operator.md` there.
@@ -47,10 +46,10 @@ pass a token redactor and come back wrapped as untrusted data.
   else `vps`. `as_root`, `operator_script` and every call on the dangerous list must name it
   (`host_required`, detail "Mac ou VPS ?"). Every result carries the `host` it ran on.
 - Locks (`operator_lock`, `operator_unlock`) live in the hub's memory for both hosts. A remote
-  conversation's T1 to T3 call names its `workspace_id` and needs a covering lock of that
-  workspace (`workspace_required`, `lock_required`); another workspace's overlapping lock answers
-  `locked_by_other_session`. The 9443 principals need no workspace and are refused only under
-  another workspace's lock. Locks are saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) and survive a hub restart; implicit
+  conversation's T1 to T3 call needs no workspace: it holds an implicit lock for the call (see
+  "Writes just work"); another workspace's overlapping lock answers `locked_by_other_session`.
+  The 9443 principals need no workspace and are refused only under another workspace's lock.
+  ChatGPT is not served `operator_lock` on the default `simple` surface (2026-10-23). Locks are saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) and survive a hub restart; implicit
   per-call locks do not. Details: `docs/REMOTE_CHATGPT.md`,
   "Ten conversations at once".
 
@@ -72,7 +71,7 @@ Spec: `.agent/project/repatriate-tools/spec.md`. Parity study:
 caller (`operator_transfer_source`: read roots, denylist, `O_NOFOLLOW`, size and SHA-256 computed
 on the source host; `operator_read_chunk`: refused with `source_changed` when the file moved),
 and writes them through the destination's own `operator_upload_*`. So the destination keeps every
-upload rule: write roots, denylist, `use_dev_flow`, the caller's workspace and a lock on
+upload rule: write roots, denylist, a lock on
 `dst_path` (the caller's, else an implicit one held for each write, see below), the hub freeze, the approval mode, a backup on overwrite, an atomic rename, and the
 SHA-256 checked at the destination. Why: a 64 KiB chunk is 87 KiB of base64, under the 128 KiB
 request cap and the 128 KiB agent result bound; the 16 KiB frame limit is met by the protocol's
@@ -170,14 +169,15 @@ Live bench of 2026-10-14 (19:57 and 20:04): "the 5 most CPU-hungry processes on 
   read-only git with `core.fsmonitor=false`, `core.pager=cat`, `GIT_OPTIONAL_LOCKS=0`,
   `--no-ext-diff` and `--no-textconv`.
 - **Writes just work.** A remote write, command or root call without a `workspace_id` uses the
-  conversation's workspace, keyed by its session hash: its own active one, else one opened on
-  the project `ops` (`MEMO_BRIDGE_OPERATOR_AUTO_PROJECT`, journaled `workspace_auto_open`), else a
-  coordination id derived from the session (`workspace_implicit`). Without an explicit lock the
+  conversation's workspace, keyed by its session hash: its own active one if it already has one,
+  else a coordination id derived from the session (`workspace_implicit`), else, without a session
+  hint, an id for that call only. Nothing is ever opened (owner decision 2026-10-23: the hub used
+  to open one on the project `ops`). Without an explicit lock the
   call takes an **implicit lock** on its path, unit or container (global for root calls,
   scripts and commands without cwd) for the duration of the call only (`lock_implicit`), and is
   refused with `locked_by_other_session` only when another conversation holds an overlapping
-  lock. Explicit `operator_lock` stays for long multi-step work. The result carries `auto`.
-  Without a session hint (stdio, 9443) nothing changes.
+  lock. Explicit `operator_lock` stays for long multi-step work on the 9443 hub. The result
+  carries `auto`.
 - `workspace_open` from ChatGPT with `host: "mac"` no longer fails: the workspace (a
   coordination record) lives on the vps runtime, the requested host is kept in its label, and the
   result says so in `note`. Operator tools still act on the host they name.
