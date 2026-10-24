@@ -50,3 +50,7 @@ One reconciliation pass reads up to 30 already registered Source Engine changes 
 **Safety and rollout limits:** no branches, PRs, approvals or deployments are modified. No PR is inferred closed simply because it is absent from the limited result page. This release reconciles **existing tracked changes only**: it does not infer Issue identities from arbitrary PR titles, create new change records or run on a background timer. Install an operator-managed, allowlisted scheduler separately before describing this as continuous autonomous reconciliation. The authoritative landing policy (#88/#86) must fetch fresh target base, required reviews, checks and exact head SHA independently; Source Engine state is advisory.
 
 To verify locally, run `npm test`, then build and run the MCP smoke test. The scoped regressions live in `tests/source-reconcile.test.mjs`. GitHub App read permissions on the target repository are required in production.
+
+## Optional autonomous polling (#122)
+
+The new host-owned, **disabled-by-default** source poller uses exact remote Coordinator checkpoints to discover trustworthy PRs and then reuses the #108 reconciliation adapter. It never merges, deploys or expands GitHub permissions. See [SOURCE_POLL.md](SOURCE_POLL.md) for the operator canary, 0600 private policy, overlap lock, systemd timer templates, backoff and rollback instructions. A merged code change does **not** mean the timer has been installed or enabled.
