@@ -69,6 +69,9 @@ export const OPERATION_CAPABILITY = Object.freeze({
   job_events: CAPABILITIES.READ,
   job_results: CAPABILITIES.READ,
   agent_preflight: CAPABILITIES.EXECUTE,
+  agent_sandbox_start: CAPABILITIES.EXECUTE,
+  agent_sandbox_status: CAPABILITIES.READ,
+  agent_sandbox_stop: CAPABILITIES.EXECUTE,
   jobs_submit: CAPABILITIES.EXECUTE,
   job_cancel: CAPABILITIES.EXECUTE,
   // Hosts

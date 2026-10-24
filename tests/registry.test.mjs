@@ -25,7 +25,7 @@ const ALL = Object.values(CAPABILITIES);
 const READ_ONLY = makePrincipal('oidc:reader', [CAPABILITIES.READ]);
 const EVERYTHING = makePrincipal('oidc:owner', ALL);
 const NOT_REMOTE = ['observe_guardian', 'observe_agents', 'observe_live_state', 'observe_focus', 'host_resources', 'worktree_remove',
-  'list_hosts', 'host_status', 'bridge_info', 'agent_preflight', 'project_info', 'project_git_status', 'projects_audit'];
+  'list_hosts', 'host_status', 'bridge_info', 'agent_preflight', 'agent_sandbox_start', 'agent_sandbox_status', 'agent_sandbox_stop', 'project_info', 'project_git_status', 'projects_audit'];
 
 test('registry: the collected tools are exactly the policy table and the runtime ops', async () => {
   const defs = await collectToolDefinitions();
