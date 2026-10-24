@@ -12,6 +12,8 @@
 //   principal the branch head on GitHub must be a commit worktree_push sent from this worktree;
 // - writes check the D8 session binding; github_create_pr takes client_request_id.
 import { join } from 'node:path';
+import { listProjects } from '../catalog.mjs';
+import { livePortfolio } from '../portfolio-live.mjs';
 import { z } from 'zod/v4';
 import { workerFor } from '../coordinator/index.mjs';
 import { ownsWorkspace } from '../coordinator/policy.mjs';
@@ -24,7 +26,7 @@ import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRef
   from '../../bridge/write-gate.mjs';
 
 export const GITHUB_TOOLS = Object.freeze(['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks',
-  'github_create_pr']);
+  'github_create_pr', 'portfolio_overview']);
 
 const read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -173,6 +175,33 @@ export function registerGithubTools(server, getRuntime, options = {}) {
     if (!SHA_RE.test(ref) && !validBranch(ref)) return fail('invalid_input', 'ref');
     return github.checks(repo, ref);
   }));
+
+  server.registerTool('portfolio_overview', {
+    description: 'Read-only cross-project issues and PR overview. Scoped to registered accessible repositories and the caller\'s remote allowlist. Incomplete snapshots are explicitly flagged. Never claims or closes tasks.',
+    inputSchema: z.object({limit: limitArg}),
+    annotations: read
+  }, async (args = {}) => {
+    const op='portfolio_overview';
+    const rt=getRuntime();
+    if (!rt.authorize(op)) {
+      await rt.audit(op,'denied','forbidden');
+      return result(fail('forbidden'));
+    }
+    try {
+      const listed=await listProjects({},rt.catalogOptions??{});
+      const remote=isRemotePrincipal(rt.principal);
+      const policy=remotePolicyNow();
+      if(remote && !policy?.configured) return result(fail('project_not_allowed'));
+      const allowed=remote ? (listed.projects??[]).filter(p=>
+        !remoteProjectRefusal(rt.principal,p.name,policy,{host:rt.host})).map(p=>p.name) : null;
+      const limit=limitOf(args.limit);
+      if(limit===undefined)return result(fail('invalid_input','limit'));
+      const snapshot=await livePortfolio({projects:listed.projects,github:githubOf(rt),allowedProjects:allowed,limit});
+      return result({ok:true,...snapshot});
+    } catch {
+      return result(fail('portfolio_unavailable'));
+    }
+  });
 
   server.registerTool('github_create_pr', {
     description: 'Use this after worktree_push to open the pull request into the default branch; adds "Closes #<n>" unless close_issue is false. Returns the open PR if one exists. Never merges: land it yourself by the merge rule (Mergify where it merges on its own, else gh pr merge --match-head-commit once CI is green). Then task_complete.',
