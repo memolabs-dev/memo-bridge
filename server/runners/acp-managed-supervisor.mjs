@@ -3,6 +3,7 @@
 // or environment values. Never return claim secrets through public MCP tools.
 import {checkAcpAdmission} from './acp-admission.mjs';
 import {createAcpProcessSupervisor} from './acp-process-supervisor.mjs';
+import {launchSandboxedOpenCode} from './acp-sandbox-launcher.mjs';
 import {localOwnerId} from '../coordinator/policy.mjs';
 const fail=error=>({ok:false,error});
 
@@ -39,4 +40,14 @@ export function createManagedAcpSupervisor(rt,{launch,preflight=checkAcpAdmissio
    fail(result?.error??'stale_lease');
  };
  return createSupervisor({admit,renew,launch});
+}
+
+
+// Local integration entrypoint: an owner-only, process-managed sandbox canary.
+// The sandbox has no remote network/provider credentials; do not advertise
+// model execution until a scoped provider transport and ACP RPC are added.
+export function createMacSandboxedAcpSupervisor(rt) {
+ return createManagedAcpSupervisor(rt,{
+  launch: request => launchSandboxedOpenCode(rt,request)
+ });
 }
