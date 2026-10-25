@@ -218,6 +218,12 @@ export function createAcpProcessSupervisor({
       await end(s);
       return { ok: true, ...view(s) };
     },
+    statusLive(sessionId) {
+      // Unlike status(), this cannot consult receipts from a previous runtime
+      // or principal; it describes only a child tracked by THIS supervisor.
+      const s = sessions.get(sessionId);
+      return s ? { ok:true, ...view(s) } : fail('unknown_session');
+    },
     status(sessionId) {
       const s = sessions.get(sessionId);
       return s ? { ok:true, ...view(s) } : recovered(sessionId);

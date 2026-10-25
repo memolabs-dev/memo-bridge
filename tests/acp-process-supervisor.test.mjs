@@ -286,3 +286,20 @@ test('SIGTERM/SIGKILL without confirmed exit stays stopping and blocks a second 
  assert.equal(f.supervisor.status(started.session_id).state,'stopped');
  assert.equal(rows.at(-1).state,'stopped');
 });
+
+
+test('live-only ACP status never traverses journal receipts from another process',()=>{
+ let journalReads=0;
+ const sup=createAcpProcessSupervisor({
+  admit:async()=>admission,
+  renew:async()=>({ok:true,claim_id:admission.claim_id}),
+  launch:async()=>fixture().process,
+  journal:{save:()=>{},read:()=>{journalReads++;return {ok:true,state:'running'}}}
+ });
+ assert.deepEqual(sup.statusLive('missing'),
+   {ok:false,error:'unknown_session'});
+ assert.equal(journalReads,0);
+ assert.equal(sup.status('missing').state,'running',
+   'existing recovery-aware status is a separate internal API');
+ assert.equal(journalReads,1);
+});

@@ -65,6 +65,9 @@ function timeoutFor(op) {
   if (LEDGER_CHAIN_OPS.has(op) || LONG_OPS.has(op)) return TIMEOUTS.ledgerChain;
   if (LEDGER_OPS.has(op)) return TIMEOUTS.ledger;
   if (GITHUB_READ_OPS.has(op)) return TIMEOUTS.github;
+  // ACP session/prompt has a 120-second internal deadline. The hub's
+  // deadline must be longer, otherwise an active turn can outlive a request.
+  if (op === 'agent_sandbox_prompt') return TIMEOUTS.ledger;
   return TIMEOUTS.default;
 }
 
