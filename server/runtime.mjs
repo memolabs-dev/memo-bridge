@@ -62,6 +62,11 @@ export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
   let store;
   const coordinators = new Map();
   const views = new Map();
+  // Process-lifetime cleanup is owned by the base runtime, not a transient
+  // MCP server or an .as(principal) view. Shutdown callbacks are internal:
+  // clients cannot register or invoke them through the tool catalogue.
+  const shutdownHooks = new Set();
+  let closing = null;
   let grants;
 
   // The ledger's private gh configuration directories live under the state directory: with
@@ -168,7 +173,24 @@ export function createRuntime({ readOnly = false, stateDir = defaultStateDir(),
       return gateRemotePrincipal(mapHubPrincipal(claim, grants), policy());
     },
 
-    async close() { if (store) await store.close(); }
+    onShutdown(callback) {
+      if (typeof callback !== 'function' || closing)
+        throw new Error('runtime_shutdown_unavailable');
+      shutdownHooks.add(callback);
+      return () => shutdownHooks.delete(callback);
+    },
+    close() {
+      if (closing) return closing;
+      closing = (async () => {
+        // A failed supervisor must not prevent other agents from being
+        // stopped or the shared DB from closing.
+        const hooks = [...shutdownHooks];
+        shutdownHooks.clear();
+        await Promise.allSettled(hooks.map(hook => Promise.resolve().then(hook)));
+        if (store) await store.close();
+      })();
+      return closing;
+    }
   };
   // The identity of the base runtime is fixed for its lifetime.
   Object.defineProperty(runtime, 'principal', { value: principal, enumerable: true, writable: false, configurable: false });
