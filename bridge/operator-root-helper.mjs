@@ -64,6 +64,7 @@ const OUTCOMES = new Set(['ok', 'denied', 'error']);
 const INTERPRETERS = Object.freeze({ bash: { program: '/bin/bash', ext: 'sh' }, python3: { program: '/usr/bin/python3', ext: 'py' } });
 
 const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
+const SESSION_RE = /^[0-9a-f]{32}$/;
 // The Mac root environment: system directories only, so a bare program name never resolves into
 // a directory the owner's user can write (/opt/homebrew/bin, /usr/local/bin).
 export const MAC_ROOT_ENV = Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'en_US.UTF-8', HOME: '/var/root' });
@@ -134,8 +135,9 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const { id, op, args = {}, operator } = msg;
     const principal = typeof msg.principal === 'string' ? msg.principal : null;
     const tier = operatorCallTier(op, args);
+    // Root calls are signed v1 (no session, docs/SESSION_BINDING_AND_CRASH_RECOVERY.md): session null.
     const base = { request_id: msg.request_id ?? id ?? null, ref: typeof args?.ref === 'string' ? args.ref.slice(0, 128) : null, op, tier,
-      principal, args, args_sha256: argsSha256(args) };
+      principal, host, session: null, args, args_sha256: argsSha256(args) };
     const refuse = (code, extra = {}, { counted = true } = {}) => {
       if (counted) guard.refused(code);
       const out = fail(code, extra);
@@ -240,9 +242,12 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
   // Lines the agent reports: shape-checked fields only; the helper computes the chain.
   function appendFromAgent(fields) {
     if (!fields || typeof fields !== 'object' || !OP_RE.test(String(fields.op)) || !OUTCOMES.has(fields.outcome)) return fail('invalid_request');
-    const pick = ['request_id', 'ref', 'op', 'tier', 'principal', 'args', 'args_sha256', 'approval', 'outcome', 'code', 'ms', 'output'];
+    const pick = ['request_id', 'ref', 'op', 'tier', 'principal', 'host', 'session', 'session_claimed', 'args', 'args_sha256', 'approval', 'outcome',
+      'code', 'ms', 'output'];
     const clean = Object.fromEntries(pick.filter(k => fields[k] !== undefined).map(k => [k, fields[k]]));
-    const { seq, hash } = chain.append({ ...clean, source: 'agent' });
+    // The host is the helper's own; a session field that is not a session hash is dropped (#291).
+    for (const k of ['session', 'session_claimed']) if (clean[k] !== undefined && clean[k] !== null && !SESSION_RE.test(String(clean[k]))) clean[k] = null;
+    const { seq, hash } = chain.append({ ...clean, host, source: 'agent' });
     return { ok: true, seq, hash };
   }
 
@@ -251,7 +256,7 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const signed = verifier.verify(msg.operator, { id: msg.id, op: 'operator_owner_unfreeze', args, principal: msg.principal });
     if (!signed.ok || msg.op !== 'operator_owner_unfreeze') { guard.refused(signed.ok ? 'request_mismatch' : signed.error); return fail(signed.ok ? 'request_mismatch' : signed.error); }
     const cleared = guard.clearAuto();
-    chain.append({ op: 'operator_owner_unfreeze', tier: 0, principal: msg.principal ?? null, args, outcome: 'ok', source: 'root-helper' });
+    chain.append({ op: 'operator_owner_unfreeze', tier: 0, principal: msg.principal ?? null, host, session: null, args, outcome: 'ok', source: 'root-helper' });
     return { ok: true, cleared };
   }
 

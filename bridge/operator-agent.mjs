@@ -40,6 +40,7 @@ import { controlRefusal } from './operator-authority.mjs';
 import { createDenylist } from './operator-paths.mjs';
 
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const SESSION_RE = /^[0-9a-f]{32}$/;
 
 // Schemas of the internal ops (hub-only, bridge/ops.mjs OPERATOR_INTERNAL_OPS).
 const host = z.enum(['mac', 'vps']);
@@ -93,10 +94,16 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       const ref = typeof args?.ref === 'string' ? args.ref.slice(0, 128) : null;
       const tier = tierOf(op, args) ?? (Object.hasOwn(INTERNAL_SCHEMAS, op) ? 0 : null);
       let approval = null;
+      // Issue #291: every line names the host and the session. `session` is the conversation hash
+      // the hub signed (v2) once the signature checked out, else null; `session_claimed` is what
+      // the unsigned wire metadata said, kept apart so a forged hint is visible, never trusted.
+      const claimed = typeof ctx.meta?.client_session === 'string' && SESSION_RE.test(ctx.meta.client_session) ? ctx.meta.client_session : null;
+      let session = null;
       const journal = async (outcome, code, output) => {
         if (!chain) return true;
         try {
-          await chain.append({ request_id: requestId, ref, op, tier, principal, args, args_sha256: argsSha256(args), approval, outcome, code,
+          await chain.append({ request_id: requestId, ref, op, tier, principal, host: policy.host, session,
+            ...(claimed !== session ? { session_claimed: claimed } : {}), args, args_sha256: argsSha256(args), approval, outcome, code,
             ms: now() - started, output });
           return true;
         } catch {
@@ -116,6 +123,7 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
         clientSession: ctx.meta?.client_session ?? null });
       if (!signed.ok) return refuse(signed.error);
       approval = signed.approval;
+      session = signed.clientSession ?? null;
       if (!Number.isInteger(tier) || signed.tier !== tier) return refuse('tier_mismatch');
       if (tier > policy.maxTier) return refuse('tier_not_allowed');
       // The decision source must still be there, unchanged, for anything above a read.
