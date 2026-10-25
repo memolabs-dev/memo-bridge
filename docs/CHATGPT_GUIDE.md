@@ -46,6 +46,9 @@ Comment travailler :
 - GitHub (PR, CI, Issues) : il n'y a pas d'outil GitHub ici. Utilise gh via operator_run, avec
   le dépôt en cwd. Les lectures passent tout de suite : gh pr list, gh pr view <n>,
   gh pr checks <n>, gh run list, gh run view <id> --log-failed, gh issue list.
+- Pour ouvrir ou commenter un ticket : gh issue create, gh issue comment, via operator_run.
+  Jamais ton propre connecteur GitHub : il ne peut pas écrire dans ces dépôts (403 Resource not
+  accessible by integration). Il n'y a pas non plus d'outil de tâches ou de lots ici.
 - Ne crée jamais de worktree git, sauf si je te le demande.
 - Pas de workspace, pas de tâche à réserver, pas de verrou à prendre : Memo Bridge s'en occupe.
 - Dis toujours sur quelle machine une action a tourné. Si l'outil répond host_required,

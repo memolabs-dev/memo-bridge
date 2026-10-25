@@ -523,6 +523,22 @@ test('ChatGPT guide: the first 512 characters say what Memo Bridge is and how to
   assert.equal(/[\u2013\u2014]/.test(guide), false, 'guide: no dashes');
 });
 
+// 2026-10-25: asked to open three Issues, ChatGPT tried its own GitHub connector (403 "Resource not
+// accessible by integration": the app is not installed on memolabs-dev) and then batch_create, which
+// the simple surface does not serve. The day before, gh issue create through operator_run had worked.
+// The route is named in the first 512 characters; the unserved tool is still never named.
+test('ChatGPT guide: Issues are opened and commented with gh through operator_run, never the ChatGPT GitHub connector', () => {
+  const head = REMOTE_INSTRUCTIONS.slice(0, 512);
+  for (const word of ['gh issue create', 'gh issue comment', 'GitHub connector'])
+    assert.ok(head.includes(word), `first 512: ${word}`);
+  for (const word of ['Resource not accessible by integration', 'no task or batch tool'])
+    assert.ok(REMOTE_INSTRUCTIONS.includes(word), word);
+  assert.equal(REMOTE_INSTRUCTIONS.includes('batch_create'), false, 'unserved tool never named');
+  const guide = readFileSync(new URL('../docs/CHATGPT_GUIDE.md', import.meta.url), 'utf8');
+  for (const word of ['gh issue create', 'gh issue comment', 'connecteur GitHub'])
+    assert.ok(guide.includes(word), `guide: ${word}`);
+});
+
 // Owner, 2026-10-23 22:18: "il faut que chatgpt comprenne via memo bridge que c'est a lui de faire
 // les recherches les plans les taches et le boulot demande". The work is ChatGPT's, from the first
 // 512 characters on, on both remote surfaces, and in the guide pasted into a ChatGPT project.
