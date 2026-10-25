@@ -10,14 +10,22 @@ const live = new Set(['starting', 'running', 'stopping']);
 export function createAcpProcessSupervisor({
   admit, launch, renew, now = Date.now,
   intervalMs = 10_000, createMonitor = createAcpLeaseMonitor,
-  stopTimeoutMs = 5_000, wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+  stopTimeoutMs = 5_000, wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  journal = null
 } = {}) {
   if (typeof admit !== 'function' || typeof launch !== 'function' ||
-      typeof renew !== 'function' || typeof createMonitor !== 'function') {
+      typeof renew !== 'function' || typeof createMonitor !== 'function' ||
+      (journal !== null && (typeof journal.save !== 'function' ||
+                            typeof journal.read !== 'function'))) {
     throw new TypeError('invalid_acp_supervisor');
   }
   const sessions = new Map();
   const byWorktree = new Map();
+  const recovered = id => {
+    if (!journal) return fail('unknown_session');
+    try { return journal.read(id) ?? fail('unknown_session'); }
+    catch { return fail('acp_recovery_unavailable'); }
+  };
 
   const view = s => ({
     session_id: s.id, workspace_id: s.workspaceId, worktree_id: s.worktreeId,
@@ -34,19 +42,45 @@ export function createAcpProcessSupervisor({
     await stopProcess(s);
   }
 
+  const persist = s => {
+    // Journal failure must never prevent cleanup; a previous active receipt
+    // then requires operator recovery after restart, not an assumed stop.
+    try { journal?.save(view(s)); } catch {}
+  };
+  const confirmStopped = s => {
+    if (s.state === 'stopped') return;
+    s.state = 'stopped';
+    s.endedAt = now();
+    persist(s);
+    if (byWorktree.get(s.worktreeId) === s.id) byWorktree.delete(s.worktreeId);
+  };
+
   async function stopProcess(s) {
     if (s.cleaned) return;
     s.cleaned = true;
     const child = s.child;
     if (child) {
+      let exited = false;
+      const completion = Promise.resolve(child.exited).then(
+        () => { exited = true; }, () => { exited = true; }
+      );
       try { child.stop('SIGTERM'); } catch {}
-      const ended = child.exited ?? Promise.resolve();
-      await Promise.race([Promise.resolve(ended).catch(() => {}), wait(stopTimeoutMs)]);
-      try { if (child.alive?.()) child.stop('SIGKILL'); } catch {}
+      await Promise.race([completion, wait(stopTimeoutMs)]);
+      try { if (!exited && child.alive?.()) child.stop('SIGKILL'); } catch {}
+      if (!exited && child.alive?.()) {
+        await Promise.race([completion, wait(1_000)]);
+      }
+      if (!exited && child.alive?.()) {
+        // A signal is not proof that the process died. Hold the worktree
+        // reservation, never write 'stopped', and finalize on actual exit.
+        s.state = 'stopping';
+        s.reason = 'termination_unconfirmed';
+        persist(s);
+        void completion.then(() => confirmStopped(s));
+        return;
+      }
     }
-    s.state = 'stopped';
-    s.endedAt = now();
-    if (byWorktree.get(s.worktreeId) === s.id) byWorktree.delete(s.worktreeId);
+    confirmStopped(s);
   }
 
   return Object.freeze({
@@ -71,6 +105,9 @@ export function createAcpProcessSupervisor({
       byWorktree.set(worktreeId, id);
       sessions.set(id, s);
       try {
+        // Persist evidence BEFORE any child can start. If storage is unsafe
+        // or unavailable, refuse launch. No process is created on failure.
+        journal?.save(view(s));
         const admission = await admit({ workspace_id: workspaceId, worktree_id: worktreeId });
         if (!admission?.ok || admission.workspace_id !== workspaceId ||
             admission.worktree_id !== worktreeId) {
@@ -141,6 +178,8 @@ export function createAcpProcessSupervisor({
         ).catch(() => {});
         if (s.cleaned) return fail(s.reason ?? 'agent_exited');
         s.state = 'running';
+        // If durable recording fails, catch below stops this new child.
+        journal?.save(view(s));
         return { ok: true, ...view(s) };
       } catch {
         s.reason = 'agent_start_failed';
@@ -173,13 +212,15 @@ export function createAcpProcessSupervisor({
     },
     async stop(sessionId) {
       const s = sessions.get(sessionId);
-      if (!s) return fail('unknown_session');
+      // A journal is evidence, not a handle. Never claim a child from a
+      // previous process was killed or attempt PID-based recovery.
+      if (!s) return recovered(sessionId);
       await end(s);
       return { ok: true, ...view(s) };
     },
     status(sessionId) {
       const s = sessions.get(sessionId);
-      return s ? { ok:true, ...view(s) } : fail('unknown_session');
+      return s ? { ok:true, ...view(s) } : recovered(sessionId);
     },
     async close() {
       await Promise.all([...sessions.values()].filter(s => live.has(s.state))

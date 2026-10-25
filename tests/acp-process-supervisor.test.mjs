@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {createAcpProcessSupervisor} from '../server/runners/acp-process-supervisor.mjs';
+import {createAcpRecoveryJournal} from '../server/runners/acp-recovery-journal.mjs';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 const args={workspace_id:'ws_ABCDEFGHIJKLMNOP',worktree_id:'wt_ABCDEFGHIJKLMNOP'};
 const admission={ok:true,...args,issue:'memolabs-dev/memo-orbit#174',claim_id:'a'.repeat(32)};
 function fixture(options={}){
@@ -191,4 +195,94 @@ test('failed interactive transport fails closed and stops the process',async()=>
  assert.equal((await f.supervisor.prompt(started.session_id,'run')).error,'acp_prompt_failed');
  assert.equal(stopped,true);
  assert.equal(f.supervisor.status(started.session_id).state,'stopped');
+});
+
+
+test('restart exposes a durable recovery-required receipt, never a live process handle', async()=>{
+ const folder=mkdtempSync(join(tmpdir(),'acp-supervisor-recovery-'));
+ let done;
+ const child={alive:()=>true,stop:()=>done(),
+   exited:new Promise(resolve=>{done=resolve})};
+ const journal=createAcpRecoveryJournal(folder);
+ const make=()=>createAcpProcessSupervisor({
+  admit:async()=>admission,renew:async()=>({ok:true,claim_id:admission.claim_id}),
+  launch:async()=>child,journal,
+  createMonitor:()=>({start:async()=>({ok:true}),stop:async()=>{}})
+ });
+ const original=make();
+ try{
+  const started=await original.start(args);
+  assert.equal(started.ok,true);
+  const reopened=make();
+  const observed=reopened.status(started.session_id);
+  assert.equal(observed.ok,false);
+  assert.equal(observed.state,'recovery_required');
+  assert.equal(observed.error,'acp_recovery_required');
+  assert.equal(child.alive(),true,'read-only observation cannot kill a child');
+  const deniedStop=await reopened.stop(started.session_id);
+  assert.equal(deniedStop.error,'acp_recovery_required');
+  await original.stop(started.session_id);
+  const stopped=reopened.status(started.session_id);
+  assert.equal(stopped.ok,true);
+  assert.equal(stopped.state,'stopped');
+  assert.equal(stopped.reason,'user_cancelled');
+ }finally{await original.close();rmSync(folder,{recursive:true,force:true})}
+});
+
+test('unwritable recovery journal refuses to launch any OpenCode process',async()=>{
+ let launches=0;
+ const f=fixture({
+  journal:{save:()=>{throw Error('unavailable')},read:()=>null},
+  launch:async()=>{launches++}
+ });
+ const started=await f.supervisor.start(args);
+ assert.equal(started.error,'agent_start_failed');
+ assert.equal(launches,0);
+});
+
+test('failure to record running state stops a newly created child',async()=>{
+ let exited,stopped=false,launches=0;
+ const f=fixture({
+  journal:{
+   save:row=>{if(row.state==='running')throw Error('storage_failed')},
+   read:()=>null
+  },
+  launch:async()=>{launches++;return {
+   alive:()=>!stopped,
+   stop:()=>{stopped=true;exited()},
+   exited:new Promise(resolve=>{exited=resolve})
+  }}
+ });
+ const result=await f.supervisor.start(args);
+ assert.equal(result.error,'agent_start_failed');
+ assert.equal(launches,1);
+ assert.equal(stopped,true);
+});
+
+
+test('SIGTERM/SIGKILL without confirmed exit stays stopping and blocks a second agent',async()=>{
+ let resolveExit,alive=true,signals=[];
+ const child={
+  alive:()=>alive,stop:signal=>{signals.push(signal)},
+  exited:new Promise(resolve=>{resolveExit=resolve})
+ };
+ const rows=[];
+ const f=fixture({
+  launch:async()=>child,wait:async()=>{},
+  journal:{save:row=>rows.push({...row}),read:()=>null},
+  createMonitor:()=>({start:async()=>({ok:true}),stop:async()=>{}})
+ });
+ const started=await f.supervisor.start(args);
+ assert.equal(started.ok,true);
+ const stopped=await f.supervisor.stop(started.session_id);
+ assert.equal(stopped.state,'stopping');
+ assert.equal(stopped.reason,'termination_unconfirmed');
+ assert.deepEqual(signals,['SIGTERM','SIGKILL']);
+ assert.equal(rows.at(-1).state,'stopping','durable receipt must not say stopped');
+ assert.equal((await f.supervisor.start(args)).error,'agent_already_running');
+ alive=false;
+ resolveExit();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.supervisor.status(started.session_id).state,'stopped');
+ assert.equal(rows.at(-1).state,'stopped');
 });

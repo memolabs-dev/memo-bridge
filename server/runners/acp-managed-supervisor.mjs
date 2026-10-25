@@ -4,11 +4,12 @@
 import {checkAcpAdmission} from './acp-admission.mjs';
 import {createAcpProcessSupervisor} from './acp-process-supervisor.mjs';
 import {launchSandboxedOpenCode} from './acp-sandbox-launcher.mjs';
+import {createAcpRecoveryJournal} from './acp-recovery-journal.mjs';
 import {localOwnerId} from '../coordinator/policy.mjs';
 const fail=error=>({ok:false,error});
 
 export function createManagedAcpSupervisor(rt,{launch,preflight=checkAcpAdmission,
-  createSupervisor=createAcpProcessSupervisor}={}){
+  createSupervisor=createAcpProcessSupervisor,journal=null}={}){
  if(!rt||typeof launch!=='function')throw new TypeError('trusted_launcher_required');
  if(rt.host!=='mac'||rt.readOnly||rt.principal?.id!==localOwnerId())
   throw new TypeError('mac_owner_required');
@@ -39,7 +40,7 @@ export function createManagedAcpSupervisor(rt,{launch,preflight=checkAcpAdmissio
   return result?.ok&&result.claim_id===a.claim_id?result:
    fail(result?.error??'stale_lease');
  };
- return createSupervisor({admit,renew,launch});
+ return createSupervisor({admit,renew,launch,journal});
 }
 
 
@@ -48,6 +49,7 @@ export function createManagedAcpSupervisor(rt,{launch,preflight=checkAcpAdmissio
 // model execution until a scoped provider transport and ACP RPC are added.
 export function createMacSandboxedAcpSupervisor(rt) {
  return createManagedAcpSupervisor(rt,{
-  launch: request => launchSandboxedOpenCode(rt,request)
+  launch: request => launchSandboxedOpenCode(rt,request),
+  journal: createAcpRecoveryJournal(rt.stateDir)
  });
 }
