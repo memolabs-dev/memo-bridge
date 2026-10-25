@@ -22,8 +22,9 @@ const RATE_WINDOW_MS = 60_000;
 const TIER_KEYS = Object.freeze([null, 'write', 'exec', 'root']);
 
 // Refusals that count towards auto-freeze: every signature refusal except a full nonce cache
-// (load, not forgery), a tier above the local policy, a secret path request, and a write or
-// command aimed at a control path (issue #290: the policy, the FROZEN switches, the hub state).
+// (load, not forgery), a tier above the local policy, a secret path request, and a write aimed at
+// a control path (issue #290: the policy, the FROZEN switches, the hub state). A command refused
+// by the control-path text scan is not counted: the agent and the root helper skip it.
 export const COUNTED_REFUSALS = Object.freeze(new Set([
   ...SIGNATURE_REFUSALS.filter(code => code !== 'nonce_cache_full'), 'tier_not_allowed', 'tier_mismatch', 'path_secret',
   'control_path_protected',

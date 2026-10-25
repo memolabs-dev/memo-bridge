@@ -69,11 +69,11 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
   }
 
   // Fail-closed read for a table whose silent loss is unsafe (the operator locks): {ok:true, data}
-  // (data null when the document does not exist yet) or {ok:false, error}. An unreadable or
+  // (data null and missing true when the document does not exist yet) or {ok:false, error}. An unreadable or
   // unparsable document is journaled but left in place, so a later read can succeed once it is
-  // fixed; nothing here starts an empty table on its behalf. Without a directory: {ok:true, data:null}.
+  // fixed; nothing here starts an empty table on its behalf. Without a directory: {ok:true, data:null, missing:true}.
   function read(name) {
-    if (!dir) return { ok: true, data: null };
+    if (!dir) return { ok: true, data: null, missing: true };
     const file = pathOf(name);
     let text;
     try {
@@ -81,7 +81,7 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
       if (!st.isFile() || st.size > HUB_STATE_MAX_BYTES) throw new Error('not a regular file or too large');
       text = readFileSync(file, 'utf8');
     } catch (error) {
-      if (error?.code === 'ENOENT') return { ok: true, data: null };
+      if (error?.code === 'ENOENT') return { ok: true, data: null, missing: true };
       record('hub_state_corrupt', { document: name, reason: 'unreadable', kept: true });
       return fail('unreadable');
     }

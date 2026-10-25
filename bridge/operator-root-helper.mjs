@@ -136,8 +136,8 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const tier = operatorCallTier(op, args);
     const base = { request_id: msg.request_id ?? id ?? null, ref: typeof args?.ref === 'string' ? args.ref.slice(0, 128) : null, op, tier,
       principal, args, args_sha256: argsSha256(args) };
-    const refuse = (code, extra = {}) => {
-      guard.refused(code);
+    const refuse = (code, extra = {}, { counted = true } = {}) => {
+      if (counted) guard.refused(code);
       const out = fail(code, extra);
       journal({ ...base, outcome: 'denied', code, ms: now() - started }, out);
       log('root_refused', { op, code });
@@ -164,7 +164,7 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     if (op === 'operator_run' || op === 'operator_script') {
       const named = await controlRefusal(denylist, policy, { argv: op === 'operator_run' ? a.argv : (a.args ?? []), cwd: a.cwd ?? '/',
         content: op === 'operator_script' ? a.content : null });
-      if (named) return refuse(named.error);
+      if (named) return refuse(named.error, {}, { counted: false });
     }
 
     let data;

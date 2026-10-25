@@ -187,6 +187,15 @@ test('#290: hub state unreadable or corrupt: the hub starts frozen above T0, loc
   hub.setOperatorFrozen(false, 'telegram:owner');
   assert.equal(createHub({ ...base, stateDir: corrupt }).operatorFrozen(), false);
 
+  // A document that parses but holds no boolean flag is malformed: frozen as well.
+  for (const data of [{ frozen: 'yes' }, null, [], 'no']) {
+    const odd = stateDir();
+    writeFileSync(join(odd, 'freeze.json'), JSON.stringify({ version: 1, data }), { mode: 0o600 });
+    assert.equal(createHub({ ...base, stateDir: odd }).operatorFrozen(), true, JSON.stringify(data));
+  }
+  assert.equal(createHub({ ...base, stateDir: stateDir() }).operatorFrozen(), false, 'no document yet: not frozen');
+  assert.equal(createHub(base).operatorFrozen(), false, 'no state directory: not frozen, as before');
+
   // 2. An unreadable freeze.json, then an unreadable state directory.
   const locked = stateDir();
   writeFileSync(join(locked, 'freeze.json'), JSON.stringify({ version: 1, data: { frozen: false } }), { mode: 0o600 });
@@ -254,7 +263,7 @@ test('#290: commands and scripts naming a control path are refused whatever the 
     { argv: ['rm', 'memo-operator/FROZEN'], cwd: '/etc' },
     { argv: ['touch', '../../state/FROZEN'], cwd: a.p('srv/rw') },
     { argv: ['rm', a.p('srv/rw/ctl/AUTO-FROZEN')] },
-    { argv: ['ls'], cwd: a.p('srv/rw/ctl') },
+    { argv: ['touch', 'x'], cwd: a.p('srv/rw/ctl') },
     { argv: ['install', '--target-directory=/var/lib/memo-bridge-hub', 'x'] },
     { argv: ['bash', '-c', 'echo {} > /var/lib/memo-bridge-hub/freeze.json'] },
     { argv: ['systemctl', 'restart', 'memo-operator-agent.service'] },
@@ -272,10 +281,70 @@ test('#290: commands and scripts naming a control path are refused whatever the 
     'control_path_protected');
   assert.deepEqual(a.runs, [], 'none of them ran');
   assert.equal(a.guard.status().auto, false);
-  // A burst counts like a secret-path burst: five in five minutes freeze the host above T0.
-  for (let i = 0; i < 5; i++) await a.call('operator_run', { host: 'vps', argv: ['tee', '/var/lib/memo-bridge-hub/grants.json'] });
+  // A text match can be an innocent mention: a burst of command refusals does not freeze...
+  for (let i = 0; i < 6; i++) await a.call('operator_run', { host: 'vps', argv: ['tee', '/var/lib/memo-bridge-hub/grants.json'] });
+  assert.equal(a.guard.status().auto, false);
+  // ...a burst of writes aimed at control paths does, like a secret-path burst.
+  for (let i = 0; i < 5; i++) await a.call('operator_edit', { host: 'vps', path: '/var/lib/memo-bridge-hub/grants.json', mode: 'write', new_text: '{}', create: true });
   assert.equal(a.guard.status().auto, true);
   assert.equal((await a.call('operator_run', { host: 'vps', argv: ['true'] })).error, 'frozen');
+});
+
+// The live shapes: lab (read root "/", write roots /srv /opt /etc ...) and the Mac (the home).
+// Paths are checked as strings: the realpath is the identity, nothing on this machine is read.
+const LIVE = {
+  vps: { version: 1, host: 'vps', max_tier: 'root', approval_mode: 'off', roots: { read: ['/'], write: ['/srv', '/opt', '/etc', '/var/www', '/home', '/root', '/tmp'] },
+    frozen_file: '/etc/memo-operator/FROZEN', audit_file: '/var/log/memo-operator/audit.jsonl', state_dir: '/var/lib/memo-operator',
+    root_helper: { socket: '/run/memo-operator/root.sock' } },
+  mac: { version: 1, host: 'mac', max_tier: 'root', approval_mode: 'off', roots: { read: ['/Users/memo'], write: ['/Users/memo', '/tmp'] },
+    frozen_file: '/Users/memo/.memo-operator/FROZEN', audit_file: '/Users/memo/Library/Logs/memo-operator/audit.jsonl',
+    state_dir: '/Users/memo/.memo-operator/state', root_helper: { socket: '/var/run/memo-operator/root.sock' } }
+};
+const live = host => {
+  const policy = parseOperatorPolicy(LIVE[host], { home: '/Users/memo', realpath: p => p });
+  const deny = createDenylist(policy);
+  return args => controlRefusal(deny, policy, args, { realpath: async p => p });
+};
+
+test('#290 review: bare names from the cwd, a "~/" cwd, glued options and odd spellings are resolved; agent units by name', async () => {
+  const vps = live('vps');
+  const mac = live('mac');
+  const refused = [
+    [vps, { argv: ['cp', '/tmp/x', 'sudoers'], cwd: '/etc' }],
+    [vps, { argv: ['cp', '/tmp/u', 'memo-bridge-hub.service'], cwd: '/etc/systemd/system' }],
+    [vps, { argv: ['cp', '/tmp/r', '10-memo.rules'], cwd: '/etc/polkit-1/rules.d' }],
+    [vps, { argv: ['dd', 'if=/tmp/x', 'of=/var/lib//memo-bridge-hub/freeze.json'] }],
+    [vps, { argv: ['tar', '-xf', '/tmp/a.tar', '-C/opt//memo-bridge'] }],
+    [vps, { argv: ['make', 'install', 'DESTDIR=/opt/./memo-bridge'] }],
+    [vps, { argv: ['systemctl', 'edit', '--stdin', 'memo-bridge-hub'] }],
+    [vps, { argv: ['systemctl', 'stop', 'memo-operator-agent'] }],
+    [mac, { argv: ['cp', '/tmp/x.plist', 'dev.memolabs.memo-bridge-agent.plist'], cwd: '/Users/memo/Library/LaunchAgents' }],
+    [mac, { argv: ['rm', 'audit.jsonl'], cwd: '~/Library/Logs/memo-operator' }],
+    [mac, { argv: ['rm', 'coordinator.sqlite'], cwd: '~/Library/Application Support/memo-bridge' }],
+    [mac, { argv: ['dd', 'if=/tmp/x', 'of=/Users/memo/./.memo-operator/FROZEN'] }],
+    [mac, { argv: ['sort', '-o/Users/memo//.memo-operator/policy.json', 'x'] }],
+    [mac, { argv: ['sort', '-o../.local/share/memo-bridge/bridge/operator-agent.mjs', 'x'], cwd: '~/memolabs' }],
+    [mac, { argv: ['launchctl', 'kickstart', '-k', 'gui/501/dev.memolabs.memo-operator-agent'] }]
+  ];
+  for (const [check, args] of refused) assert.equal((await check(args))?.error, 'control_path_protected', JSON.stringify(args));
+  // Reads stay reads, even of control paths and agent units; a neighbour of a control path is not one.
+  const allowed = [
+    [vps, { argv: ['journalctl', '-u', 'memo-operator-agent', '-n', '50'] }],
+    [vps, { argv: ['systemctl', 'status', 'memo-operator-root'] }],
+    [vps, { argv: ['cat', '/var/log/memo-operator/audit.jsonl'] }],
+    [vps, { argv: ['ls', '/opt/memo-bridge-staging'] }],
+    [vps, { argv: ['mkdir', '-p', '/opt/memo-bridge-staging/x'] }],
+    [vps, { argv: ['cp', '/tmp/r', '50-other.rules'], cwd: '/etc/polkit-1/rules.d' }],
+    [vps, { argv: ['systemctl', 'restart', 'traefik.service'] }],
+    [mac, { argv: ['grep', '-rn', 'memo-operator-root', 'bridge/'], cwd: '~/memolabs/os/core/bridge' }],
+    [mac, { argv: ['git', 'commit', '-m', 'fix'], cwd: '~/memolabs/os/core/bridge' }],
+    [mac, { argv: ['touch', 'notes.txt'], cwd: '~' }]
+  ];
+  for (const [check, args] of allowed) assert.equal(await check(args), null, JSON.stringify(args));
+  // A FROZEN switch placed straight in the home protects that file, not the whole home.
+  const broad = parseOperatorPolicy({ ...LIVE.mac, frozen_file: '/Users/memo/FROZEN' }, { home: '/Users/memo', realpath: p => p });
+  const deny = createDenylist(broad);
+  assert.deepEqual([deny.controlled('/Users/memo/FROZEN'), deny.controlled('/Users/memo/notes.txt')], [true, false]);
 });
 
 test('#290: ordinary commands are not caught by the control-path check', { skip: asRoot }, async t => {

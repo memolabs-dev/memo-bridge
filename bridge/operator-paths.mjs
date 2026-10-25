@@ -79,35 +79,69 @@ export const CONTROL_GLOBS = Object.freeze({
   ])
 });
 
-// The agents' own units and launchd labels: restarting or rewriting one applies a changed policy.
-export const CONTROL_LABELS = Object.freeze(['memo-operator-agent', 'memo-operator-root', 'dev.memolabs.memo-operator']);
+// Unit names and launchd labels of the agents, the hub and the runtime: editing, enabling or
+// restarting one through a command applies a changed policy or environment. A command naming
+// one is refused unless it is a read (operator-dangerous.mjs readOnlyCommand: systemctl status,
+// journalctl, launchctl print...); declared units are restarted through operator_service.
+export const CONTROL_LABELS = Object.freeze(['memo-operator-agent', 'memo-operator-root', 'memo-bridge-hub', 'memo-bridge-runner',
+  'memo-bridge-vps-agent', 'dev.memolabs.']);
+
+// "//" and "/./" collapsed, so a spelling never hides a path from the text scan.
+export function collapseSlashes(text) {
+  let out = String(text);
+  for (let i = 0; i < 8; i++) {
+    const next = out.replace(/\/\.(?=\/|$)/g, '').replace(/\/{2,}/g, '/');
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
 
 // The control paths of one policy: the built-in ones of its host, the directory of its FROZEN
 // switch (the policy directory on both hosts), the journal's directory, the state directory
-// (auto-freeze marker, Mac checkout ledger) and the root helper's socket directory.
-
+// (auto-freeze marker, Mac checkout ledger) and the root helper's socket directory. A directory
+// that is "/", the home or a declared root is too broad to protect whole: only the file it
+// holds is protected there (frozen_file, audit_file, the AUTO-FROZEN marker, the socket).
 export function controlGlobs(policy, { extra = [] } = {}) {
   if (!policy) return [];
-  const dirs = [policy.frozenFile && dirname(policy.frozenFile), policy.auditFile && dirname(policy.auditFile), policy.stateDir,
-    policy.rootHelper && dirname(policy.rootHelper.socket)].filter(d => typeof d === 'string' && d !== '/');
-  const globs = [...(CONTROL_GLOBS[policy.host] ?? []), ...dirs.map(d => `${d}/**`), ...extra];
+  const declared = [...(policy.declaredRoots?.read ?? []), ...(policy.declaredRoots?.write ?? []), ...(policy.readRoots ?? []),
+    ...(policy.writeRoots ?? [])];
+  const own = [];
+  const add = (dir, file) => {
+    if (typeof dir !== 'string') return;
+    if (dir !== '/' && dir !== policy.home && !declared.includes(dir)) own.push(`${dir}/**`);
+    else own.push(file);
+  };
+  if (policy.frozenFile) add(dirname(policy.frozenFile), policy.frozenFile);
+  if (policy.auditFile) add(dirname(policy.auditFile), policy.auditFile);
+  if (policy.stateDir) add(policy.stateDir, join(policy.stateDir, 'AUTO-FROZEN'));
+  if (policy.rootHelper) add(dirname(policy.rootHelper.socket), policy.rootHelper.socket);
+  const globs = [...(CONTROL_GLOBS[policy.host] ?? []), ...own, ...extra];
   // macOS: /etc, /var and /tmp are symlinks into /private; the canonical form must match too.
   const withPrivate = globs.flatMap(g => (/^\/(etc|var|tmp)(\/|$)/.test(g) ? [g, `/private${g}`] : [g]));
   return [...new Set(withPrivate)];
 }
 
+// controlled(path): an absolute, resolved path is a control path. mentions(text): a control path
+// (with "~/" spelled out or not) or a label appears anywhere in a command line or a script, after
+// collapseSlashes, ending at a path boundary ("/opt/memo-bridge-staging" is not
+// "/opt/memo-bridge"). The text scan is a net for shell lines and scripts, not a boundary.
 export function createControlMatcher(policy, options) {
   const home = policy?.home ?? '/nonexistent';
   const globs = controlGlobs(policy, options);
   const patterns = globs.map(g => globToRegExp(g, home));
-  // Literal prefixes for the argument scan: a command line or script text naming one of these
-  // anywhere ("--out=/etc/memo-operator/x", "bash -c 'echo > ~/.memo-operator/policy.json'").
-  const literals = [...new Set([...globs.map(g => g.replace(/\/\*\*$/, '').replace(/\*.*$/, '')).filter(l => l.length > 4)
-    .flatMap(l => (l.startsWith('~/') ? [l, home + l.slice(1)] : [l])), ...CONTROL_LABELS])].map(l => l.toLowerCase());
+  const unanchored = re => re.source.replace(/^\^/, '').replace(/\$$/, '');
+  const spelled = [...new Set(globs.flatMap(g => (g.startsWith('~/') ? [g, home + g.slice(1)] : [g])))];
+  // globToRegExp(g, '~') keeps a leading "~/" literal; the home-expanded spelling is its own entry.
+  const inText = spelled.map(g => new RegExp(`${unanchored(globToRegExp(g, '~'))}(?=$|[^A-Za-z0-9._-])`, 'i'));
+  const labels = CONTROL_LABELS.map(l => l.toLowerCase());
   return Object.freeze({
     globs,
     controlled: path => patterns.some(re => re.test(path)),
-    mentions: text => { const t = String(text).toLowerCase(); return literals.some(l => t.includes(l)); }
+    mentions: text => {
+      const t = collapseSlashes(text);
+      return inText.some(re => re.test(t)) || labels.some(l => t.toLowerCase().includes(l));
+    }
   });
 }
 

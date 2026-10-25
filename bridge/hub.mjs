@@ -84,7 +84,9 @@ export function createHub(options) {
   // The /freeze flag is read fail closed (issue #290): a document that cannot be read or parsed
   // stays in place and the hub starts frozen above T0, never reset to unfrozen. The owner's
   // /unfreeze, or fixing or removing the file, lifts it.
-  const freezeRead = hubState.read('freeze');
+  // A document that parses but does not hold {frozen: boolean} is malformed, and frozen too.
+  const read = hubState.read('freeze');
+  const freezeRead = read.ok && read.missing !== true && typeof read.data?.frozen !== 'boolean' ? { ok: false, error: 'malformed' } : read;
   const savedFreeze = freezeRead.ok ? freezeRead.data : null;
   let operatorFrozen = !freezeRead.ok || savedFreeze?.frozen === true;
   if (!freezeRead.ok) record('operator_frozen', null, { by: 'state_unavailable', reason: freezeRead.error });

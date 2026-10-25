@@ -104,8 +104,8 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
           return false;
         }
       };
-      const refuse = async (code, extra = {}) => {
-        const froze = guard.refused(code);
+      const refuse = async (code, extra = {}, { counted = true } = {}) => {
+        const froze = counted ? guard.refused(code) : false;
         log('operator_refused', { op, code, principal, ...extra, ...(froze ? { auto_frozen: true } : {}) });
         const out = { ok: false, error: code, ...extra };
         await journal('denied', code, out);
@@ -141,7 +141,8 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
         const d = parsed.data;
         const named = await controlRefusal(control, policy, { argv: op === 'operator_run' ? d.argv : (d.args ?? []), cwd: d.cwd ?? '/',
           content: op === 'operator_script' ? d.content : null });
-        if (named) return refuse(named.error);
+        // Not counted towards auto-freeze: a text match can be an innocent mention (#290 review).
+        if (named) return refuse(named.error, {}, { counted: false });
       }
       // Mac-side authority: the same private ledger used by supervised local agents.
       // The remote caller cannot choose the session through tool arguments: only the
