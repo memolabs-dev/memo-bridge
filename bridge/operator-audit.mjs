@@ -1,9 +1,15 @@
 // Hash-chained host audit journal (Phase 6, TODO-P6-06, spec D7).
 //
 // One JSON line per operator call, each carrying the hash of the line before it:
-//   {seq, at, prev, source, request_id, ref, op, tier, principal, args_sha256, args, approval,
-//    outcome, code, ms, output_sha256, hash}
-// source is "agent" or "root-helper" (Lot 2): who reported the line.
+//   {seq, at, prev, source, request_id, ref, op, tier, principal, host, session, session_claimed?,
+//    args_sha256, args, approval, outcome, code, ms, output_sha256, hash}
+// source is "agent" or "root-helper" (Lot 2): who reported the line. host is the operator host;
+// session (issue #291) the conversation hash the hub signed (v2 signature), null when the call
+// carried none or the signature failed; session_claimed, present only when it differs, the
+// unsigned hint the request carried. Lines written before #291 have neither field and still
+// verify: the hash covers whatever fields a line has.
+// verifyJournal() and scripts/audit-verify.mjs rebuild the order of events per session and,
+// given an anchor (a seq and its hash, as the hub keeps every 15 min), detect a cut tail.
 // hash = SHA-256 of the canonical JSON of the line without `hash` (prev included), so changing,
 // removing or inserting a line breaks the chain at that line. The first line's prev is 64 zeros.
 // Arguments are kept only redacted (operator-output.mjs) and cut to 256 characters per string;
@@ -22,7 +28,7 @@ import { redactDeep, sha256Hex } from './operator-output.mjs';
 
 export const GENESIS = '0'.repeat(64);
 const MAX_ARG_CHARS = 256;
-const MAX_AUDIT_READ_BYTES = 64 * 1024 * 1024;
+export const MAX_AUDIT_READ_BYTES = 64 * 1024 * 1024;
 
 export const lineHash = line => sha256Hex(canonicalJson(Object.fromEntries(Object.entries(line).filter(([k]) => k !== 'hash'))));
 
@@ -101,7 +107,9 @@ export function createAuditChain({ store, now = Date.now } = {}) {
       const line = {
         seq: seq + 1, at: new Date(now()).toISOString(), prev, source: fields.source ?? 'agent',
         request_id: fields.request_id ?? null, ref: fields.ref ?? null, op: fields.op, tier: fields.tier ?? null,
-        principal: fields.principal ?? null, args_sha256: fields.args_sha256 ?? null, args: journalArgs(fields.args),
+        principal: fields.principal ?? null, host: fields.host ?? null, session: fields.session ?? null,
+        ...(fields.session_claimed !== undefined ? { session_claimed: fields.session_claimed } : {}),
+        args_sha256: fields.args_sha256 ?? null, args: journalArgs(fields.args),
         approval: fields.approval ?? null,
         outcome: fields.outcome, code: fields.code ?? null, ms: fields.ms ?? null,
         output_sha256: fields.output === undefined ? null : sha256Hex(fields.output)
@@ -147,4 +155,34 @@ export function helperAuditChain(client) {
       return out.head;
     }
   });
+}
+
+// The verifier (issue #291): verifyChain, then an optional anchor and the order of events per
+// session. anchor {seq, hash}: a head recorded earlier (the hub's 15-minute anchor, or a copy
+// the owner kept). A journal shorter than the anchor is `truncated` (a cut tail leaves a valid
+// chain, so only an anchor shows it); another hash at anchor.seq is `anchor_mismatch`.
+// sessions: one entry per session hash (null: lines without one), with its principals and the
+// seq of its first and last line, from the lines before any break.
+export function verifyJournal(text, { anchor = null } = {}) {
+  const chain = verifyChain(text);
+  const raw = text === '' ? [] : text.split('\n').filter((l, i, all) => l !== '' || i < all.length - 1);
+  const good = raw.slice(0, chain.ok ? raw.length : chain.first_broken_line - 1).map(l => JSON.parse(l));
+  const sessions = new Map();
+  for (const line of good) {
+    const key = typeof line.session === 'string' ? line.session : null;
+    const entry = sessions.get(key) ?? { session: key, principals: new Set(), lines: 0, first_seq: line.seq, last_seq: line.seq };
+    if (line.principal) entry.principals.add(line.principal);
+    entry.lines++;
+    entry.last_seq = line.seq;
+    sessions.set(key, entry);
+  }
+  const out = { ...chain, sessions: [...sessions.values()].map(e => ({ ...e, principals: [...e.principals].sort() })) };
+  if (anchor !== null) {
+    if (!Number.isInteger(anchor.seq) || anchor.seq < 1 || !/^[0-9a-f]{64}$/.test(anchor.hash ?? '')) throw new Error('invalid_anchor');
+    const at = good[anchor.seq - 1];
+    out.anchor = { seq: anchor.seq, ok: at?.hash === anchor.hash };
+    if (out.ok && !out.anchor.ok) Object.assign(out, { ok: false, reason: chain.lines < anchor.seq ? 'truncated' : 'anchor_mismatch',
+      first_broken_line: Math.min(anchor.seq, chain.lines + 1) });
+  }
+  return out;
 }

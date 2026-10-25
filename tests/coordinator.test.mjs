@@ -101,6 +101,30 @@ test('an expired claim cannot write even when nobody took it over', { skip: skip
   assert.equal((await coordinator.taskCheckpoint({ ...args, branch: 'main', commit: 'c'.repeat(40) })).error, 'stale_lease');
 });
 
+test('#291: an expired claim replayed by another session, with the holder\'s claim id and fence, is refused and never renewed', { skip: skipWithoutLedger }, async t => {
+  const { coordinator, store, github, ws } = await setup(t);
+  const a = await ws();
+  const b = await ws();
+  const claim = await coordinator.taskClaim({ workspace_id: a, issue: DROP });
+  // A claim id is looked up in its own workspace only: from another one it does not exist.
+  const REFUSED = ['stale_lease', 'no_live_claim', 'unknown_claim'];
+  const stolen = { workspace_id: b, issue: DROP, claim_id: claim.claim_id, fence: claim.fence };
+  assert.equal((await coordinator.taskRenew(stolen)).error, 'unknown_claim', 'live, the claim is the holder\'s only');
+  await github.expireAll();
+  for (const call of ['taskRenew', 'taskRelease', 'taskCheckpoint']) {
+    const extra = call === 'taskCheckpoint' ? { branch: 'main', commit: 'e'.repeat(40) } : call === 'taskRelease' ? { outcome: 'cancelled' } : {};
+    for (const args of [stolen, { ...stolen, workspace_id: a }]) {
+      const out = await coordinator[call]({ ...args, ...extra });
+      assert.ok(REFUSED.includes(out.error), `${call} by ${args.workspace_id === a ? 'the former holder' : 'another session'}: ${JSON.stringify(out)}`);
+    }
+  }
+  // Every refusal is journaled under the workspace that made it (unknown_claim as outcome "error").
+  const refusals = (await journal(store, {})).filter(e => e.op.startsWith('task_') && e.outcome !== 'ok');
+  assert.equal(refusals.length, 7);
+  assert.deepEqual(refusals.filter(e => e.workspace_id === b).map(e => e.code), Array(4).fill('unknown_claim'));
+  assert.deepEqual(refusals.filter(e => e.workspace_id === a).map(e => e.code), Array(3).fill('stale_lease'));
+});
+
 test('governance gates come from the ledger: readiness, allowlist, Issue edits; and the project must match', { skip: skipWithoutLedger }, async t => {
   const { coordinator, store, github, ws } = await setup(t, { issues: {
     'memolabs-dev/drop#8': { labels: ['priority:p1'] },
