@@ -324,14 +324,17 @@ test('#290 review: bare names from the cwd, a "~/" cwd, glued options and odd sp
     [mac, { argv: ['dd', 'if=/tmp/x', 'of=/Users/memo/./.memo-operator/FROZEN'] }],
     [mac, { argv: ['sort', '-o/Users/memo//.memo-operator/policy.json', 'x'] }],
     [mac, { argv: ['sort', '-o../.local/share/memo-bridge/bridge/operator-agent.mjs', 'x'], cwd: '~/memolabs' }],
-    [mac, { argv: ['launchctl', 'kickstart', '-k', 'gui/501/dev.memolabs.memo-operator-agent'] }]
+    [mac, { argv: ['launchctl', 'kickstart', '-k', 'gui/501/dev.memolabs.memo-operator-agent'] }],
+    // A file reader keeps its path check: were it misclassified, it would still not reach one.
+    [vps, { argv: ['cat', '/var/log/memo-operator/audit.jsonl'] }],
+    [vps, { argv: ['sort', '-o', '/var/lib/memo-bridge-hub/freeze.json', 'x'] }],
+    [mac, { argv: ['tail', '-n', '5', 'audit.jsonl'], cwd: '~/Library/Logs/memo-operator' }]
   ];
   for (const [check, args] of refused) assert.equal((await check(args))?.error, 'control_path_protected', JSON.stringify(args));
-  // Reads stay reads, even of control paths and agent units; a neighbour of a control path is not one.
+  // Reads that take no file stay reads, agent units included; a file reader may name a unit; a neighbour is not a control path.
   const allowed = [
     [vps, { argv: ['journalctl', '-u', 'memo-operator-agent', '-n', '50'] }],
     [vps, { argv: ['systemctl', 'status', 'memo-operator-root'] }],
-    [vps, { argv: ['cat', '/var/log/memo-operator/audit.jsonl'] }],
     [vps, { argv: ['ls', '/opt/memo-bridge-staging'] }],
     [vps, { argv: ['mkdir', '-p', '/opt/memo-bridge-staging/x'] }],
     [vps, { argv: ['cp', '/tmp/r', '50-other.rules'], cwd: '/etc/polkit-1/rules.d' }],

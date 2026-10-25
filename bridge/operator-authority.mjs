@@ -90,21 +90,25 @@ function pathParts(token) {
 // operator_script, the script text. Every part of every argument (pathParts) is resolved against
 // the cwd, bare names included ("sudoers" from /etc), and checked lexically and once symlinks are
 // resolved; every argument, the cwd and the script are also scanned as text (matcher.mentions).
-// A read (operator-dangerous.mjs readOnlyCommand) is not checked: reads are governed by the
-// secret denylist as before. Returns null or a refusal.
+// Reads (operator-dangerous.mjs readOnlyCommand): one that takes no file (systemctl status,
+// journalctl, ps...) is not checked; a file reader (cat, grep, ls...) skips the text scan, so a
+// pattern or a unit name in its arguments is not a match, but its resolved paths are still
+// checked: a misclassified "read" never reaches a control path. Returns null or a refusal.
 export async function controlRefusal(matcher, policy, { argv = [], cwd = '/', content = null } = {},
   { realpath = fsRealpath, readOnly = readOnlyCommand } = {}) {
   const refused = what => ({ ok: false, error: 'control_path_protected', detail: what });
-  if (content === null && readOnly(argv) !== null) return null;
+  const read = content === null ? readOnly(argv) : null;
+  if (read !== null && read.paths.length === 0) return null;
+  const scan = read === null;
   if (content !== null && matcher.mentions(content)) return refused('script names a control path');
   // The cwd as checkCwd reads it: "~/" is the agent user's home on the Mac.
   const home = typeof cwd === 'string' && policy.host === 'mac' && (cwd === '~' || cwd.startsWith('~/')) ? policy.home + cwd.slice(1) : cwd;
   const base = typeof home === 'string' && isAbsolute(home) ? resolve(home) : '/';
-  if (typeof cwd === 'string' && matcher.mentions(cwd)) return refused('cwd names a control path');
+  if (scan && typeof cwd === 'string' && matcher.mentions(cwd)) return refused('cwd names a control path');
   const candidates = [base];
   for (const raw of argv.slice(0, 256)) {
     if (typeof raw !== 'string' || raw === '') continue;
-    if (matcher.mentions(raw)) return refused('argument names a control path');
+    if (scan && matcher.mentions(raw)) return refused('argument names a control path');
     for (const part of pathParts(raw)) {
       if ((part === '~' || part.startsWith('~/')) && policy.host === 'mac') candidates.push(policy.home + part.slice(1));
       else candidates.push(isAbsolute(part) ? part : resolve(base, part));
