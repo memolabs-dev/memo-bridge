@@ -71,7 +71,7 @@ const COORDINATOR_TOOLS = ['workspace_open', 'workspace_status', 'workspace_list
 const WORKTREE_TOOLS = ['worktrees_list', 'worktree_create', 'worktree_status', 'worktree_list_files', 'worktree_read_file',
   'worktree_write_file', 'worktree_diff', 'worktree_commit', 'worktree_push', 'worktree_remove'];
 const JOB_TOOLS = ['jobs_submit', 'jobs_list', 'job_status', 'job_events', 'job_results', 'job_cancel'];
-const ACP_TOOLS = ['agent_preflight', 'agent_sandbox_start', 'agent_sandbox_status', 'agent_sandbox_stop'];
+const ACP_TOOLS = ['agent_preflight', 'agent_sandbox_start', 'agent_sandbox_status', 'agent_sandbox_stop', 'agent_sandbox_prompt'];
 const HOST_TOOLS = ['host_capabilities', 'host_resources'];
 const GITHUB_TOOLS = ['github_issues', 'github_pull_requests', 'github_workflows', 'github_checks', 'github_create_pr'];
 const AUDIT_TOOLS = ['audit_events', 'audit_operation'];
@@ -114,6 +114,11 @@ try {
   });
   assert.equal(canary.ok,false);
   assert.equal(canary.error,'canary_disabled');
+  const prompt=await call('agent_sandbox_prompt',{
+    session_id:'00000000-0000-4000-8000-000000000000',
+    text:'Check that the interactive canary remains disabled'
+  });
+  assert.deepEqual(prompt,{ok:false,error:'interactive_canary_disabled'});
   // Multi-session (D-MS9): the server instructions carry the start sequence and the stop codes.
   const instructions = client.getInstructions() ?? '';
   for (const rule of ['workspace_open', 'sessions_overview', 'task_next', 'operator_lock', 'operator_unlock', 'stale_lease',
