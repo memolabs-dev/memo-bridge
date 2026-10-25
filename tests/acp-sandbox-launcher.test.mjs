@@ -43,7 +43,7 @@ test('refuses changed git link and missing binary',async()=>{
 });
 
 
-test('registered Mac worktree handshake and session/new occur before launch returns ready', async () => {
+test('registered Mac worktree handshake and session/new occur before launch returns ready', { skip: process.platform !== 'darwin' }, async () => {
  const root=mkdtempSync(join(tmpdir(),'acp-launch-test-'));
  const worktree=join(root,'worktree'), stateDir=join(root,'state');
  const {mkdirSync}=await import('node:fs');
