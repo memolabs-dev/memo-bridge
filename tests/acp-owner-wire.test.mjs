@@ -36,3 +36,34 @@ test('Mac runtime forwards owner session status read-only with locally checked p
     session_id:id,principal:'hub:owner'
   }),{ok:false,error:'forbidden'});
 });
+
+
+test('hub owner cannot call experimental prompt even if both Mac flags are enabled',async t=>{
+  const previous=[
+    process.env.MEMO_BRIDGE_ACP_SANDBOX_CANARY,
+    process.env.MEMO_BRIDGE_ACP_INTERACTIVE_CANARY
+  ];
+  process.env.MEMO_BRIDGE_ACP_SANDBOX_CANARY='enabled';
+  process.env.MEMO_BRIDGE_ACP_INTERACTIVE_CANARY='enabled';
+  t.after(()=>{
+    for(const [key,value] of [
+      ['MEMO_BRIDGE_ACP_SANDBOX_CANARY',previous[0]],
+      ['MEMO_BRIDGE_ACP_INTERACTIVE_CANARY',previous[1]]
+    ])if(value===undefined)delete process.env[key];else process.env[key]=value;
+  });
+  const stateDir=await mkdtemp(join(tmpdir(),'acp-wire-prompt-refusal-'));
+  t.after(async()=>rm(stateDir,{recursive:true,force:true}));
+  const base=createRuntime({host:'mac',stateDir,hubGrants:{
+    'hub:owner':'owner'
+  }});
+  t.after(()=>base.close());
+  const wire=await createRuntimeOperations({
+    runtimeFor:principal=>base.as(principal),
+    principalFromWire:claimed=>base.principalFromHub(claimed)
+  });
+  t.after(()=>wire.close());
+  const out=await wire.handlers.agent_sandbox_prompt({
+    session_id:randomUUID(),text:'Run a command'
+  },{principal:{id:'hub:owner'}});
+  assert.deepEqual(out,{ok:false,error:'interactive_canary_disabled'});
+});
