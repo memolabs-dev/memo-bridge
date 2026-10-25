@@ -332,7 +332,8 @@ export function readOnlyCommand(argv) {
   if (ANY_ARGS.has(program)) return program === 'lsof' && args.some(a => a.startsWith('+')) ? null : { program, paths: [] };
   if (FILE_READERS.has(program)) {
     if (args.some(a => READER_BAD_OPTS.test(a))) return null;
-    if (program === 'sort' && args.some(a => a === '-o' || a.startsWith('--output'))) return null;
+    // sort writes with -o, glued (-o/x) or in a cluster (-ro x) too.
+    if (program === 'sort' && args.some(a => /^-[^-]*o/.test(a) || a.startsWith('--output'))) return null;
     return { program, paths: args.filter(a => !a.startsWith('-')).concat(args.filter(a => /^--?[A-Za-z-]+=/.test(a)).map(a => a.slice(a.indexOf('=') + 1))) };
   }
   if (program === 'find') return args.some(a => FIND_BAD.has(a)) ? null : { program, paths: args.filter(a => !a.startsWith('-')).slice(0, 1) };

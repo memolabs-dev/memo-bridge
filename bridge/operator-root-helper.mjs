@@ -51,6 +51,7 @@ import { operatorCallTier } from '../server/coordinator/policy.mjs';
 import { isGrantApproval, needsApproval } from './operator-dangerous.mjs';
 import { checkCwd, checkRun } from './operator-exec.mjs';
 import { createDenylist } from './operator-paths.mjs';
+import { controlRefusal } from './operator-authority.mjs';
 import { finalizeResult, untrusted } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
 import { createDockerActions } from './operator-docker.mjs';
@@ -114,8 +115,10 @@ export function systemdRunArgv({ unit, description, argv, cwd = '/', env = {}, t
 // the helper's own marker), chain (createAuditChain over the root-owned file), jobs
 // (createJobStore prefix 'rj'), executor (argv runner: runArgv on lab through systemd-run,
 // runArgvGroup on the Mac; tests inject a recorder).
+// authority: loadPolicyAuthority(...) of the helper's own policy copy (issue #290), checked before
+// every call; null in tests only, the CLI always passes one.
 export function createRootHelper({ policy, verifier, guard, chain, jobs = null, executor, scriptDir,
-  now = Date.now, random = randomBytes, log = () => {},
+  now = Date.now, random = randomBytes, log = () => {}, authority = null,
   docker = policy?.host === 'vps' ? createDockerActions({ now }) : null }) {
   if (!policy || !verifier || !guard || !chain || !scriptDir) throw new Error('root helper needs policy, verifier, guard, chain, scriptDir');
   if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('root helper needs a policy with max_tier root and root_helper');
@@ -133,9 +136,9 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const tier = operatorCallTier(op, args);
     const base = { request_id: msg.request_id ?? id ?? null, ref: typeof args?.ref === 'string' ? args.ref.slice(0, 128) : null, op, tier,
       principal, args, args_sha256: argsSha256(args) };
-    const refuse = code => {
-      guard.refused(code);
-      const out = fail(code);
+    const refuse = (code, extra = {}, { counted = true } = {}) => {
+      if (counted) guard.refused(code);
+      const out = fail(code, extra);
       journal({ ...base, outcome: 'denied', code, ms: now() - started }, out);
       log('root_refused', { op, code });
       return out;
@@ -147,6 +150,9 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     // T3 only, but for root job status and Docker (T2, repatriation D-R11).
     if (!['operator_job_status', 'operator_docker'].includes(op) && tier !== 3) return refuse('tier_mismatch');
     if (tier > policy.maxTier) return refuse('tier_not_allowed');
+    // Its own policy file, read again: the agent's check is not taken on trust (#290).
+    const lost = authority ? authority.check() : null;
+    if (lost) return refuse(lost.error, { reason: lost.reason });
     const admitted = guard.admit(tier);
     if (admitted) return refuse(admitted);
     if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
@@ -155,6 +161,11 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const parsed = OPERATOR_SCHEMAS[op].safeParse(args);
     if (!parsed.success || parsed.data.host !== host) return refuse('invalid_arguments');
     const a = parsed.data;
+    if (op === 'operator_run' || op === 'operator_script') {
+      const named = await controlRefusal(denylist, policy, { argv: op === 'operator_run' ? a.argv : (a.args ?? []), cwd: a.cwd ?? '/',
+        content: op === 'operator_script' ? a.content : null });
+      if (named) return refuse(named.error, {}, { counted: false });
+    }
 
     let data;
     try { data = await execute(op, a, { id, principal }); } catch { data = fail('internal_error'); }

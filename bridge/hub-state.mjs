@@ -9,9 +9,10 @@
 //
 // Writes are atomic (temporary file in the same directory, fsync, rename) and the files are
 // 0600. A document that cannot be read or parsed is set aside as <name>.corrupt-<ms> and the
-// table starts empty, journaled, never crashing the hub. The one exception is the operator locks:
-// they are read with read() (fail closed), the file stays in place, and the hub refuses every
-// lock with locks_state_unavailable until the document reads again (fixed, or removed to reset). Without a directory (tests, a hub
+// table starts empty, journaled, never crashing the hub. The exceptions are the operator locks and
+// the /freeze flag (issue #290): they are read with read() (fail closed), the file stays in place;
+// the hub refuses every lock with locks_state_unavailable, and starts frozen above T0, until the
+// document reads again (fixed, or removed to reset). Without a directory (tests, a hub
 // started by hand) every load answers the fallback and every save is a no-op: the behaviour of
 // the hub before this module.
 //
@@ -68,11 +69,11 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
   }
 
   // Fail-closed read for a table whose silent loss is unsafe (the operator locks): {ok:true, data}
-  // (data null when the document does not exist yet) or {ok:false, error}. An unreadable or
+  // (data null and missing true when the document does not exist yet) or {ok:false, error}. An unreadable or
   // unparsable document is journaled but left in place, so a later read can succeed once it is
-  // fixed; nothing here starts an empty table on its behalf. Without a directory: {ok:true, data:null}.
+  // fixed; nothing here starts an empty table on its behalf. Without a directory: {ok:true, data:null, missing:true}.
   function read(name) {
-    if (!dir) return { ok: true, data: null };
+    if (!dir) return { ok: true, data: null, missing: true };
     const file = pathOf(name);
     let text;
     try {
@@ -80,7 +81,7 @@ export function createHubState({ dir = null, record = () => {}, now = Date.now }
       if (!st.isFile() || st.size > HUB_STATE_MAX_BYTES) throw new Error('not a regular file or too large');
       text = readFileSync(file, 'utf8');
     } catch (error) {
-      if (error?.code === 'ENOENT') return { ok: true, data: null };
+      if (error?.code === 'ENOENT') return { ok: true, data: null, missing: true };
       record('hub_state_corrupt', { document: name, reason: 'unreadable', kept: true });
       return fail('unreadable');
     }

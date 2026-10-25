@@ -81,9 +81,16 @@ export function createHub(options) {
   // Durable state (bridge/hub-state.mjs): the /freeze flag, grants, locks and the notification
   // inbox survive a restart or a deploy when the hub has a state directory.
   const hubState = createHubState({ dir: stateDir, record: (event, details) => record(event, null, details) });
-  const savedFreeze = hubState.load('freeze', null);
-  let operatorFrozen = savedFreeze?.frozen === true;
-  if (operatorFrozen) record('operator_frozen', null, { by: 'restored', since: typeof savedFreeze.at === 'string' ? savedFreeze.at.slice(0, 40) : null });
+  // The /freeze flag is read fail closed (issue #290): a document that cannot be read or parsed
+  // stays in place and the hub starts frozen above T0, never reset to unfrozen. The owner's
+  // /unfreeze, or fixing or removing the file, lifts it.
+  // A document that parses but does not hold {frozen: boolean} is malformed, and frozen too.
+  const read = hubState.read('freeze');
+  const freezeRead = read.ok && read.missing !== true && typeof read.data?.frozen !== 'boolean' ? { ok: false, error: 'malformed' } : read;
+  const savedFreeze = freezeRead.ok ? freezeRead.data : null;
+  let operatorFrozen = !freezeRead.ok || savedFreeze?.frozen === true;
+  if (!freezeRead.ok) record('operator_frozen', null, { by: 'state_unavailable', reason: freezeRead.error });
+  else if (operatorFrozen) record('operator_frozen', null, { by: 'restored', since: typeof savedFreeze.at === 'string' ? savedFreeze.at.slice(0, 40) : null });
   const fileFrozen = () => {
     if (!freezeFile) return false;
     try { lstatSync(freezeFile); return true; } catch (error) { return error?.code !== 'ENOENT'; }

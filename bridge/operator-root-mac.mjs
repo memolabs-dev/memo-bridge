@@ -19,7 +19,8 @@
 // tests run it in a temporary directory without root.
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, sep } from 'node:path';
-import { loadOperatorPolicy, readTrustedFile } from './operator-policy.mjs';
+import { readTrustedFile } from './operator-policy.mjs';
+import { loadPolicyAuthority } from './operator-authority.mjs';
 import { createOperatorVerifier } from './operator-signing.mjs';
 import { createOperatorGuard } from './operator-guard.mjs';
 import { createAuditChain, fileAuditStore } from './operator-audit.mjs';
@@ -103,7 +104,8 @@ export async function startMacRootHelper({ env = process.env, getuid = () => pro
     const problem = untrustedAncestor(path, { trustedUids });
     if (problem) throw new Error(`${name}_untrusted:${problem}`);
   }
-  const policy = loadOperatorPolicy({ path: L.policy, expectedHost: 'mac', agentUid: getuid(), trustedUids });
+  const authority = loadPolicyAuthority({ path: L.policy, expectedHost: 'mac', agentUid: getuid(), trustedUids });
+  const { policy } = authority;
   if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('policy does not grant root (max_tier root and root_helper.socket required)');
   // The root FROZEN switch sits in the root-owned directory: only root creates or removes it.
   if (dirname(policy.frozenFile) !== L.dir) throw new Error('frozen_file_outside_root_dir');
@@ -140,6 +142,7 @@ export async function startMacRootHelper({ env = process.env, getuid = () => pro
     jobs: createJobStore({ dir: join(policy.stateDir, 'jobs'), prefix: 'rj' }),
     scriptDir: join(policy.stateDir, 'scripts'),
     ...(executor ? { executor } : {}),
+    authority,
     log
   });
   const summary = { ok: true, label: L.label, dir: L.dir, socket: policy.rootHelper.socket, socket_owner: { uid, gid }, audit: policy.auditFile,
