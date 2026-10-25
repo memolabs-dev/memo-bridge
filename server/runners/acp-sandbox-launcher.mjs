@@ -8,6 +8,7 @@ import { checkAcpAdmission, findOpenCode, inspectManagedWorktree } from './acp-a
 import { sandboxCommand, sandboxMode, sandboxPaths, jobEnvironment } from './sandbox.mjs';
 import { projectInfo } from '../catalog.mjs';
 import { initializeAcp } from './acp-initialize.mjs';
+import { createAcpV1Transport } from './acp-v1-transport.mjs';
 
 export async function launchSandboxedOpenCode(rt, {workspaceId,worktreeId,admission}, {
   spawnProcess=spawn, findBinary=findOpenCode, inspect=inspectManagedWorktree,
@@ -49,7 +50,7 @@ export async function launchSandboxedOpenCode(rt, {workspaceId,worktreeId,admiss
   ownsLock=false;
   try{unlinkSync(lockPath);}catch{}
  };
- let root=null,child=null,exited=null;
+ let root=null,child=null,exited=null,conversation=null;
  try{
   root=mkdtempSync(join(tmpdir(),'memo-acp-'));
   const home=join(root,'home'),tmp=join(root,'tmp');
@@ -80,12 +81,22 @@ export async function launchSandboxedOpenCode(rt, {workspaceId,worktreeId,admiss
   // initialize before the supervisor may report running or begin lease ticks.
   // No provider calls, prompts or internet access are possible here.
   const acp=await initializeAcp({stdin:child.stdin,stdout:child.stdout});
+  // The registered worktree path comes ONLY from the verified local store.
+  // The transport refuses permission and client-side file/terminal calls.
+  conversation=createAcpV1Transport({
+    stdin:child.stdin,stdout:child.stdout
+  },{protocolVersion:acp.protocolVersion});
+  await conversation.newSession({cwd:row.path});
   // Preserve pipes for a trusted future ACP transport. This owner-only
   // canary does not expose them over MCP.
-  return {acp,stdin:child.stdin,stdout:child.stdout,stderr:child.stderr,exited,
+  return {acp,conversation,stdin:child.stdin,stdout:child.stdout,stderr:child.stderr,exited,
    alive:()=>child.exitCode===null&&child.signalCode===null,
-   stop:signal=>{if(child.exitCode===null&&child.signalCode===null)child.kill(signal)}};
+   stop:signal=>{
+    conversation.close();
+    if(child.exitCode===null&&child.signalCode===null)child.kill(signal);
+   }};
  }catch(error){
+  try{conversation?.close()}catch{}
   try{child?.kill?.('SIGTERM');}catch{}
   if(child && exited){
    // Never release the lock while a verified child may still be alive.

@@ -67,7 +67,7 @@ export function createAcpProcessSupervisor({
       const id = randomUUID();
       const s = { id, workspaceId, worktreeId, issue: null, child: null,
         state: 'starting', reason: null, startedAt: now(), endedAt: null,
-        monitor: null, cleaned: false };
+        monitor: null, cleaned: false, prompting: false };
       byWorktree.set(worktreeId, id);
       sessions.set(id, s);
       try {
@@ -147,6 +147,29 @@ export function createAcpProcessSupervisor({
         await stopProcess(s);
         return fail(s.reason);
       }
+    },
+    // Internal only: no MCP prompt tool is registered. Before each prompt,
+    // recheck the authoritative lease, not just the previous monitor tick.
+    async prompt(sessionId, message) {
+      const s = sessions.get(sessionId);
+      if (!s || s.cleaned || s.state !== 'running') return fail('agent_not_running');
+      if (!s.child?.conversation) return fail('agent_prompt_unavailable');
+      if (s.prompting) return fail('agent_prompt_busy');
+      if (typeof message !== 'string' || !message.trim() ||
+          Buffer.byteLength(message, 'utf8') > 8192) return fail('agent_prompt_invalid');
+      s.prompting = true;
+      try {
+        await s.monitor.tick();
+        if (s.cleaned || s.state !== 'running') return fail(s.reason ?? 'stale_lease');
+        const reply = await s.child.conversation.prompt(message);
+        if (s.cleaned || s.state !== 'running') return fail(s.reason ?? 'agent_stopped');
+        return { ok: true, session_id: s.id, stop_reason: reply.stop_reason };
+      } catch {
+        // Transport/protocol failure is not a successful prompt. Stop any
+        // still-running child and reject future messages on this session.
+        await end(s, 'acp_prompt_failed');
+        return fail('acp_prompt_failed');
+      } finally { s.prompting = false; }
     },
     async stop(sessionId) {
       const s = sessions.get(sessionId);

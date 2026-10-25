@@ -27,6 +27,8 @@ test('real sandboxed OpenCode responds to ACP initialize and terminates', {skip:
    verify:async()=>({ok:true,workspace_id:workspaceId,worktree_id:worktreeId,issue})
   }),/acp_worktree_already_running/);
   assert.deepEqual(child.acp, {protocolVersion:1}, 'live sandbox handshake succeeded');
+  assert.deepEqual(child.conversation.status(), {state:'session_ready',busy:false},
+   'real OpenCode also accepted ACP session/new without provider access');
  }finally{
   if(child){
    child.stop('SIGTERM');
