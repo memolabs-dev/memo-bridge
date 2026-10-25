@@ -26,13 +26,7 @@ test('real sandboxed OpenCode responds to ACP initialize and terminates', {skip:
    inspect:async()=>({ok:true}),
    verify:async()=>({ok:true,workspace_id:workspaceId,worktree_id:worktreeId,issue})
   }),/acp_worktree_already_running/);
-  let output='';
-  child.stdout.on('data',chunk=>output=(output+String(chunk)).slice(-4096));
-  child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',
-   params:{protocolVersion:1,clientCapabilities:{}}})+'\n');
-  for(let i=0;i<40 && !output.includes('"id":1');i++)
-   await new Promise(resolve=>setTimeout(resolve,100));
-  assert.equal(output.includes('"id":1'),true,'ACP initialize response from real binary');
+  assert.deepEqual(child.acp, {protocolVersion:1}, 'live sandbox handshake succeeded');
  }finally{
   if(child){
    child.stop('SIGTERM');

@@ -7,6 +7,7 @@ import { join, isAbsolute } from 'node:path';
 import { checkAcpAdmission, findOpenCode, inspectManagedWorktree } from './acp-admission.mjs';
 import { sandboxCommand, sandboxMode, sandboxPaths, jobEnvironment } from './sandbox.mjs';
 import { projectInfo } from '../catalog.mjs';
+import { initializeAcp } from './acp-initialize.mjs';
 
 export async function launchSandboxedOpenCode(rt, {workspaceId,worktreeId,admission}, {
   spawnProcess=spawn, findBinary=findOpenCode, inspect=inspectManagedWorktree,
@@ -48,7 +49,7 @@ export async function launchSandboxedOpenCode(rt, {workspaceId,worktreeId,admiss
   ownsLock=false;
   try{unlinkSync(lockPath);}catch{}
  };
- let root=null,child=null;
+ let root=null,child=null,exited=null;
  try{
   root=mkdtempSync(join(tmpdir(),'memo-acp-'));
   const home=join(root,'home'),tmp=join(root,'tmp');
@@ -68,22 +69,35 @@ export async function launchSandboxedOpenCode(rt, {workspaceId,worktreeId,admiss
   // Drain bounded stderr so a noisy agent cannot block on a full pipe.
   // Never send these diagnostics to clients: plugins may print secrets.
   child.stderr?.on('data',()=>{});
-  const exited=new Promise(resolve=>{
+  exited=new Promise(resolve=>{
    child.once('error',()=>resolve());
    child.once('close',()=>resolve());
   }).finally(()=>{
    try{if(root)rmSync(root,{recursive:true,force:true});}catch{}
    releaseLock();
   });
-  // Preserve pipes for a trusted ACP transport; they are NEVER exposed as
-  // paths or streams in the MCP tool result.
-  return {stdin:child.stdin,stdout:child.stdout,stderr:child.stderr,exited,
+  // A spawned binary is not yet a working ACP agent. Confirm real JSON-RPC
+  // initialize before the supervisor may report running or begin lease ticks.
+  // No provider calls, prompts or internet access are possible here.
+  const acp=await initializeAcp({stdin:child.stdin,stdout:child.stdout});
+  // Preserve pipes for a trusted future ACP transport. This owner-only
+  // canary does not expose them over MCP.
+  return {acp,stdin:child.stdin,stdout:child.stdout,stderr:child.stderr,exited,
    alive:()=>child.exitCode===null&&child.signalCode===null,
    stop:signal=>{if(child.exitCode===null&&child.signalCode===null)child.kill(signal)}};
  }catch(error){
   try{child?.kill?.('SIGTERM');}catch{}
-  try{if(root)rmSync(root,{recursive:true,force:true});}catch{}
-  releaseLock();
+  if(child && exited){
+   // Never release the lock while a verified child may still be alive.
+   // The process-exit hook, not the exception path, owns final cleanup.
+   await Promise.race([exited,
+     new Promise(resolve=>setTimeout(resolve,1_000))]);
+   try{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL')}catch{}
+  }else{
+   // Spawn failed before process tracking; no running child owns the lock.
+   try{if(root)rmSync(root,{recursive:true,force:true})}catch{}
+   releaseLock();
+  }
   throw error;
  }
 }
