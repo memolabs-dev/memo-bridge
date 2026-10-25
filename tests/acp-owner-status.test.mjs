@@ -115,6 +115,7 @@ test('active status remains read-only even when launch and stop canary are disab
 test('the existing hub tool operation catalogue is unchanged',()=>{
  const f=fixture(runtime(principal(localOwnerId())));
  assert.deepEqual([...f.tools.keys()].sort(),[
-  'agent_preflight','agent_sandbox_start','agent_sandbox_status','agent_sandbox_stop'
+  'agent_preflight','agent_sandbox_start','agent_sandbox_status','agent_sandbox_stop',
+  'agent_sandbox_prompt'
  ].sort());
 });
