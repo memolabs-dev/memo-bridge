@@ -24,7 +24,9 @@ test('two MCP collectors in same process share exactly one runtime-scoped ACP ow
   const registry=createAcpRuntimeOwners({createSupervisor:()=>({
     start:async()=>({ok:true}),close:async()=>{closed++;made===1||assert.fail()}
   })});
+  assert.equal(registry.peek(rt),null);
   const first=registry.get(rt);made++;
+  assert.strictEqual(registry.peek(rt),first);
   const second=registry.get(rt);
   assert.strictEqual(first,second);
   assert.equal(made,1);

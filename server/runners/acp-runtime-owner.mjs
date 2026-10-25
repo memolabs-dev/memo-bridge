@@ -8,6 +8,12 @@ export function createAcpRuntimeOwners({createSupervisor = createMacSandboxedAcp
   if (typeof createSupervisor !== 'function') throw new TypeError('invalid_acp_owner_factory');
   const owners = new WeakMap();
   return Object.freeze({
+    // A read-only status lookup MUST NOT create a supervisor, open the
+    // recovery journal or start an agent. The identity-scoped runtime view
+    // is the key; sessions of another identity are never visible.
+    peek(runtime) {
+      return owners.get(runtime)?.supervisor ?? null;
+    },
     get(runtime) {
       if (!runtime || typeof runtime.onShutdown !== 'function')
         throw new Error('acp_runtime_lifecycle_unavailable');

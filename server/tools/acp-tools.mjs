@@ -4,19 +4,42 @@
 import { z } from 'zod/v4';
 import { checkAcpAdmission } from '../runners/acp-admission.mjs';
 import { acpRuntimeOwners } from '../runners/acp-runtime-owner.mjs';
-import { localOwnerId } from '../coordinator/policy.mjs';
+import { CAPABILITIES, HUB_PRINCIPALS, isRemotePrincipal, localOwnerId } from '../coordinator/policy.mjs';
 
 export const ACP_TOOLS = Object.freeze(['agent_preflight',
   'agent_sandbox_start', 'agent_sandbox_status', 'agent_sandbox_stop']);
-export function registerAcpTools(server, getRuntime) {
+export function registerAcpTools(server, getRuntime, {owners=acpRuntimeOwners}={}) {
   const canaryAllowed=rt=>rt?.host==='mac'&&!rt.readOnly&&
     rt.principal?.id===localOwnerId()&&
     process.env.MEMO_BRIDGE_ACP_SANDBOX_CANARY==='enabled';
-  const managerFor=rt=>acpRuntimeOwners.get(rt);
+  const managerFor=rt=>owners.get(rt);
+  // Only the transport-minted owner identity can read live ACP status.
+  // CAPABILITIES.EXECUTE is used as an owner-role check, never as a new
+  // execution grant; OIDC readers without remote write rights fail closed.
+  const liveStatusAllowed=rt=>rt?.host==='mac'&&!rt.readOnly&&
+    rt.principal?.capabilities?.has(CAPABILITIES.READ)&&
+    rt.principal?.capabilities?.has(CAPABILITIES.EXECUTE)&&
+    (rt.principal.id===localOwnerId() ||
+     rt.principal.id===HUB_PRINCIPALS.OWNER ||
+     isRemotePrincipal(rt.principal));
   const respond=data=>({content:[{type:'text',text:JSON.stringify(data)}]});
   const call=(op,method)=>async args=>{
     let rt;
     try{rt=await getRuntime();}catch{return respond({ok:false,error:'store_unavailable'});}
+    if(method==='status'){
+      // Status is deliberately NOT gated on the launch canary: a legitimate
+      // owner may inspect a session even after canary launch was disabled.
+      // This never creates a manager, reads old receipts or leaks another
+      // principal's session, and never executes agent code.
+      if(!liveStatusAllowed(rt)||!rt.authorize(op))
+        return respond({ok:false,error:'forbidden'});
+      let status;
+      try{status=owners.peek(rt)?.statusLive(args.session_id)
+        ?? {ok:false,error:'unknown_session'};}
+      catch{status={ok:false,error:'internal_error'};}
+      if(!status.ok)await rt.audit(op,'denied',status.error,{});
+      return respond(status);
+    }
     if(!canaryAllowed(rt)||!rt.authorize(op))
       return respond({ok:false,error:'canary_disabled'});
     let result;
@@ -36,7 +59,7 @@ export function registerAcpTools(server, getRuntime) {
     annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false}
   },call('agent_sandbox_start','start'));
   server.registerTool('agent_sandbox_status',{
-    description:'Inspect one opaque Mac sandbox canary session ID. Unknown after restart; never auto-relaunch.',
+    description:'Read-only owner view of a live Mac ACP session in this runtime/principal. No manager is started, no old receipts or other identities are searched; unknown after restart.',
     inputSchema:z.object({session_id:sessionId}),
     annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false}
   },call('agent_sandbox_status','status'));
