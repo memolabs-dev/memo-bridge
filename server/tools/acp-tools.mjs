@@ -3,20 +3,16 @@
 // preflight alone never starts OpenCode or grants a file path to a model.
 import { z } from 'zod/v4';
 import { checkAcpAdmission } from '../runners/acp-admission.mjs';
-import { createMacSandboxedAcpSupervisor } from '../runners/acp-managed-supervisor.mjs';
+import { acpRuntimeOwners } from '../runners/acp-runtime-owner.mjs';
 import { localOwnerId } from '../coordinator/policy.mjs';
 
 export const ACP_TOOLS = Object.freeze(['agent_preflight',
   'agent_sandbox_start', 'agent_sandbox_status', 'agent_sandbox_stop']);
 export function registerAcpTools(server, getRuntime) {
-  const managers=new WeakMap();
   const canaryAllowed=rt=>rt?.host==='mac'&&!rt.readOnly&&
     rt.principal?.id===localOwnerId()&&
     process.env.MEMO_BRIDGE_ACP_SANDBOX_CANARY==='enabled';
-  const managerFor=rt=>{
-    if(!managers.has(rt))managers.set(rt,createMacSandboxedAcpSupervisor(rt));
-    return managers.get(rt);
-  };
+  const managerFor=rt=>acpRuntimeOwners.get(rt);
   const respond=data=>({content:[{type:'text',text:JSON.stringify(data)}]});
   const call=(op,method)=>async args=>{
     let rt;

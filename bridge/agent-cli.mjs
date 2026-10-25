@@ -32,6 +32,7 @@ import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, r
 import { isAbsolute, join } from 'node:path';
 import { createAgent, createRuntimeOperations, probeOperations, wireClaim } from './agent.mjs';
 import { executableRuntimeHost } from './runtime-placement.mjs';
+import { closeRuntimeAgent } from './runtime-agent-shutdown.mjs';
 
 const env = process.env;
 const mode = env.MEMO_BRIDGE_AGENT_MODE || 'probe';
@@ -114,9 +115,14 @@ const agent = createAgent({
   operations,
   log: (event, h, details = {}) => log(event, details)
 });
-process.on('SIGTERM', async () => {
-  agent.stop();
+let shuttingDown=false;
+process.on('SIGTERM', () => {
+  if(shuttingDown)return;
+  shuttingDown=true;
   // Jobs are systemd units: they keep running and the next start reconciles them (REQ-P4-08).
-  try { await supervisor?.stop(); await runtimeOps?.close(); await base?.close(); } catch { /* exiting */ }
-  process.exit(0);
+  // The runtime's onShutdown hooks own local ACP children: always run them
+  // even if stopping the unrelated job supervisor fails.
+  void closeRuntimeAgent({agent,supervisor,runtimeOps,base}).then(
+    outcome => process.exit(outcome.ok ? 0 : 1), () => process.exit(1)
+  );
 });
