@@ -29,9 +29,9 @@ One JSON line per operator call, refusals included, hash-chained (`bridge/operat
 | `hash` | SHA-256 of the canonical JSON of the line without `hash` |
 | `source` | `agent` or `root-helper`: who reported the line |
 | `host` | `vps` or `mac` (**new**). On lab the root helper writes its own host, never the agent's claim |
-| `session` | the `client_session` the hub signed (v2) once the signature checked out, else `null` (**new**). Root calls are signed v1: `null` |
-| `session_claimed` | only when it differs from `session`: the hint the unsigned request metadata carried (**new**). A forged or replayed hint shows here and is never trusted |
-| `principal` | the principal id the hub signed |
+| `session` | the `client_session` the hub signed (v2) once the signature checked out, else `null` (**new**). Today the hub signs a session only for Mac T1 and T2 calls, with `MEMO_BRIDGE_OPERATOR_SESSION_BINDING=enabled` (off by default). Everywhere else it is `null`: every call on lab (the root helper cannot check a session the agent reports, so it never records one), every read, every root call (signed v1) |
+| `session_claimed` | only when it differs from `session`: the hint the unsigned request metadata carried, or `malformed` when a hint was there but was not a session hash (**new**). On lab, whatever session the agent reported lands here. Never trusted |
+| `principal` | the principal id the hub signed; for a refusal at the signature check (`signature_missing`, `signature_invalid`, `request_mismatch`...), the unverified id the request named |
 | `request_id`, `ref` | the wire request id; the caller's trace reference |
 | `op`, `tier` | operation and tier (0 to 3) |
 | `args_sha256`, `args` | hash of the exact arguments; arguments redacted and cut |
@@ -50,7 +50,9 @@ node scripts/audit-verify.mjs /var/log/memo-operator/audit.jsonl --anchor 1234:<
 It prints one JSON document and exits 0 for a clean chain, 1 for a broken one, 2 for unusable arguments or file. It reads with `O_NOFOLLOW` and never writes. On lab the journal is root-only, so the command runs as root.
 
 - `ok`, `lines`, `head`; on a break `first_broken_line` and `reason`: `unparsable`, `sequence` (a line deleted or inserted), `prev_mismatch` (a line rewritten and rehashed), `hash_mismatch` (a line edited), `truncated` (fewer lines than the anchor), `anchor_mismatch` (another line at the anchor's seq).
-- `sessions`: for each session hash (and `null`), its principals, its number of lines, the seq of its first and last line. A session with two principals is visible here.
+- `sessions`: for each session hash (and `null`), its principals, its number of lines, the seq of its first and last line. A session with two principals is visible here. Only verified sessions are grouped: until session binding is enabled on the Mac, every line falls in the `null` group.
+- Exit 2, never a verdict, for a missing file, a symlink, something other than a regular file, a file over 64 MiB (the reader's cap), or an anchor that is not `<seq ≥ 1>:<sha256>`.
+- The check is on parsed lines: re-serialising a line with other spacing, or CRLF line ends, changes no field and is not reported.
 - A cut tail leaves a valid chain. Only an anchor shows it: keep one (the hub's anchors, or a `seq:hash` copied off the host).
 
 ## What other journals do not carry yet
@@ -67,4 +69,4 @@ A search of both checkouts on 2026-10-25 found no reader of the operator journal
 
 ## Tests
 
-`tests/session-journal.test.mjs`: two sessions act concurrently and every line names its session, principal and host, the verifier reports a clean ordered chain; a swapped, dropped or replayed session id is refused (`session_mismatch`, `replayed`) and journaled with the claimed hint kept apart; deleting, editing, rehashing or cutting a line is detected by the command. `tests/coordinator.test.mjs`: an expired claim replayed by its former holder (`stale_lease`) or by another workspace (`unknown_claim`), on renew, release and checkpoint, is refused and journaled under the workspace that sent it. Expiry of a checkout lease for its holder and for another session: `tests/checkout-leases.test.mjs`.
+`tests/session-journal.test.mjs`: on the Mac agent, two sessions act concurrently and every line names its session, principal and host, the verifier reports a clean ordered chain; a swapped, dropped, replayed or malformed session id is refused or recorded (`session_mismatch`, `replayed`, `malformed`) with the claimed hint kept apart; deleting, editing, rehashing or cutting a line is detected by the command, and unusable input exits 2; on lab, a session the agent reports through the root helper is never recorded as verified. `tests/coordinator.test.mjs`: an expired claim replayed by its former holder (`stale_lease`) or by another workspace (`unknown_claim`), on renew, release and checkpoint, is refused and journaled under the workspace that sent it. Expiry of a checkout lease for its holder and for another session: `tests/checkout-leases.test.mjs`.

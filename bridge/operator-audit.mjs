@@ -28,7 +28,7 @@ import { redactDeep, sha256Hex } from './operator-output.mjs';
 
 export const GENESIS = '0'.repeat(64);
 const MAX_ARG_CHARS = 256;
-const MAX_AUDIT_READ_BYTES = 64 * 1024 * 1024;
+export const MAX_AUDIT_READ_BYTES = 64 * 1024 * 1024;
 
 export const lineHash = line => sha256Hex(canonicalJson(Object.fromEntries(Object.entries(line).filter(([k]) => k !== 'hash'))));
 

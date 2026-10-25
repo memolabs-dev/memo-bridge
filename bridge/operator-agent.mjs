@@ -97,7 +97,9 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       // Issue #291: every line names the host and the session. `session` is the conversation hash
       // the hub signed (v2) once the signature checked out, else null; `session_claimed` is what
       // the unsigned wire metadata said, kept apart so a forged hint is visible, never trusted.
-      const claimed = typeof ctx.meta?.client_session === 'string' && SESSION_RE.test(ctx.meta.client_session) ? ctx.meta.client_session : null;
+      // A hint that is not a session hash is not copied, but its presence is: 'malformed'.
+      const hint = ctx.meta?.client_session;
+      const claimed = hint === undefined || hint === null ? null : typeof hint === 'string' && SESSION_RE.test(hint) ? hint : 'malformed';
       let session = null;
       const journal = async (outcome, code, output) => {
         if (!chain) return true;

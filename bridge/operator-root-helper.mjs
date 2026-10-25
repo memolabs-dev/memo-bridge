@@ -245,9 +245,11 @@ export function createRootHelper({ policy, verifier, guard, chain, jobs = null, 
     const pick = ['request_id', 'ref', 'op', 'tier', 'principal', 'host', 'session', 'session_claimed', 'args', 'args_sha256', 'approval', 'outcome',
       'code', 'ms', 'output'];
     const clean = Object.fromEntries(pick.filter(k => fields[k] !== undefined).map(k => [k, fields[k]]));
-    // The host is the helper's own; a session field that is not a session hash is dropped (#291).
-    for (const k of ['session', 'session_claimed']) if (clean[k] !== undefined && clean[k] !== null && !SESSION_RE.test(String(clean[k]))) clean[k] = null;
-    const { seq, hash } = chain.append({ ...clean, host, source: 'agent' });
+    // The host is the helper's own (#291). The helper cannot check a session the agent reports, so
+    // the line never carries one as verified: whatever the agent sent is at most session_claimed.
+    const said = [clean.session, clean.session_claimed].find(v => typeof v === 'string' && SESSION_RE.test(v)) ?? null;
+    delete clean.session_claimed;
+    const { seq, hash } = chain.append({ ...clean, host, session: null, ...(said !== null ? { session_claimed: said } : {}), source: 'agent' });
     return { ok: true, seq, hash };
   }
 
