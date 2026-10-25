@@ -1,0 +1,60 @@
+# Policy authority: who decides, and what happens when the decision source is missing
+
+Issue #290, under the umbrella #4. The agent asks for an action. It never defines, widens or switches off its own rights, and a sensitive operation stops when the component that decides is not there. Approvals stay off on both hosts (owner decision 2026-10-23, #274): nothing here adds a prompt. This page says who holds each decision, who can write it, and what the code does when it is missing, unreadable, malformed or stale.
+
+Code: `bridge/operator-authority.mjs` (policy re-check, command scan), `bridge/operator-paths.mjs` (control paths), `bridge/hub.mjs` and `bridge/hub-state.mjs` (hub flag). Tests: `tests/policy-authority.test.mjs`, and the `#290` case in `tests/remote-surface.test.mjs`.
+
+## The two rules added
+
+1. **The policy must still be there for anything above a read.** The operator agent and each root helper keep the SHA-256 of the policy bytes they started with. Before every call above T0 they read the file again through the same trusted read (regular file, `O_NOFOLLOW`, owner, mode, directory). If the file no longer passes, the call answers `policy_unavailable` with a `reason`: `policy_unreadable`, `policy_is_symlink`, `policy_owner_untrusted`, `policy_writable_by_agent`, `policy_writable_by_others`, `policy_dir_*`, `invalid_operator_policy:<field>`, `policy_host_mismatch`. If it passes but differs from the copy in force, the call answers `policy_changed` (`reason: restart_to_apply`), and a restart applies it, as before. T0 reads keep working on the loaded copy. Every refusal is a `denied` line in the host journal. These refusals do not count towards auto-freeze: the host is already closed above T0.
+2. **Nothing the agent runs or writes may touch a control path**, whatever the approval mode. A write tool whose path is a control path, lexically or once symlinks and `..` are resolved, answers `control_path_protected`. So does an `operator_run` or `operator_script`, as the agent user or as root, when any argument, an `--option=value`, the cwd, a relative path resolved from the cwd, or the script text names one, or names an agent unit or launchd label (`memo-operator-agent`, `memo-operator-root`, `dev.memolabs.memo-operator`). The agent checks, and the root helper checks again on its own. These refusals count towards auto-freeze, like `path_secret`.
+
+Control paths are listed in `CONTROL_GLOBS` (`bridge/operator-paths.mjs`), plus, from the policy itself, the directory of `frozen_file`, the directory of `audit_file`, `state_dir` and the root helper's socket directory. On macOS each `/etc`, `/var` and `/tmp` entry is also checked under `/private`.
+
+## Decision sources
+
+| Source | Where | Owner | Who can write it | Can the agent's OS user write it? | Missing, unreadable, malformed or stale |
+|---|---|---|---|---|---|
+| Host policy | vps `/etc/memo-operator/policy.json`; Mac `~/.memo-operator/policy.json` (0444); Mac root helper `/Library/Application Support/MemoBridge/operator-root/policy.json` | root (vps, Mac root helper); the owner (Mac agent) | lab-infra role `memo-operator`; `deploy/mac/operator-mac.mjs`, `install-operator-root.sh` | vps: no (memo-operator, root-owned file and directory). Mac agent: **yes**, same uid as the owner. As root: yes | At start: the process does not start. After start: rule 1 |
+| Host FROZEN switch | `frozen_file`: `/etc/memo-operator/FROZEN`, `~/.memo-operator/FROZEN`, the Mac root helper's own | root; the owner on the Mac | the owner (`touch`, `rm`) | vps: no. Mac: **yes**. As root: yes | Any `lstat` error other than "does not exist" counts as frozen (`operator-guard.mjs`) |
+| Auto-freeze marker | `<state_dir>/AUTO-FROZEN` (`/var/lib/memo-operator`, `~/.memo-operator/state`) | the agent user | the agent's guard; the owner removes it, or Telegram `/unfreeze` | **yes** on both hosts: the agent writes its own state directory | Present: frozen above T0. Control path: no tool or command may remove it |
+| Hub `/freeze` flag | `/var/lib/memo-bridge-hub/freeze.json` (0700, memo-bridge) | memo-bridge | the hub on Telegram `/freeze`, `/unfreeze` | vps: no. As root: yes | **Changed here**: read fail closed. Unreadable or unparsable: the hub starts frozen above T0, the file stays in place, `operator_frozen` journaled with `by: state_unavailable`. Before, it was set aside and the hub started unfrozen |
+| Hub FROZEN file | `/etc/memo-bridge/operator-FROZEN` | root | the owner | vps: no. As root: yes | Any `lstat` error other than "does not exist" counts as frozen |
+| Standing grants (`/grant`) | hub state `grants.json` | memo-bridge | the hub, on the owner's Telegram decision | vps: no. As root: yes | Unreadable: set aside, journaled, the table starts empty. Empty means fewer rights, never more |
+| Permanent grants | the host policy, `permanent_grants` | as the policy | as the policy | as the policy | As the policy (rule 1); a grant id the local file does not hold is `approval_scope` |
+| Operator locks | hub state `locks.json` | memo-bridge | the hub | vps: no. As root: yes | Read fail closed: `locks_state_unavailable` for every lock, file kept |
+| Checkout leases (opt-in) | hub state `checkout_leases.json` | memo-bridge | the hub, under an exclusive lockfile | vps: no. As root: yes | Read fail closed: guarded writes refused |
+| Secret denylist | code (`DEFAULT_DENYLIST`) plus the policy's `denylist` | the release; the policy | a release; the policy's writer | the code: vps no (`/opt/memo-bridge`, root), Mac **yes** (`~/.local/share/memo-bridge`) | Built in, cannot be removed by the policy |
+| Write gate, project allowlist, owner, allowed clients, capability ceiling | `/etc/memo-bridge/remote.json` | root | lab-infra | vps: no. As root: yes | Malformed: the hub does not start. Writes enabled while a root CI runner exists: the hub does not start |
+| OIDC principal | the access token, checked by the public listener against `remote.json` | the owner's identity provider | nobody on the host | no | Missing or invalid token: refused by the public listener. Tool arguments never change the principal (test in `remote-surface.test.mjs`) |
+| Coordinator store (claims, leases, workspaces) | Mac `~/Library/Application Support/memo-bridge/coordinator.sqlite`; vps `/var/lib/memo-bridge` | the runtime's user | the runtime | Mac: **yes**, same uid. vps: no | Claims and leases are #291 |
+| Units, drop-ins, polkit rule, sudoers | `/etc/systemd/system/memo-*`, `/run/systemd/system/memo-*`, `/etc/polkit-1/rules.d/*memo*`, `~/Library/LaunchAgents/dev.memolabs.*`, `/Library/LaunchDaemons/dev.memolabs.*`, `/etc/sudoers*` | root; the owner for LaunchAgents | lab-infra; the install scripts | vps: no. Mac: **yes** for LaunchAgents. As root: yes | Not read by the agent: what starts it decides its environment and its policy path |
+
+Every path in the "where" column is a control path (rule 2), except the token.
+
+## What an application check cannot prevent
+
+Rule 2 stops a call that names a control path. It does not stop a program that reaches one without naming it, and the agent is that program's parent:
+
+- **Interpreters and wrappers.** `python3 -c`, `bash -c`, `node -e`, `find -exec`, `xargs`, `git` hooks or aliases, an `operator_script` that builds a path from pieces (`"/etc/memo-" + "operator"`), decodes it, or reads it from a file. The scan reads the literal text only.
+- **Ancestors and globs.** `chmod -R 777 /etc`, `rm -rf /var/lib/*`, `cp -r x /etc/` name a parent, not the control path. They are not refused: refusing every parent of `/etc` would refuse most root work.
+- **Root calls.** A root call runs as root, outside the agent's sandbox (lab: `systemd-run`, Mac: the LaunchDaemon). Root can write every file in the table. The two checks reduce accidents and direct attempts; they are not a boundary against root.
+- **The same uid on the Mac.** The Mac agent runs as the owner. The owner's uid can `chmod` and rewrite `~/.memo-operator/policy.json`, remove `~/.memo-operator/FROZEN`, edit the coordinator store, change the agent bundle or its LaunchAgent, and restart the agent. Rule 1 makes a rewritten policy close the host above T0 until a restart, but a process with the owner's uid can also restart the agent.
+- **The agent's own state directory.** `AUTO-FROZEN` lives where the agent writes. Removing it by a wrapper lifts the auto-freeze.
+
+These gaps need isolation by the operating system, which this change does not claim:
+
+1. Run the Mac operator agent as a separate user that does not own its policy, its FROZEN switch, its journal or the coordinator store, with the owner's checkouts reachable through group permissions.
+2. Keep the auto-freeze marker in a directory the agent cannot write (the root helper's state on lab, a root-owned directory on the Mac), set through the helper.
+3. Lab: `InaccessiblePaths=` for `/var/lib/memo-bridge-hub`, `/etc/memo-bridge` and `/opt/memo-bridge` in the transient units of root calls, or a narrower root profile than full root.
+4. Mac: a Seatbelt profile for user runs (`sandbox-exec`, as the job runner already uses) that denies writes to the control paths.
+
+## Adversarial cases covered by tests
+
+- The policy removed, truncated, given to another owner, made writable by the agent or the group, swapped for a symlink, replaced by another host's policy, or validly edited after start: above T0 refused with the codes above, T0 reads still answered, each refusal journaled, nothing run (agent), and the same on the root helper with its own copy.
+- The hub's `freeze.json` corrupt or unreadable, and the whole state directory unreadable: the hub starts frozen above T0, locks answer `locks_state_unavailable`, no document is reset.
+- Writes to the hub state, `remote.json`, an agent unit drop-in, the state directory, the coordinator store and a LaunchAgent, directly, through a symlink planted in a write root and through `..`, on both hosts.
+- Commands naming a control path directly, by a relative path from a cwd, through a symlink, as a cwd, in `--option=value`, inside `bash -c`, under `env`, in mixed case, by unit name; scripts by text and by argument; the same refused on the root helper. A burst of five freezes the host.
+- Identity spoofing in tool arguments (`principal`, `capabilities`, `scopes`, `client_type`, `client_id`, `owner`, `admin`, `as_root`, `via`, `host`, `workspace_id`): the forwarded principal keeps the token's identity, client type and capabilities.
+
+Concurrent sessions changing state between two calls (#263) and replay of an expired lease or claim belong to #291 and #263; the signed request already refuses replay and expiry (`replayed`, `expired`, tested in `tests/operator-agent.test.mjs`).

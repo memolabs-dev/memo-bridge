@@ -12,7 +12,8 @@
 // group or other). Anything wrong stops the process before the socket exists.
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { DEFAULT_POLICY_PATHS, loadOperatorPolicy, readTrustedFile } from './operator-policy.mjs';
+import { DEFAULT_POLICY_PATHS, readTrustedFile } from './operator-policy.mjs';
+import { loadPolicyAuthority } from './operator-authority.mjs';
 import { createOperatorVerifier } from './operator-signing.mjs';
 import { createOperatorGuard } from './operator-guard.mjs';
 import { createAuditChain, fileAuditStore } from './operator-audit.mjs';
@@ -22,7 +23,8 @@ import { createRootHelper, createRootHelperServer } from './operator-root-helper
 const env = process.env;
 if (process.getuid() !== 0) throw new Error('the root helper runs as root');
 const log = (event, details = {}) => console.error(JSON.stringify({ at: new Date().toISOString(), event, host: 'operator-root', ...details }));
-const policy = loadOperatorPolicy({ path: env.MEMO_OPERATOR_POLICY || DEFAULT_POLICY_PATHS.vps, expectedHost: 'vps', trustedUids: [0] });
+const authority = loadPolicyAuthority({ path: env.MEMO_OPERATOR_POLICY || DEFAULT_POLICY_PATHS.vps, expectedHost: 'vps', trustedUids: [0] });
+const { policy } = authority;
 if (policy.maxTierName !== 'root' || !policy.rootHelper) throw new Error('policy does not grant root (max_tier root and root_helper.socket required)');
 const dir = env.MEMO_OPERATOR_CONFIG || '/etc/memo-operator';
 const hubKeys = readTrustedFile(join(dir, 'operator-hub.pub'), { trustedUids: [0] })
@@ -36,6 +38,7 @@ const helper = createRootHelper({
   chain: createAuditChain({ store: fileAuditStore(policy.auditFile) }),
   jobs: createJobStore({ dir: join(state, 'jobs'), prefix: 'rj' }),
   scriptDir: join(state, 'scripts'),
+  authority,
   log
 });
 const server = createRootHelperServer({ helper, socketPath: policy.rootHelper.socket, log });

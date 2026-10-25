@@ -9,9 +9,10 @@
 //
 // Writes are atomic (temporary file in the same directory, fsync, rename) and the files are
 // 0600. A document that cannot be read or parsed is set aside as <name>.corrupt-<ms> and the
-// table starts empty, journaled, never crashing the hub. The one exception is the operator locks:
-// they are read with read() (fail closed), the file stays in place, and the hub refuses every
-// lock with locks_state_unavailable until the document reads again (fixed, or removed to reset). Without a directory (tests, a hub
+// table starts empty, journaled, never crashing the hub. The exceptions are the operator locks and
+// the /freeze flag (issue #290): they are read with read() (fail closed), the file stays in place;
+// the hub refuses every lock with locks_state_unavailable, and starts frozen above T0, until the
+// document reads again (fixed, or removed to reset). Without a directory (tests, a hub
 // started by hand) every load answers the fallback and every save is a no-op: the behaviour of
 // the hub before this module.
 //

@@ -8,7 +8,9 @@
 //  4. secret denylist again on the canonical path, so a symlink into ~/.ssh is refused too;
 //  5. root check on the canonical path against the canonical roots of the policy: "r" needs a
 //     read or write root, "rw" a write root;
-//  6. for "rw" only: anything inside a .git directory is refused (git config and hooks are
+//  6. for "rw" only: a control path (the policy, FROZEN switches, journal, hub and coordinator
+//     state, agent units; issue #290, operator-authority.mjs) is refused, lexical and canonical;
+//  7. for "rw" only: anything inside a .git directory is refused (git config and hooks are
 //     code: SentinelX finding, research §2). A project checkout is writable on any branch (owner
 //     decision 2026-10-23: the agent works in the canonical checkout; the default branch is
 //     protected on GitHub, not by a worktree flow here).
@@ -53,11 +55,69 @@ export function globToRegExp(glob, home) {
   return new RegExp(`${out}${tail}$`, 'i');
 }
 
+// Control paths (issue #290, operator-authority.mjs): the files that decide what the agent may
+// do. Built in per host, on top of the ones the policy names. Globs as in the secret denylist: a
+// trailing "/**" is the directory and all below. Refused for writes and in command arguments.
+export const CONTROL_GLOBS = Object.freeze({
+  vps: Object.freeze([
+    '/etc/memo-operator/**', '/etc/memo-bridge/**', '/etc/credstore/**', '/etc/credstore.encrypted/**',
+    '/var/lib/memo-bridge-hub/**', '/var/lib/memo-bridge/**', '/var/lib/memo-operator/**', '/var/lib/memo-operator-root/**',
+    '/var/log/memo-operator/**', '/run/memo-operator/**',
+    '/etc/systemd/system/memo-*', '/etc/systemd/system/memo-*/**', '/run/systemd/system/memo-operator*', '/run/systemd/system/memo-operator*/**',
+    '/run/systemd/system/memo-bridge*', '/run/systemd/system/memo-bridge*/**',
+    '/etc/polkit-1/rules.d/*memo*', '/etc/sudoers', '/etc/sudoers.d/**',
+    // The deployed code (lab-infra memo_bridge_app_dir): rewriting a check rewrites the rights.
+    '/opt/memo-bridge/**'
+  ]),
+  mac: Object.freeze([
+    '~/.memo-operator/**', '~/Library/Application Support/memo-bridge/**', '~/Library/Logs/memo-operator/**',
+    // The pinned agent bundle, its staged plist and the probe agent's hub CA (install-operator-agent.sh).
+    '~/.local/share/memo-bridge/**', '~/.config/memo-bridge/**',
+    '~/Library/LaunchAgents/dev.memolabs.*', '/Library/LaunchDaemons/dev.memolabs.*',
+    '/Library/Application Support/MemoBridge/**', '/var/log/memo-operator/**', '/var/db/memo-operator-root/**',
+    '/var/run/memo-operator/**', '/etc/sudoers', '/etc/sudoers.d/**'
+  ])
+});
+
+// The agents' own units and launchd labels: restarting or rewriting one applies a changed policy.
+export const CONTROL_LABELS = Object.freeze(['memo-operator-agent', 'memo-operator-root', 'dev.memolabs.memo-operator']);
+
+// The control paths of one policy: the built-in ones of its host, the directory of its FROZEN
+// switch (the policy directory on both hosts), the journal's directory, the state directory
+// (auto-freeze marker, Mac checkout ledger) and the root helper's socket directory.
+
+export function controlGlobs(policy, { extra = [] } = {}) {
+  if (!policy) return [];
+  const dirs = [policy.frozenFile && dirname(policy.frozenFile), policy.auditFile && dirname(policy.auditFile), policy.stateDir,
+    policy.rootHelper && dirname(policy.rootHelper.socket)].filter(d => typeof d === 'string' && d !== '/');
+  const globs = [...(CONTROL_GLOBS[policy.host] ?? []), ...dirs.map(d => `${d}/**`), ...extra];
+  // macOS: /etc, /var and /tmp are symlinks into /private; the canonical form must match too.
+  const withPrivate = globs.flatMap(g => (/^\/(etc|var|tmp)(\/|$)/.test(g) ? [g, `/private${g}`] : [g]));
+  return [...new Set(withPrivate)];
+}
+
+export function createControlMatcher(policy, options) {
+  const home = policy?.home ?? '/nonexistent';
+  const globs = controlGlobs(policy, options);
+  const patterns = globs.map(g => globToRegExp(g, home));
+  // Literal prefixes for the argument scan: a command line or script text naming one of these
+  // anywhere ("--out=/etc/memo-operator/x", "bash -c 'echo > ~/.memo-operator/policy.json'").
+  const literals = [...new Set([...globs.map(g => g.replace(/\/\*\*$/, '').replace(/\*.*$/, '')).filter(l => l.length > 4)
+    .flatMap(l => (l.startsWith('~/') ? [l, home + l.slice(1)] : [l])), ...CONTROL_LABELS])].map(l => l.toLowerCase());
+  return Object.freeze({
+    globs,
+    controlled: path => patterns.some(re => re.test(path)),
+    mentions: text => { const t = String(text).toLowerCase(); return literals.some(l => t.includes(l)); }
+  });
+}
+
 // A matcher for one policy: the built-in list plus the policy's extra entries.
 export function createDenylist(policy) {
   const home = policy?.home ?? '/nonexistent';
   const patterns = [...DEFAULT_DENYLIST, ...(policy?.denylist ?? [])].map(glob => globToRegExp(glob, home));
-  return Object.freeze({ denied: path => patterns.some(re => re.test(path)), size: patterns.length });
+  const control = createControlMatcher(policy);
+  return Object.freeze({ denied: path => patterns.some(re => re.test(path)), size: patterns.length, controlled: control.controlled,
+    mentions: control.mentions });
 }
 
 export function contained(root, candidate) {
@@ -89,6 +149,7 @@ export async function resolveOperatorPath(policy, raw, { access = 'r', mustExist
   if (requested === null) return { ok: false, error: 'invalid_path' };
   if (denylist.denied(requested)) return { ok: false, error: 'path_secret' };
   if (access === 'rw' && insideGit(requested)) return { ok: false, error: 'git_internal' };
+  if (access === 'rw' && denylist.controlled?.(requested)) return { ok: false, error: 'control_path_protected' };
   let canonical;
   try {
     canonical = await realpath(requested);
@@ -102,6 +163,7 @@ export async function resolveOperatorPath(policy, raw, { access = 'r', mustExist
     }
   }
   if (denylist.denied(canonical)) return { ok: false, error: 'path_secret' };
+  if (access === 'rw' && denylist.controlled?.(canonical)) return { ok: false, error: 'control_path_protected' };
   const roots = access === 'rw' ? policy.writeRoots : policy.readRoots;
   if (!roots.some(root => contained(root, canonical))) return { ok: false, error: 'path_not_allowed' };
   if (access === 'rw' && insideGit(canonical)) return { ok: false, error: 'git_internal' };

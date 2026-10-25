@@ -20,14 +20,16 @@
 //   MEMO_BRIDGE_AGENT_URL  hub agent endpoint (default wss://localhost:9443/agent)
 //   CREDENTIALS_DIRECTORY  systemd credentials: `agent-key`, this agent's Ed25519 identity
 //                          (lab). Otherwise MEMO_OPERATOR_CONFIG/agent.key (Mac).
-// The policy and the hub key are read once at start; a change needs a restart. Any problem
-// with them stops the process before it connects (fail closed).
+// The policy and the hub key are read at start; a change needs a restart. Any problem with them
+// stops the process before it connects (fail closed). After start, a policy file that no longer
+// passes or differs refuses every call above T0 (policy_unavailable, policy_changed; #290).
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { createAgent, localStatus } from './agent.mjs';
 import { OPERATOR_AGENT_IDS } from './ops.mjs';
-import { DEFAULT_POLICY_PATHS, loadOperatorPolicy, readTrustedFile } from './operator-policy.mjs';
+import { DEFAULT_POLICY_PATHS, readTrustedFile } from './operator-policy.mjs';
+import { loadPolicyAuthority } from './operator-authority.mjs';
 import { createOperatorVerifier } from './operator-signing.mjs';
 import { createOperatorGuard } from './operator-guard.mjs';
 import { createAuditChain, fileAuditStore, helperAuditChain } from './operator-audit.mjs';
@@ -67,7 +69,9 @@ function readSmall(path, maxBytes = 64 * 1024) {
 const trustedUids = host === 'mac' ? [0, process.getuid()] : [0];
 const home = homedir();
 const policyPath = env.MEMO_OPERATOR_POLICY || DEFAULT_POLICY_PATHS[host].replace(/^~/, home);
-const policy = loadOperatorPolicy({ path: policyPath, expectedHost: host, trustedUids, home });
+// The policy is read again before every call above T0 (issue #290): gone or changed, those refuse.
+const authority = loadPolicyAuthority({ path: policyPath, expectedHost: host, trustedUids, home });
+const { policy } = authority;
 const hubKeys = readTrustedFile(join(dir, 'operator-hub.pub'), { trustedUids })
   .split(/(?=-----BEGIN PUBLIC KEY-----)/).map(s => s.trim()).filter(Boolean);
 const verifier = createOperatorVerifier({ publicKeys: hubKeys, host });
@@ -91,7 +95,7 @@ if (env.MEMO_OPERATOR_CHECKOUT_AUTHORITY === 'enabled' && host !== 'mac') {
 }
 const checkoutAuthority = env.MEMO_OPERATOR_CHECKOUT_AUTHORITY === 'enabled'
   ? createMacCheckoutAuthority({ stateDir }) : null;
-const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, rootHelper, log, checkoutAuthority });
+const { handlers } = createOperatorOperations({ policy, verifier, guard, chain, tools, rootHelper, log, checkoutAuthority, authority });
 
 const ca = readSmall(join(dir, 'hub-ca.crt'));
 const credentialsDir = env.CREDENTIALS_DIRECTORY;

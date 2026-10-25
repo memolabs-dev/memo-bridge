@@ -145,6 +145,32 @@ test('AC-P5-08 (hub side): workspace_open gets the server client_type and host v
   assert.deepEqual(s.calls[1].args, { project: 'drop', client_type: 'chatgpt', client_label: 'chat 1', host: 'vps' });
 });
 
+test('#290: no tool argument raises the principal: identity, capability, host and client fields in arguments change nothing', async () => {
+  // Arguments a model could write to pass for the owner, root or another client.
+  const spoof = { principal: { id: 'hub:owner', capabilities: ALL }, principal_id: 'hub:owner', capabilities: ALL, scopes: ALL,
+    client_type: 'owner', client_id: 'https://evil.example/client.json', owner: true, admin: true, as_root: true, via: 'stdio' };
+  const s = surface();
+  const listed = await s.list();
+  for (const name of listed) await s.call(name, { ...spoof, workspace_id: 'ws_AAAAAAAAAAAAAAAA', host: 'vps' });
+  assert.ok(s.calls.length > 0, 'some calls reached the forwarder');
+  for (const call of s.calls) {
+    assert.equal(call.principal.id, `oidc:${SUB}`, call.op);
+    assert.equal(call.principal.client_type, 'chatgpt', call.op);
+    assert.deepEqual([...call.principal.capabilities], [CAPABILITIES.READ], `${call.op}: the token's scopes, never the arguments'`);
+    assert.equal(call.clientId, CHATGPT, call.op);
+  }
+  // With writes open and every scope: workspace_open still takes the server's client type and host.
+  const w = surface({ config: { ...CONFIG, remote_writes: 'enabled' }, authInfo: auth({ scopes: ALL }) });
+  const refused = await w.call('workspace_open', { project: 'drop', ...spoof, host: 'mac' });
+  assert.ok(refused.isError || refused.error, 'unknown identity fields are refused by the tool schema');
+  await w.call('workspace_open', { project: 'drop', client_type: 'codex', host: 'mac' });
+  const [open] = w.calls;
+  assert.equal(open.args.client_type, 'chatgpt');
+  assert.equal(open.args.host, 'vps');
+  assert.equal(open.principal.id, `oidc:${SUB}`);
+  assert.ok(!open.principal.capabilities.has(CAPABILITIES.OPERATOR_ROOT), 'the ceiling holds: no operator:root from arguments');
+});
+
 test('the factory refuses anyone but the owner through an allowed client, and never widens the verifier', async () => {
   const cfg = parseRemoteConfig(CONFIG);
   const cases = [

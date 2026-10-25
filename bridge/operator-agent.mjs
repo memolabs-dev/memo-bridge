@@ -7,6 +7,8 @@
 //   1. signature: the hub's Ed25519 operator signature over id, op, host, tier, principal,
 //      args hash, expiry and nonce (operator-signing.mjs); refused: bad, unknown key, expired,
 //      replayed, or arguments that do not hash to the signed value;
+//   1b. policy authority (issue #290, operator-authority.mjs): above T0 the policy file is read
+//      again and must still be the copy in force (policy_unavailable, policy_changed);
 //   2. tier: the call's tier from this side's own table (operator_run with as_root is T3) must
 //      equal the signed tier, and be at most the local policy's max_tier (the hub cannot raise
 //      it); then, when the local approval_mode says this call needs the owner's approval
@@ -15,6 +17,7 @@
 //      only when this file's permanent_grants cover the call with that grant (approval_scope);
 //   3. kill switch and rate limit: FROZEN file, auto-freeze, per-tier limits (operator-guard.mjs);
 //   4. arguments: the shared schema (server/tools/operator-tools.mjs), and host == this host;
+//      a command or script naming a control path is refused (control_path_protected, #290);
 //   5. the tool (operator-tools.mjs), then redaction and the 128 KiB bound (operator-output.mjs);
 //   6. one hash-chained journal line (operator-audit.mjs) for every call, refusals included.
 // T3 calls (operator_run as_root, operator_script) and root job status (rj_ ids) are passed on,
@@ -33,6 +36,8 @@ import { finalizeResult } from './operator-output.mjs';
 import { argsSha256 } from './operator-signing.mjs';
 import { TRANSFER_SOURCE_SCHEMAS } from './operator-transfer-source.mjs';
 import { detachBinary } from './operator-binary.mjs';
+import { controlRefusal } from './operator-authority.mjs';
+import { createDenylist } from './operator-paths.mjs';
 
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -55,10 +60,13 @@ export const INTERNAL_SCHEMAS = Object.freeze({
 //             client has available(): without the helper's socket, T3 answers the same code
 // tierOf      (op, args) -> tier (policy.mjs operatorCallTier; tests inject a T1 op)
 // schemas     op -> zod schema
+// authority   loadPolicyAuthority(...) for this policy, or null (tests): check() before every call
+//             above T0; the CLI always passes one
+// control     control-path matcher (createDenylist(policy) has one)
 export function createOperatorOperations({ policy, verifier, guard, chain = null, tools, rootHelper = null, tierOf = operatorCallTier,
   schemas = { ...OPERATOR_SCHEMAS, ...INTERNAL_SCHEMAS },
   ops = [...Object.keys(OPERATOR_OPERATION_CAPABILITY), ...Object.keys(INTERNAL_SCHEMAS)], now = Date.now, log = () => {},
-  checkoutAuthority = null } = {}) {
+  checkoutAuthority = null, authority = null, control = createDenylist(policy) } = {}) {
   if (!policy || !verifier || !guard || !tools) throw new Error('operator agent needs policy, verifier, guard and tools');
   const internal = {
     async operator_audit_head({ since_seq: since }) {
@@ -96,10 +104,10 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
           return false;
         }
       };
-      const refuse = async code => {
+      const refuse = async (code, extra = {}) => {
         const froze = guard.refused(code);
-        log('operator_refused', { op, code, principal, ...(froze ? { auto_frozen: true } : {}) });
-        const out = { ok: false, error: code };
+        log('operator_refused', { op, code, principal, ...extra, ...(froze ? { auto_frozen: true } : {}) });
+        const out = { ok: false, error: code, ...extra };
         await journal('denied', code, out);
         return out;
       };
@@ -110,6 +118,11 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       approval = signed.approval;
       if (!Number.isInteger(tier) || signed.tier !== tier) return refuse('tier_mismatch');
       if (tier > policy.maxTier) return refuse('tier_not_allowed');
+      // The decision source must still be there, unchanged, for anything above a read.
+      if (authority && tier > 0) {
+        const lost = authority.check();
+        if (lost) return refuse(lost.error, { reason: lost.reason });
+      }
       const admitted = guard.admit(tier);
       if (admitted) return refuse(admitted);
       if (needsApproval(policy.approvalMode, op, args, tier) && !signed.approval) return refuse('approval_required');
@@ -123,6 +136,13 @@ export function createOperatorOperations({ policy, verifier, guard, chain = null
       const parsed = schema ? schema.safeParse(args ?? {}) : { success: false };
       if (!parsed.success) return refuse('invalid_arguments');
       if (parsed.data.host !== policy.host) return refuse('host_mismatch');
+      // No command rewrites what decides, as the agent user or as root (#290).
+      if (op === 'operator_run' || op === 'operator_script') {
+        const d = parsed.data;
+        const named = await controlRefusal(control, policy, { argv: op === 'operator_run' ? d.argv : (d.args ?? []), cwd: d.cwd ?? '/',
+          content: op === 'operator_script' ? d.content : null });
+        if (named) return refuse(named.error);
+      }
       // Mac-side authority: the same private ledger used by supervised local agents.
       // The remote caller cannot choose the session through tool arguments: only the
       // trusted transport metadata is read, after signature and schema verification.
