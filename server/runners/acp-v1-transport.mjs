@@ -157,7 +157,8 @@ export function createAcpV1Transport({ stdin, stdout } = {}, {
         // A late response is not safe to correlate; destroy this transport.
         abort('acp_rpc_timeout');
       }, ms);
-      timer.unref?.();
+      // A pending RPC must keep the event loop alive until its deadline.
+      // Unref would strand the promise on Node 22 when no other handles exist.
       pending.set(id, { resolve, reject, timer });
       try { send({ id, method, params }); }
       catch (error) {
