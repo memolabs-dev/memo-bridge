@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "milestones": [
+    {
+      "kind": "prototype",
+      "date": "2026-10-20",
+      "title": {
+        "fr": "Distinction explicite entre PR fusionnée, déploiement et clôture de ticket",
+        "en": "Merge, deployment and issue completion tracked separately"
+      },
+      "detail": {
+        "fr": "Une logique de réconciliation propose des états à contrôler, sans écrire automatiquement sur GitHub. Une PR fusionnée n'est jamais assimilée à un déploiement vérifié.",
+        "en": "A reconciliation function suggests states for review without automatically writing to GitHub. A merged PR is not treated as a verified deployment."
+      },
+      "evidenceUrl": "https://github.com/memolabs-dev/memo-bridge/pull/247"
+    },
+    {
+      "kind": "prototype",
+      "date": "2026-10-25",
+      "title": {
+        "fr": "Journal d'opérations chaîné et vérificateur documentés",
+        "en": "Chained operator journal and verifier documented"
+      },
+      "detail": {
+        "fr": "Les lignes d'audit et leur vérificateur ont été intégrés au code ; l'attribution de session reste généralement inactive et la PR ne prouve aucun déploiement.",
+        "en": "Audit lines and a verifier were merged into source; verified session attribution remains generally disabled and the PR does not establish deployment."
+      },
+      "evidenceUrl": "https://github.com/memolabs-dev/memo-bridge/pull/294"
+    },
+    {
+      "kind": "prototype",
+      "date": "2026-10-26",
+      "title": {
+        "fr": "Outils MCP typés de création et suivi Open Design intégrés au code",
+        "en": "Typed Open Design creation and status MCP tools merged into source"
+      },
+      "detail": {
+        "fr": "Contrat MCP et tests de canari documentés. La PR précise qu'aucune activation du service en production n'est prouvée par cette fusion.",
+        "en": "The MCP contract and canary tests are documented. The PR explicitly does not prove production service activation."
+      },
+      "evidenceUrl": "https://github.com/memolabs-dev/memo-bridge/pull/303"
+    }
+  ]
+}
