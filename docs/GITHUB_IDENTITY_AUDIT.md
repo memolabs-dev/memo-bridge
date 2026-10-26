@@ -22,3 +22,19 @@ The private inventory is a non-authoritative observation made from the Mac proje
 Tests: `node --test tests/github-identity-audit.test.mjs`. The fixture exercises rename, folder moves, transfers, forks, duplicate IDs, stale aliases, tampering and unknown/private origins without accessing GitHub.
 
 **Follow-up:** integrate the validated identity map into a *read-only* owner registry lookup, add a transaction-safe versioned alias store, then separately review any permission-bound resolution as required by issue #80. Do not claim #80 complete from this audit-only first step.
+
+## Repeatable owner-local refresh (proposed #80 follow-up)
+
+From a **trusted Mac checkout**, run a read-only GitHub inventory refresh:
+
+```sh
+node scripts/refresh-registered-identities.mjs "$HOME/memolabs/workspace/data/github-ownership/registered-project-identities-2026-10-26.json"
+```
+
+The first argument is an **optional prior trusted snapshot** in the same private directory. On subsequent refreshes, pass the most recent verified snapshot. Old paths that now redirect to another owner require a prior, unchanged numeric GitHub repository ID, confirmed again via live GitHub API; without this evidence the refresh refuses to attest the alias.
+
+The script uses the canonical Mac `PROJECTS.md` rows, local exact checkout origins and authenticated `gh api` reads, **never GitHub search or name similarity**, and produces a new timestamped, uniquely named file under `~/memolabs/workspace/data/github-ownership/`. Directory permissions are 0700 and each report is 0600. Existing snapshots remain unchanged. stdout contains counts and the private output path, never project names or GitHub responses. Unreachable private repositories remain unresolved. Conflicting repository IDs and duplicate local registration of one ID cause a refusal **before writing a new snapshot**.
+
+For a newly produced file, use `node scripts/check-registered-identities.mjs ABSOLUTE_REPORT_PATH`. This workflow is observational only; it does **not** rewrite git origins, merge forks, reassign owners, create repositories, change public/private visibility, or expand any runner, task or remote access allowlists. The workflow should not be used on the VPS or an untrusted runner.
+
+Offline tests: `node --test tests/owner-identity-refresh.test.mjs tests/github-identity-audit.test.mjs`.
