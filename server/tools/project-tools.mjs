@@ -18,7 +18,7 @@ export const PROJECT_TOOLS = Object.freeze(['project_create']);
 const result = data => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
 const fail = (error, detail, extra = {}) => ({ ok: false, error, ...(detail ? { detail } : {}), ...extra });
 const DENIED = new Set(['forbidden', 'owner_only', 'project_create_mac_only', 'invalid_name', 'invalid_input', 'private_on_vps_refused',
-  'public_on_mac_unsupported', 'name_taken', 'repo_exists', 'visibility_mismatch', 'repo_archived', 'path_occupied']);
+  'public_on_mac_unsupported', 'name_taken', 'repo_exists', 'visibility_mismatch', 'repo_archived', 'path_occupied', 'possible_duplicate']);
 const GOVERNANCE_REF_RE = /\/([0-9a-f]{40})\/?$/;
 
 // The owner: local stdio (the OS user that launched the plugin), hub:owner, or oidc:<owner_sub>

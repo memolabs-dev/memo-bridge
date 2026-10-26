@@ -304,6 +304,42 @@ test('A2: an existing repository that is not ours, or another visibility, or arc
   }
 });
 
+test('A2: personal GitHub same-name repository or fork prevents organization creation without touching anything', async t => {
+  for (const [archived, fork] of [[false, true], [true, false]]) {
+    const f = await setup(t, { gh: fakeGh({ existing: {
+      'guillaume-flambard/relay-v2': { private: false, archived, fork },
+    } }) });
+    const out = await f.call({ name: 'relay-v2' });
+    assert.equal(out.error, 'possible_duplicate', JSON.stringify(out));
+    assert.equal(out.existing_repo, 'guillaume-flambard/relay-v2');
+    assert.match(out.next_step, /review both owners/);
+    assert.deepEqual(f.gh.calls.map(c => [c.method, c.path]), [
+      ['GET', 'repos/memolabs-dev/relay-v2'],
+      ['GET', 'repos/guillaume-flambard/relay-v2'],
+    ]);
+    assert.deepEqual(await f.registry(), ['alpha:products/alpha', 'zulu:products/zulu']);
+    assert.equal(f.clones.length, 0);
+    assert.deepEqual(f.journal, [
+      { op: 'project_create', outcome: 'denied', code: 'possible_duplicate', issue: 'memolabs-dev/relay-v2' },
+    ]);
+  }
+});
+
+test('A2: unverified personal repository lookup stops creation instead of assuming an empty account', async t => {
+  const fake = fakeGh();
+  const original = fake.gh;
+  fake.gh = async (args, opts) => args.includes('repos/guillaume-flambard/relay-v2')
+    ? { code: 1, stdout: '', stderr: 'gh: Resource not accessible by integration (HTTP 403)' }
+    : original(args, opts);
+  const f = await setup(t, { gh: fake });
+  const out = await f.call({ name: 'relay-v2' });
+  assert.equal(out.ok, false, JSON.stringify(out));
+  assert.notEqual(out.error, 'possible_duplicate');
+  assert.equal(f.gh.calls.some(c => c.method === 'POST'), false);
+  assert.equal(f.clones.length, 0);
+  assert.deepEqual(await f.registry(), ['alpha:products/alpha', 'zulu:products/zulu']);
+});
+
 test('A2: registry and folder conflicts, the registry lock, a missing template and App errors refuse cleanly', async t => {
   // A row with that name for another checkout.
   const taken = await setup(t);

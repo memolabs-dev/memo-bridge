@@ -24,6 +24,7 @@ import { networkGit, originRepo, runGit } from '../runners/worktrees.mjs';
 import { addRegistryRow, registryRows } from './registry-writer.mjs';
 
 export const PROJECT_ORG = 'memolabs-dev';
+export const PERSONAL_GITHUB_OWNER = 'guillaume-flambard';
 export const TEMPLATES = Object.freeze({ default: Object.freeze({ repo: `${PROJECT_ORG}/project-template`, stack: 'Node.js' }) });
 export const AREAS = Object.freeze(['os', 'lab', 'products', 'research', 'clients', 'studio']);
 export const VISIBILITIES = Object.freeze(['private', 'public']);
@@ -204,6 +205,17 @@ export function createProjectCreator({ root, credentials, gh = runGh, scratchDir
       steps.push('repo_found');
     } else if (found.error === 'github_not_found') {
       if (known.row) return fail('name_taken', `"${spec.name}" is registered but ${spec.repo} does not exist`);
+      // An organization template is never generated if the same name already belongs to the
+      // personal GitHub account (including archived repos and upstream forks). Distinguish
+      // an intentional separate product by a documented ownership decision before creation.
+      // The organization App token can inspect public personal repos; a 404 does NOT prove
+      // that private personal repos are absent. PROJECTS.md and the owner policy remain vital.
+      const personalRepo = `${PERSONAL_GITHUB_OWNER}/${spec.name}`;
+      const personal = await readRepo(personalRepo);
+      if (personal.ok) return fail('possible_duplicate',
+        `${personalRepo} already exists; creation of ${spec.repo} is blocked pending canonical repository review`,
+        { existing_repo: personalRepo, next_step: 'review both owners, the local registry, forks, CI and deployment; preserve the existing code before deciding on a separate organization project' });
+      if (personal.error !== 'github_not_found') return personal;
       const tpl = await readRepo(template.repo);
       if (!tpl.ok || tpl.data?.is_template !== true) {
         return fail('template_unavailable', `${template.repo} is missing or not a template repository`,
