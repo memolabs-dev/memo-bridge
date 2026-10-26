@@ -29,10 +29,11 @@
 #   ~/.local/share/memo-bridge/runtime-releases/<bridge-ref>/   the runtime bundle (bridge/,
 #                     server/, production node_modules), from `git archive` of that commit
 #   ~/.local/share/memo-bridge/governance/<governance-ref>/     scripts/ of that governance commit
-#   ~/.local/share/memo-bridge/runtime-config/credentials/      0700: agent-key (the existing
-#                     probe identity, so the hub sees the same agent), ledger-gh and push-gh
-#                     (the token of the owner's own `gh` login, read from the Keychain, never
-#                     printed, never in the plist or the environment)
+#   ~/.local/share/memo-bridge/launchd/runtime-credentials/    0700: STAGED
+#                     agent-key, ledger-gh, push-gh and optional app-key. Only this
+#                     directory is modified before --install. No token is printed.
+#   ~/.local/share/memo-bridge/runtime-config/credentials/      0700: LIVE
+#                     credentials used by launchd. Changed ONLY during --install.
 #   ~/.local/share/memo-bridge/launchd/owner-policy/            0700, STAGED: private-repos.json,
 #                     remote.json, stage.json and, when the owner has none yet, lease-key.json
 #                     (deploy/mac/runtime-mac.mjs configure). The live owner-policy/ files the
