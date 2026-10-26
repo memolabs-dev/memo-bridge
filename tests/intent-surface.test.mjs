@@ -4,7 +4,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { INTENT_DEFINITIONS, intentToolsFor, resolveIntent } from '../server/intent-registry.mjs';
 import { CAPABILITIES, makePrincipal } from '../server/coordinator/policy.mjs';
 import { collectOperatorDefinitions, collectToolDefinitions, SIMPLE_REMOTE_OPERATOR_TOOLS, SIMPLE_REMOTE_TOOLS, toolsFor, operatorToolsFor } from '../server/registry.mjs';
-import { createRemoteServerFactory, parseRemoteConfig, remoteToolNames, unlistedToolCalls } from '../bridge/remote-surface.mjs';
+import { createRemoteServerFactory, parseRemoteConfig, remoteToolNames, unlistedToolCalls, REMOTE_DESIGN_TOOLS } from '../bridge/remote-surface.mjs';
 const all = Object.values(CAPABILITIES);
 const config = { owner_sub: 'owner', allowed_client_ids: ['client'], surface: 'intent', ceiling: all, remote_writes: 'enabled' };
 const auth = { clientId: 'client', scopes: all, extra: { sub: 'owner' } };
@@ -80,7 +80,7 @@ test('MCP intent routing preserves trusted principal, host args, session context
     assert.equal(c.principal.id, 'oidc:owner'); assert.equal(c.clientId, 'client'); assert.ok(c.ctx);
     assert.equal(c.host, 'vps', 'existing dispatcher selects the operator host from args');
   }
-  for (const name of ['operator_run', 'operator_script', 'operator_policy', 'projects_list', 'jobs_submit', 'worktree_push', 'task_claim']) {
+  for (const name of ['operator_run', 'operator_script', 'operator_policy', 'projects_list', 'jobs_submit', 'worktree_push', 'task_claim', 'design_create', 'design_status']) {
     const out = await s.call(name, { command: 'id' });
     assert.ok(out.error || out.result?.isError, name);
     assert.equal(unlistedToolCalls(auth, config, { method: 'tools/call', params: { name } }).length, 1);
@@ -106,12 +106,13 @@ test('inner refusals, invalid responses, thrown errors and output budgets surviv
   }
 });
 
-test('default simple remains exactly 26 tools; full and explicit intent remain separate', () => {
+test('default simple includes two scoped design tools; explicit intent remains isolated', () => {
   const principal = makePrincipal('oidc:owner', all);
   const { surface: _, ...base } = config;
   assert.equal(parseRemoteConfig(base).surface, 'simple');
-  assert.deepEqual(remoteToolNames(principal, base), [...SIMPLE_REMOTE_TOOLS, ...SIMPLE_REMOTE_OPERATOR_TOOLS].sort());
-  assert.equal(remoteToolNames(principal, base).length, 26);
+  assert.deepEqual(remoteToolNames(principal, base), [...SIMPLE_REMOTE_TOOLS, ...SIMPLE_REMOTE_OPERATOR_TOOLS, ...REMOTE_DESIGN_TOOLS].sort());
+  assert.equal(remoteToolNames(principal, base).length, 28);
+  assert.equal(remoteToolNames(principal, config).some(name => REMOTE_DESIGN_TOOLS.includes(name)), false);
   assert.equal(remoteToolNames(principal, { ...base, surface: 'full' }).includes('intent_status'), false);
   assert.equal(parseRemoteConfig(config).surface, 'intent');
 });

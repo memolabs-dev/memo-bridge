@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createMcpHandler } from '@modelcontextprotocol/server';
-import { RemoteAccessError, createRemoteServerFactory, parseRemoteConfig, remotePrincipalFor, remoteToolNames } from '../bridge/remote-surface.mjs';
+import { RemoteAccessError, createRemoteServerFactory, parseRemoteConfig, remotePrincipalFor, remoteToolNames, REMOTE_DESIGN_TOOLS } from '../bridge/remote-surface.mjs';
 import { REMOTE_OPERATOR_TOOLS, REMOTE_TOOLS, REMOTE_TOOLS_READ, REMOTE_TOOLS_WRITE } from '../server/registry.mjs';
 import { CAPABILITIES, REMOTE_DEFAULT_CEILING, isPrincipal, makePrincipal, operatorTier } from '../server/coordinator/policy.mjs';
 import { createHub } from '../bridge/hub.mjs';
@@ -101,7 +101,7 @@ test('AC-P5-06/07: a read principal lists the read set; writes stay unlisted whi
   assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), CONFIG),
     [...REMOTE_TOOLS_READ, ...REMOTE_OPERATOR_TOOLS.filter(t => operatorTier(t) === 0)].sort());
   assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', ALL), { ...CONFIG, remote_writes: 'enabled' }),
-    [...REMOTE_TOOLS, ...REMOTE_OPERATOR_TOOLS].sort());
+    [...REMOTE_TOOLS, ...REMOTE_OPERATOR_TOOLS, ...REMOTE_DESIGN_TOOLS].sort());
   assert.deepEqual(remoteToolNames(makePrincipal('oidc:x', REMOTE_DEFAULT_CEILING), CONFIG), [...REMOTE_TOOLS_READ].sort());
 });
 
