@@ -24,6 +24,7 @@
 // The principal travels as {id} only; the runtime maps it with its own grants.
 import { INTENT_DEFINITIONS, intentToolsFor, resolveIntent } from '../server/intent-registry.mjs';
 import { McpServer } from '@modelcontextprotocol/server';
+import { z } from 'zod/v4';
 import { CAPABILITIES, CLIENT_TYPES, REMOTE_DEFAULT_CEILING, authorize, isPrincipal, makePrincipal, remotePrincipal }
   from '../server/coordinator/policy.mjs';
 import { collectOperatorDefinitions, collectToolDefinitions, isRemoteOperatorTool, isRemoteWriteTool, operatorRegistryProblems,
@@ -59,6 +60,48 @@ export class RemoteAccessError extends Error {
 
 const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
   && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+
+// Typed Mac-only design tools reuse operator_run's auth, host routing and locks.
+// Model inputs can never choose an executable, host, shell, agent or provider.
+export const REMOTE_DESIGN_TOOLS = Object.freeze(['design_create', 'design_status']);
+const DESIGN_BIN = '/Users/memo/bin/opencode-v2';
+const DESIGN_ID = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,79}$/);
+const DESIGN_DEFINITIONS = Object.freeze({
+  design_create: {
+    description: 'Use this to create an Open Design prototype on the Mac with OpenCode Lab Code. Returns a run ID; verify the actual artifact with design_status.',
+    inputSchema: z.object({ name: z.string().trim().min(1).max(160),
+      brief: z.string().trim().min(10).max(8000),
+      design_system: DESIGN_ID.optional(), skill: DESIGN_ID.optional() }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  },
+  design_status: {
+    description: 'Use this to follow an Open Design run on the Mac. A design is complete only when verified=true and a nonempty artifact is reported.',
+    inputSchema: z.object({ run_id: z.uuid() }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }
+});
+const designNamesFor = (principal, config) => config.surface !== 'intent' && config.remoteWrites
+  && authorize(principal, 'operator_run') ? REMOTE_DESIGN_TOOLS : [];
+const designRunArguments = (name, raw) => ({
+  host: 'mac',
+  argv: name === 'design_create'
+    ? [DESIGN_BIN, 'od-create', raw.name, raw.brief, ...(raw.design_system || raw.skill ? [raw.design_system || '', raw.skill || ''] : [])]
+    : [DESIGN_BIN, 'od-status', raw.run_id],
+  timeout_s: 45
+});
+function normalizeDesignOutcome(result) {
+  if (result.ok !== true) return result;
+  if (result.exit_code !== 0) return { ok: false, error: 'design_execution_failed', exit_code: result.exit_code };
+  const stdout = result.untrusted_content?.stdout;
+  if (typeof stdout !== 'string' || Buffer.byteLength(stdout) > 16 * 1024) return { ok: false, error: 'invalid_design_response' };
+  try {
+    const parsed = JSON.parse(stdout.trim());
+    if (!isPlainObject(parsed) || parsed.provider !== 'open-design' || parsed.ok !== true)
+      return { ok: false, error: 'invalid_design_response' };
+    return { ...parsed, via: 'memo-bridge' };
+  } catch { return { ok: false, error: 'invalid_design_response' }; }
+}
+
 const invalid = field => new Error(`invalid_remote_config:${field}`);
 const boundedInt = (value, field, fallback) => {
   if (value === undefined) return fallback;
@@ -256,12 +299,14 @@ function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
     return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error }) }] };
   };
   for (const name of [...allowed].sort()) {
-    const def = cfg.surface === 'intent' ? INTENT_DEFINITIONS[name] : defs.get(name);
+    const def = cfg.surface === 'intent' ? INTENT_DEFINITIONS[name] : DESIGN_DEFINITIONS[name] ?? defs.get(name);
     server.registerTool(name, { description: def.description, inputSchema: def.inputSchema, annotations: def.annotations },
       async (raw, ctx) => {
         // Every check again at call time, independent of what was listed.
         if (!allowed.has(name)) return refuse(name, 'forbidden');
-        const resolved = cfg.surface === 'intent' ? resolveIntent(name, raw) : { ok: true, op: name, args: raw };
+        const resolved = cfg.surface === 'intent' ? resolveIntent(name, raw)
+          : DESIGN_DEFINITIONS[name] ? { ok: true, op: 'operator_run', args: designRunArguments(name, raw) }
+          : { ok: true, op: name, args: raw };
         if (!resolved.ok) return refuse(name, resolved.error);
         const { op, args } = resolved;
         // Authorize the resolved operation, never an alias or client-supplied operation.
@@ -275,6 +320,7 @@ function buildServer(principal, clientId, cfg, defs, dispatch, audit) {
           data = await dispatch(cfg.runtimeHost, op, { args: prepared.args, principal, ctx: ctx ?? null, clientId });
         } catch { data = { ok: false, error: 'internal_error' }; }
         if (!isPlainObject(data)) data = { ok: false, error: 'invalid_agent_response' };
+        if (DESIGN_DEFINITIONS[name]) data = normalizeDesignOutcome(data);
         if (prepared.note && data.ok !== false) data = { ...data, note: prepared.note };
         // operator_read_media: image bytes become MCP image parts, outside the text budget (the host
         // bounds them, bridge/operator-media.mjs); the text part keeps their metadata.
@@ -316,7 +362,8 @@ export function createRemoteServerFactory({ authInfo, config, dispatch, audit = 
 export function remoteToolNames(principal, config) {
   const { remoteWrites, surface } = normalized(config);
   if (surface === 'intent') return intentToolsFor(principal);
-  return [...toolsFor(principal, { remoteWrites, surface }), ...operatorToolsFor(principal, { remoteWrites, surface })].sort();
+  return [...toolsFor(principal, { remoteWrites, surface }), ...operatorToolsFor(principal, { remoteWrites, surface }),
+    ...designNamesFor(principal, { remoteWrites, surface })].sort();
 }
 
 // The tools/call requests of one JSON-RPC message (or batch) that name a tool this principal is
@@ -336,7 +383,7 @@ export function unlistedToolCalls(authInfo, config, message) {
     const name = msg.params?.name;
     if (typeof name === 'string' && listed.has(name)) continue;
     const op = typeof name === 'string' && CALL_NAME_RE.test(name) ? name : 'invalid';
-    out.push({ op, reason: isRemoteWriteTool(op) && !cfg.remoteWrites ? 'write_gate_closed' : 'forbidden' });
+    out.push({ op, reason: (isRemoteWriteTool(op) || REMOTE_DESIGN_TOOLS.includes(op)) && !cfg.remoteWrites ? 'write_gate_closed' : 'forbidden' });
   }
   return out;
 }
