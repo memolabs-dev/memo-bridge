@@ -34,7 +34,7 @@ async function securePrivateFile(path){
   const realDir=await realpath(directory);
   const parent=await realpath(dirname(path));
   if(parent!==realDir)throw new Error('private_snapshot_required');
-  const info=await stat(path);
+  const info=await lstat(path); // refuse symlinks to secrets or files outside the private folder
   if(!info.isFile()||info.size>512*1024||(info.mode&0o077)!==0)
     throw new Error('private_snapshot_required');
   return JSON.parse(await readFile(path,'utf8'));
@@ -59,8 +59,10 @@ try{
   const home=homedir();
   if(!root.startsWith(home+'/'))throw new Error('unexpected_owner_root');
   await mkdir(directory,{recursive:true,mode:0o700});
-  const dir=await stat(directory);
-  if(!dir.isDirectory()||(dir.mode&0o077)!==0)throw new Error('private_directory_required');
+  const dir=await lstat(directory);
+  if(!dir.isDirectory()||(dir.mode&0o077)!==0||
+     await realpath(directory)!==join(await realpath(root),'workspace/data/github-ownership'))
+    throw new Error('private_directory_required');
   let previous=null;
   if(previousPath)previous=await securePrivateFile(resolve(previousPath));
   const registered=await readProjectRegistry({
