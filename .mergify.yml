@@ -11,7 +11,7 @@ shared:
         - author = guillaume-flambard
     - label != hold-merge
     - label != needs-human-review
-    - -files ~= ^(\.github/|\.mergify\.yml$|CODEOWNERS$|AGENTS\.md$|\.env)
+    - -files ~= ^(\.github/|deploy/|\.mergify\.yml$|CODEOWNERS$|AGENTS\.md$|\.env)
     - check-success = @github-actions/test (22)
     - check-success = @github-actions/test (24)
 
