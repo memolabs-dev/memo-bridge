@@ -192,7 +192,7 @@ fi
 require_account_home_allowlist "$GOVERNANCE" "$GOV_REF"
 say governance "\"root\":\"$GOVERNANCE\""
 
-# 3. Stage credentials in a DIFFERENT directory from the live agent credentials.
+# 3. Credentials: stage into a DIFFERENT directory from the live agent credentials.
 # A stage-only run must never touch the keys/tokens the already-running agent reads.
 # Promotion happens after approval of --install and immediately before launchd reload.
 # Keep this helper outside the runtime archive: the trusted checkout drives installation.
