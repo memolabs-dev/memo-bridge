@@ -34,10 +34,10 @@ export function rankPortfolio({issues,prs,errors=[]}) {
       ready:queue.filter(x=>x.eligible).length,needs_triage:queue.filter(x=>x.reason==='needs_priority').length},
     next:queue.find(x=>x.eligible)??null,queue,errors};
 }
-export async function collectPortfolio(repositories, fetchPage, {perPage=100,maxPages=20}={}) {
-  const issues=[],prs=[],errors=[];
-  const repos=[...new Set(repositories)].filter(x=>/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(x)).sort();
-  for(const repo of repos) for(const kind of ['issues','pulls']) {
+// Concurrency cap on simultaneous per-repo fetches: a global inventory must not
+// open one gh call per registered repository at once.
+const fetchRepo = async (repo, fetchPage, {perPage,maxPages}, issues, prs, errors) => {
+  for(const kind of ['issues','pulls']) {
     for(let page=1;page<=maxPages;page++) {
       let result;
       try {result=await fetchPage({repo,kind,page,perPage})}
@@ -50,6 +50,14 @@ export async function collectPortfolio(repositories, fetchPage, {perPage=100,max
       if(result.hasNext===false||result.items.length<perPage)break;
       if(page===maxPages)errors.push({repo,kind,page,error:'page_limit_reached'});
     }
+  }
+};
+export async function collectPortfolio(repositories, fetchPage, {perPage=100,maxPages=20,concurrency=4}={}) {
+  const issues=[],prs=[],errors=[];
+  const repos=[...new Set(repositories)].filter(x=>/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(x)).sort();
+  const limit = Math.min(8, Math.max(1, Number.isFinite(Number(concurrency)) ? Math.floor(Number(concurrency)) : 4));
+  for (let i = 0; i < repos.length; i += limit) {
+    await Promise.all(repos.slice(i, i + limit).map(r => fetchRepo(r, fetchPage, {perPage,maxPages}, issues, prs, errors)));
   }
   return rankPortfolio({issues,prs,errors});
 }

@@ -23,3 +23,33 @@ test('no priority is surfaced for triage, not agent claim',()=>{
  const q=rankPortfolio({issues:[summarizeIssue(issue(1,['agent:ready']),'org/a')],prs:[]});
  assert.equal(q.next,null);assert.equal(q.totals.needs_triage,1);
 });
+test('collectPortfolio caps concurrent fetches at the concurrency limit',async()=>{
+ const repos=['org/a','org/b','org/c','org/d','org/e'];
+ const inFlight=new Set(); let maxInFlight=0;
+ const fetchPage=async({repo})=>{
+  inFlight.add(repo); maxInFlight=Math.max(maxInFlight,inFlight.size);
+  await new Promise(r=>setTimeout(r,10)); inFlight.delete(repo);
+  return {items:[],hasNext:false};
+ };
+ const report=await collectPortfolio(repos,fetchPage,{perPage:100,maxPages:1,concurrency:2});
+ assert.equal(maxInFlight,2);assert.equal(report.totals.open_issues,0);
+});
+test('collectPortfolio default concurrency is 4',async()=>{
+ const repos=['org/a','org/b','org/c','org/d','org/e','org/f','org/g'];
+ const inFlight=new Set(); let maxInFlight=0;
+ const fetchPage=async({repo})=>{
+  inFlight.add(repo); maxInFlight=Math.max(maxInFlight,inFlight.size);
+  await new Promise(r=>setTimeout(r,10)); inFlight.delete(repo);
+  return {items:[],hasNext:false};
+ };
+ await collectPortfolio(repos,fetchPage,{perPage:100,maxPages:1});
+ assert.equal(maxInFlight,4);
+});
+
+test('collectPortfolio caps excessive requested concurrency at eight',async()=>{
+ const repos=Array.from({length:12},(_,i)=>'org/a'+i);
+ let inFlight=0,max=0;
+ const fetchPage=async()=>{inFlight++;max=Math.max(max,inFlight);await new Promise(r=>setTimeout(r,5));inFlight--;return {items:[],hasNext:false}};
+ await collectPortfolio(repos,fetchPage,{concurrency:10_000,maxPages:1});
+ assert.equal(max,8);
+});
