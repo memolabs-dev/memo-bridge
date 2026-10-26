@@ -70,7 +70,7 @@ const DESIGN_DEFINITIONS = Object.freeze({
   design_create: {
     description: 'Use this to create an Open Design prototype on the Mac with OpenCode Lab Code. Returns a run ID; verify the actual artifact with design_status.',
     inputSchema: z.object({ name: z.string().trim().min(1).max(160),
-      brief: z.string().trim().min(10).max(8000),
+      brief: z.string().trim().min(10).max(4096),
       design_system: DESIGN_ID.optional(), skill: DESIGN_ID.optional() }).strict(),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   },
@@ -85,7 +85,8 @@ const designNamesFor = (principal, config) => config.surface !== 'intent' && con
 const designRunArguments = (name, raw) => ({
   host: 'mac',
   argv: name === 'design_create'
-    ? [DESIGN_BIN, 'od-create', raw.name, raw.brief, ...(raw.design_system || raw.skill ? [raw.design_system || '', raw.skill || ''] : [])]
+    ? [DESIGN_BIN, 'od-create', raw.name, raw.brief,
+      ...(raw.skill ? [raw.design_system || 'default', raw.skill] : raw.design_system ? [raw.design_system] : [])]
     : [DESIGN_BIN, 'od-status', raw.run_id],
   timeout_s: 45
 });
