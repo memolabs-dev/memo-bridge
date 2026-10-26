@@ -94,11 +94,16 @@ export function verifyLiveGitHubIdentity(requested, reply, expectedRepositoryId=
      typeof reply.owner.login!=='string'||
      low(reply.full_name.split('/')[0])!==low(reply.owner.login))
     return {ok:false,error:'invalid_github_identity'};
+  const redirected=low(requested)!==low(reply.full_name);
+  // A redirect without a previously known ID does not establish an owner transfer.
+  // Re-use that ID from the owner-private trusted map, then compare it to this live read.
+  if(redirected && expectedRepositoryId===null)
+    return {ok:false,error:'previous_repository_id_required'};
   if(expectedRepositoryId!==null &&
      (!positiveId(expectedRepositoryId)||expectedRepositoryId!==reply.id))
     return {ok:false,error:'repository_id_mismatch'};
   return Object.freeze({ok:true,requested,canonical:reply.full_name,repository_id:reply.id,
-    stable_key:'github:'+reply.id,redirected:low(requested)!==low(reply.full_name),
+    stable_key:'github:'+reply.id,redirected,
     proof:'live_github_api',grants_access:false});
 }
 
