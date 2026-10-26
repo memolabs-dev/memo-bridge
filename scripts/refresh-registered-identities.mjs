@@ -5,8 +5,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { join, resolve, isAbsolute } from 'node:path';
-import { mkdir, open, readFile, realpath, stat, lstat } from 'node:fs/promises';
+import { join, resolve, isAbsolute, dirname } from 'node:path';
+import { mkdir, open, readFile, realpath, stat, lstat, rename, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { readProjectRegistry } from '../server/catalog.mjs';
 import { memolabsRoot } from '../server/memolabs-root.mjs';
@@ -32,7 +32,7 @@ async function run(argv,{cwd,timeout=10000}={}){
 async function securePrivateFile(path){
   if(!isAbsolute(path)||path.includes('\0'))throw new Error('private_snapshot_required');
   const realDir=await realpath(directory);
-  const parent=await realpath(new URL('.', 'file://'+path).pathname);
+  const parent=await realpath(dirname(path));
   if(parent!==realDir)throw new Error('private_snapshot_required');
   const info=await stat(path);
   if(!info.isFile()||info.size>512*1024||(info.mode&0o077)!==0)
@@ -72,11 +72,14 @@ try{
   });
   const stamp=now.toISOString().replaceAll(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z');
   const file=join(directory,'registered-project-identities-'+stamp+'-'+randomBytes(4).toString('hex')+'.json');
-  const stream=await open(file,'wx',0o600);
+  const temp=join(directory,'.identity-'+randomBytes(8).toString('hex')+'.tmp');
+  const stream=await open(temp,'wx',0o600);
   try{
     await stream.writeFile(JSON.stringify(result.snapshot,null,2)+'\n');
     await stream.sync();
   }finally{await stream.close();}
+  try{await rename(temp,file);}
+  finally{await unlink(temp).catch(()=>{});}
   process.stdout.write(JSON.stringify({ok:true,snapshot:file,private_mode:'0600',
     registered:result.project_count,github_identities:result.identity_count,
     unresolved:result.unresolved_count,verified_redirects:result.counts.verified_github_redirect,
