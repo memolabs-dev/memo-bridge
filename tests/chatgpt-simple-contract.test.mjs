@@ -4,6 +4,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { createRemoteServerFactory, parseRemoteConfig, REMOTE_DESIGN_TOOLS, unlistedToolCalls } from '../bridge/remote-surface.mjs';
 import { CAPABILITIES } from '../server/coordinator/policy.mjs';
 import { SIMPLE_REMOTE_TOOLS, SIMPLE_REMOTE_OPERATOR_TOOLS } from '../server/registry.mjs';
+import { OPERATOR_SCHEMAS } from '../server/tools/operator-tools.mjs';
 
 const scopes = Object.values(CAPABILITIES);
 const config = { owner_sub: 'owner', allowed_client_ids: ['client'],
@@ -78,10 +79,28 @@ test('design tools are fixed Mac operator_run requests, no arbitrary commands', 
   assert.ok(!statusResponse.error && !statusResponse.result?.isError);
   assert.deepEqual(m.routed[1].args.argv, ['/Users/memo/bin/opencode-v2', 'od-status', runId]);
   assert.equal(m.routed[1].args.host, 'mac');
+  // Production regression: optional positional arguments must NEVER contain empty
+  // strings, which operator_run rejects before invoking the Mac launcher.
+  const combos = [
+    [{}, ['/Users/memo/bin/opencode-v2', 'od-create', 'Design Smoke', 'Create a fully responsive HTML page.']],
+    [{ design_system: 'application' }, ['/Users/memo/bin/opencode-v2', 'od-create', 'Design Smoke', 'Create a fully responsive HTML page.', 'application']],
+    [{ skill: 'artifacts-builder' }, ['/Users/memo/bin/opencode-v2', 'od-create', 'Design Smoke', 'Create a fully responsive HTML page.', 'default', 'artifacts-builder']],
+    [{ design_system: 'application', skill: 'artifacts-builder' }, ['/Users/memo/bin/opencode-v2', 'od-create', 'Design Smoke', 'Create a fully responsive HTML page.', 'application', 'artifacts-builder']]
+  ];
+  for (const [optional, expected] of combos) {
+    const response = await m.request('tools/call', { name: 'design_create',
+      arguments: { name: 'Design Smoke', brief: 'Create a fully responsive HTML page.', ...optional } });
+    assert.ok(!response.error && !response.result?.isError, 'optional design arguments must be accepted');
+    assert.deepEqual(m.routed.at(-1).args.argv, expected);
+    assert.ok(m.routed.at(-1).args.argv.every(x => x.length > 0));
+    assert.ok(OPERATOR_SCHEMAS.operator_run.safeParse(m.routed.at(-1).args).success,
+      'design_create must satisfy the downstream operator_run schema');
+  }
   const before = m.routed.length;
   for (const args of [{ name: 'X', brief: 'short' },
     { name: 'X', brief: 'long enough to be valid', executable: '/bin/sh' },
-    { name: 'X', brief: 'long enough to be valid', design_system: '--help' }]) {
+    { name: 'X', brief: 'long enough to be valid', design_system: '--help' },
+    { name: 'X', brief: 'B'.repeat(4097) }]) {
     const response = await m.request('tools/call', { name: 'design_create', arguments: args });
     assert.ok(response.error || response.result?.isError, 'invalid design input rejected');
   }
