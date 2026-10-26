@@ -24,6 +24,7 @@ import { networkGit, originRepo, runGit } from '../runners/worktrees.mjs';
 import { addRegistryRow, registryRows } from './registry-writer.mjs';
 
 export const PROJECT_ORG = 'memolabs-dev';
+export const PERSONAL_GITHUB_OWNER = 'guillaume-flambard';
 export const TEMPLATES = Object.freeze({ default: Object.freeze({ repo: `${PROJECT_ORG}/project-template`, stack: 'Node.js' }) });
 export const AREAS = Object.freeze(['os', 'lab', 'products', 'research', 'clients', 'studio']);
 export const VISIBILITIES = Object.freeze(['private', 'public']);
