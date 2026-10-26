@@ -33,6 +33,9 @@ test('verified owner transfer uses a stable repo ID but is never authorization',
   assert.equal(observed.ok,true);
   assert.equal(observed.redirected,true);
   assert.equal(observed.grants_access,false);
+  assert.deepEqual(verifyLiveGitHubIdentity('guillaume-flambard/uni-protocol',{
+    id:1370011909,full_name:'memolabs-dev/uni-protocol',owner:{login:'memolabs-dev'}
+  }),{ok:false,error:'previous_repository_id_required'});
 });
 
 test('a local directory move does not create a second GitHub repository identity',()=>{
