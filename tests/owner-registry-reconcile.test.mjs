@@ -93,3 +93,14 @@ test('a crashed writer lock expires but a fresh lock stays exclusive', async t =
   await utimes(lock, new Date(0), new Date(0));
   assert.equal((await reconcileOwnerRegistry({ ...opts, lockWaitMs: 0 })).ok, true);
 });
+
+
+test('an unrelated never-cloned registry entry does not block new available projects', async t => {
+  const opts = await fixture(t);
+  const original = opts.readRegistry;
+  const result = await reconcileOwnerRegistry({ ...opts, readRegistry: async () => ({ projects: [
+    ...(await original()).projects, { name: 'not-cloned-on-mac', kind: 'repo', available: false, path: null }
+  ] }) });
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(await readFile(opts.remoteConfigPath, 'utf8')).projects, ['private-app', 'public-app']);
+});

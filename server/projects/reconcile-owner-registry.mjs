@@ -52,7 +52,8 @@ export async function reconcileOwnerRegistry({ host, home, ownerSub, remoteConfi
   if (!result.ok) return result;
   // A network/credential failure is not evidence that a repository was removed. Retry later.
   if (result.skipped.some(p => p.reason === 'github_unverified')) return { ok: false, error: 'reconcile_github_unverified' };
-  if (result.skipped.some(p => ['origin_unverified', 'checkout_unavailable'].includes(p.reason)))
+  if (result.skipped.some(p => p.reason === 'origin_unverified' ||
+      (p.reason === 'checkout_unavailable' && remote.projects.includes(p.name))))
     return { ok: false, error: 'reconcile_registry_unverified' };
   const names = [...result.projects, ...result.publicProjects].map(p => p.name).sort();
   const repos = result.projects.map(p => p.repo).sort();
