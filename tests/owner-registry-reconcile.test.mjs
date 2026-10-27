@@ -138,3 +138,14 @@ test('a status-shaped GitHub answer keeps its private/public classification', as
   assert.deepEqual(JSON.parse(await readFile(opts.privatePolicyPath, 'utf8')).repos, ['memolabs-dev/private-app']);
   assert.deepEqual(JSON.parse(await readFile(opts.remoteConfigPath, 'utf8')).projects, ['private-app', 'public-app']);
 });
+
+
+test('a checkout re-pointed to a foreign origin is refused as a revoke, never dropped', async t => {
+  const opts = await fixture(t);
+  const before = await readFile(opts.remoteConfigPath, 'utf8');
+  const result = await reconcileOwnerRegistry({ ...opts,
+    readRegistry: async () => ({ projects: [{ name: 'existing', kind: 'repo', available: true, path: '/fake/existing' }] }),
+    origin: async () => 'git@github.com:someone-else/existing.git' });
+  assert.equal(result.error, 'reconcile_would_revoke');
+  assert.equal(await readFile(opts.remoteConfigPath, 'utf8'), before);
+});
