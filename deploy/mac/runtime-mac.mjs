@@ -48,7 +48,7 @@ export const PRIVATE_SCHEMA = 'memolabs.owner-private-repos.v1';
 export const LEASE_KEY_SCHEMA = 'memolabs.owner-lease-key.v1';
 // The governance ledger accepts only a Pocket ID user id (private_owner_allowlist.py OWNER).
 export const OWNER_SUB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-import { enroll, gitOrigin, githubVisibility } from '../../server/projects/owner-enrollment.mjs';
+import { enroll, gitOriginStatus, githubVisibilityStatus } from '../../server/projects/owner-enrollment.mjs';
 export { enroll, gitOrigin, githubVisibility, REPO_RE, PROJECT_RE, MAX_REPOS } from '../../server/projects/owner-enrollment.mjs';
 // The memo-labs-automation App (lab-infra memo_runner_github_app_id and _installation_id): with
 // --github-app the runtime may use it for project_create only (owner console D-A2-2); the key
@@ -173,7 +173,7 @@ function writeAtomic(path, text, mode) {
 }
 
 export async function configure({ home, ownerSub, release, governance, node, out, fromRegistry, allOwnerProjects = false, repos, extraPath = [], githubApp = false,
-  origin = path => gitOrigin(path), visibility = repo => githubVisibility(repo) }) {
+  origin = path => gitOriginStatus(path), visibility = repo => githubVisibilityStatus(repo) }) {
   const L = runtimeLayout(home);
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) return { ok: false, error: 'owner_sub_invalid' };
   if (!fromRegistry && !allOwnerProjects && repos.length === 0) return { ok: false, error: 'nothing_to_enroll', detail: 'pass --all-owner-projects, --from-registry or --repo' };
