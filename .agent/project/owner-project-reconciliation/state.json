@@ -1,0 +1,16 @@
+{
+  "phase": "IMPLEMENTING",
+  "todos": {
+    "p0_open": 1,
+    "p1_open": 4
+  },
+  "acceptance": {
+    "verified": 0,
+    "pending": 5,
+    "failed": 0
+  },
+  "risks": {
+    "high_open": 2
+  },
+  "ready_for_manual_acceptance": false
+}

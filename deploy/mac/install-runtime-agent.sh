@@ -6,7 +6,7 @@
 #
 # Usage, from a trusted memo-bridge checkout with `pnpm install` done:
 #   deploy/mac/install-runtime-agent.sh --owner-sub <uuid> --governance-ref <sha> \
-#       (--from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>] [--app-key <pem>]   stage
+#       (--all-owner-projects | --from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>] [--app-key <pem>]   stage
 #   ... same arguments ... --install                         stage, then load it in launchd
 #   deploy/mac/install-runtime-agent.sh --rollback          restore the probe agent's plist
 #
@@ -17,6 +17,8 @@
 #                     project of owner-policy/external-projects.json (#257, provisioned by the
 #                     owner), whose Mac checkout has an origin in the owner's namespaces
 #                     (memolabs-dev, guillaume-flambard) that GitHub reports private and not archived
+#   --all-owner-projects  opt in all verified owner registry projects, public and private,
+#                     with automatic reconciliation by the installed Mac runtime (#312)
 #   --repo            enroll one such repository, or opt in one public one (repeatable)
 #   --bridge-ref      the memo-bridge commit to run (default: HEAD of this checkout); 40 hex
 #   --governance-src  where to clone the governance repository from (default GitHub)
@@ -77,6 +79,7 @@ reload_agent() {
 }
 
 INSTALL=0; ROLLBACK=0; FROM_REGISTRY=0
+ALL_OWNER_PROJECTS=0
 OWNER_SUB=""; GOV_REF=""; BRIDGE_REF=""; APP_KEY=""; GOV_SRC="https://github.com/memolabs-dev/.github.git"
 REPOS=()
 while [ "$#" -gt 0 ]; do
@@ -84,6 +87,7 @@ while [ "$#" -gt 0 ]; do
     --install) INSTALL=1 ;;
     --rollback) ROLLBACK=1 ;;
     --from-registry) FROM_REGISTRY=1 ;;
+    --all-owner-projects) ALL_OWNER_PROJECTS=1 ;;
     --owner-sub) [ "$#" -ge 2 ] || die "--owner-sub needs a value"; OWNER_SUB="$2"; shift ;;
     --governance-ref) [ "$#" -ge 2 ] || die "--governance-ref needs a value"; GOV_REF="$2"; shift ;;
     --governance-src) [ "$#" -ge 2 ] || die "--governance-src needs a value"; GOV_SRC="$2"; shift ;;
@@ -115,7 +119,7 @@ fi
 
 [[ "$OWNER_SUB" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "--owner-sub must be the owner's Pocket ID user id"
 [[ "$GOV_REF" =~ ^[0-9a-f]{40}$ ]] || die "--governance-ref must be a 40-hex memolabs-dev/.github commit"
-[ "$FROM_REGISTRY" = 1 ] || [ "${#REPOS[@]}" -gt 0 ] || die "pass --from-registry or at least one --repo"
+[ "$FROM_REGISTRY" = 1 ] || [ "$ALL_OWNER_PROJECTS" = 1 ] || [ "${#REPOS[@]}" -gt 0 ] || die "pass --all-owner-projects, --from-registry or at least one --repo"
 if [ -n "$APP_KEY" ]; then
   case "$APP_KEY" in /*) ;; *) die "--app-key must be an absolute path" ;; esac
   [ -f "$APP_KEY" ] && [ ! -L "$APP_KEY" ] || die "--app-key is not a regular file"
@@ -221,6 +225,7 @@ fi
 ARGS=(configure --home "$HOME" --owner-sub "$OWNER_SUB" --release "$RELEASE" --governance "$GOVERNANCE"
   --node "$NODE" --out "$STAGING" --path "$(/usr/bin/dirname "$GH")")
 [ "$FROM_REGISTRY" = 1 ] && ARGS+=(--from-registry)
+[ "$ALL_OWNER_PROJECTS" = 1 ] && ARGS+=(--all-owner-projects)
 [ -n "$APP_KEY" ] && ARGS+=(--github-app)
 for r in "${REPOS[@]+"${REPOS[@]}"}"; do ARGS+=(--repo "$r"); done
 "$NODE" "$REPO/deploy/mac/runtime-mac.mjs" "${ARGS[@]}" || die "configure refused (see the JSON line above)"

@@ -10,8 +10,9 @@
 //      ~/memolabs/PROJECTS.md, or be an owner external project of
 //      owner-policy/external-projects.json (server/projects/external-projects.mjs, provisioned by
 //      the owner, never written here), with a verified GitHub origin and not archived.
-//      --from-registry enrolls only private repos; --repo explicitly opts in one verified public
-//      or private repo. A discovery snapshot, VPS file or remote request never enrolls anything.
+//      --from-registry enrolls only private repos; --repo opts in one verified repository;
+//      --all-owner-projects opts in all registered owner repositories and periodic reconciliation.
+//      A discovery snapshot, VPS file or remote request never enrolls anything.
 //   2. the two policy files the runtime reads (0600, ~/.local/share/memo-bridge/owner-policy/):
 //        private-repos.json  memolabs.owner-private-repos.v1, read by the coordinator
 //                            (server/coordinator/owner-private-repos.mjs) and by the governance
@@ -32,7 +33,6 @@
 // each live one, never replaces a live lease key, and refuses when a live policy changed since
 // the stage run (a project_create enrollment would otherwise be lost).
 // Nothing here talks to the VPS: no corpus, path or credential leaves the Mac.
-import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync,
   rmdirSync, unlinkSync, writeSync } from 'node:fs';
@@ -48,14 +48,12 @@ export const PRIVATE_SCHEMA = 'memolabs.owner-private-repos.v1';
 export const LEASE_KEY_SCHEMA = 'memolabs.owner-lease-key.v1';
 // The governance ledger accepts only a Pocket ID user id (private_owner_allowlist.py OWNER).
 export const OWNER_SUB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export const REPO_RE = /^(?:memolabs-dev|guillaume-flambard)\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-export const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
-export const MAX_REPOS = 100;
+import { enroll, gitOrigin, githubVisibility } from '../../server/projects/owner-enrollment.mjs';
+export { enroll, gitOrigin, githubVisibility, REPO_RE, PROJECT_RE, MAX_REPOS } from '../../server/projects/owner-enrollment.mjs';
 // The memo-labs-automation App (lab-infra memo_runner_github_app_id and _installation_id): with
 // --github-app the runtime may use it for project_create only (owner console D-A2-2); the key
 // itself is the app-key credential the installer copies, never in the plist.
 export const GITHUB_APP = Object.freeze({ id: '5298579', installation: '170927025', purposes: 'repo_create,repo_admin' });
-const ORIGIN_RE = /[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?\s*$/;
 
 export function runtimeLayout(home) {
   if (typeof home !== 'string' || !isAbsolute(home) || home.includes('~')) throw new Error('home_not_absolute');
@@ -97,77 +95,16 @@ export function renderLeaseKey({ ownerSub, key = randomBytes(32).toString('hex')
   return `${JSON.stringify({ schema: LEASE_KEY_SCHEMA, owner_sub: ownerSub, key })}\n`;
 }
 
-const run = (cmd, args, opts = {}) => new Promise(resolve => {
-  execFile(cmd, args, { timeout: 25_000, maxBuffer: 256 * 1024, ...opts }, (error, stdout) =>
-    resolve(error ? null : String(stdout)));
-});
-
-// owner/repo of a checkout's origin, or null.
-export async function gitOrigin(path, { git = run } = {}) {
-  const out = await git('git', ['-C', path, 'remote', 'get-url', 'origin'], { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
-  const match = out ? ORIGIN_RE.exec(out.trim()) : null;
-  return match ? `${match[1]}/${match[2]}` : null;
-}
-
-// {private, archived} as GitHub answers for the owner's own gh login, or null.
-export async function githubVisibility(repo, { gh = run } = {}) {
-  const out = await gh('gh', ['api', '-X', 'GET', `repos/${repo}`, '--jq', '{full_name, private, archived}'],
-    { env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
-  try {
-    const value = JSON.parse(out);
-    if (value?.full_name?.toLowerCase() !== repo.toLowerCase()) return null;
-    if (typeof value.private !== 'boolean' || typeof value.archived !== 'boolean') return null;
-    return { private: value.private, archived: value.archived };
-  } catch { return null; }
-}
-
-// {ok:true, projects:[{name, repo}], skipped:[{name, reason}]} or {ok:false, error, detail}.
-export async function enroll({ projects, explicit = [], fromRegistry = false, origin, visibility }) {
-  for (const repo of explicit) if (!REPO_RE.test(repo)) return { ok: false, error: 'invalid_repo', detail: repo };
-  const wanted = new Set(explicit.map(r => r.toLowerCase()));
-  const chosen = new Map();
-  const publicChosen = new Map();
-  const skipped = [];
-  for (const p of projects) {
-    if (p.kind !== 'repo' || !p.available || !p.path) continue;
-    const repo = await origin(p.path);
-    if (!repo || !REPO_RE.test(repo)) continue;
-    if (!fromRegistry && !wanted.has(repo.toLowerCase())) continue;
-    if (!PROJECT_RE.test(p.name)) { skipped.push({ name: p.name, reason: 'project_name_invalid' }); continue; }
-    if (chosen.has(repo.toLowerCase()) || publicChosen.has(repo.toLowerCase())) {
-      skipped.push({ name: p.name, reason: 'origin_already_enrolled' }); continue;
-    }
-    const seen = await visibility(repo);
-    if (!seen) { skipped.push({ name: p.name, reason: 'github_unverified' }); continue; }
-    if (seen.archived) { skipped.push({ name: p.name, reason: 'archived' }); continue; }
-    if (!seen.private) {
-      // Public repositories need an explicit --repo opt-in; never granted by --from-registry.
-      if (wanted.has(repo.toLowerCase())) publicChosen.set(repo.toLowerCase(), { name: p.name, repo });
-      continue;
-    }
-    chosen.set(repo.toLowerCase(), { name: p.name, repo });
-  }
-  // An explicit --repo must be a registered Mac checkout of a private, live repository.
-  for (const repo of wanted) {
-    if (!chosen.has(repo) && !publicChosen.has(repo))
-      return { ok: false, error: 'repo_not_enrolled', detail: repo, skipped };
-  }
-  if (chosen.size + publicChosen.size > MAX_REPOS)
-    return { ok: false, error: 'too_many_repos', detail: String(chosen.size + publicChosen.size) };
-  const byName = (a, b) => a.name.localeCompare(b.name);
-  return { ok: true, projects: [...chosen.values()].sort(byName),
-    publicProjects: [...publicChosen.values()].sort(byName), skipped };
-}
-
 export function renderPrivatePolicy({ ownerSub, projects }) {
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) throw new Error('owner_sub_invalid');
   return `${JSON.stringify({ schema: PRIVATE_SCHEMA, owner_sub: ownerSub, repos: projects.map(p => p.repo) })}\n`;
 }
 
-export function renderRemotePolicy({ ownerSub, projects, publicProjects = [] }) {
+export function renderRemotePolicy({ ownerSub, projects, publicProjects = [], allOwnerProjects = false }) {
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) throw new Error('owner_sub_invalid');
   return `${JSON.stringify({
     version: 1, managed_by: 'memo-bridge deploy/mac/install-runtime-agent.sh',
+    ...(allOwnerProjects ? { registry_enrollment: 'all-owner-projects' } : {}),
     oidc: { owner_sub: ownerSub }, projects: [...projects, ...publicProjects].map(p => p.name),
     remote_writes: 'enabled', session_binding: 'enforce', mac_runtime_routing: 'enabled'
   }, null, 2)}\n`;
@@ -235,23 +172,23 @@ function writeAtomic(path, text, mode) {
   renameSync(tmp, path);
 }
 
-export async function configure({ home, ownerSub, release, governance, node, out, fromRegistry, repos, extraPath = [], githubApp = false,
+export async function configure({ home, ownerSub, release, governance, node, out, fromRegistry, allOwnerProjects = false, repos, extraPath = [], githubApp = false,
   origin = path => gitOrigin(path), visibility = repo => githubVisibility(repo) }) {
   const L = runtimeLayout(home);
   if (!OWNER_SUB_RE.test(ownerSub ?? '')) return { ok: false, error: 'owner_sub_invalid' };
-  if (!fromRegistry && repos.length === 0) return { ok: false, error: 'nothing_to_enroll', detail: 'pass --from-registry or --repo' };
+  if (!fromRegistry && !allOwnerProjects && repos.length === 0) return { ok: false, error: 'nothing_to_enroll', detail: 'pass --all-owner-projects, --from-registry or --repo' };
   let registry;
   // The owner's external projects count as registered checkouts here (#257); absent file, none.
   try {
     registry = await readProjectRegistry({ projectsRoot: L.registryRoot, layoutRoot: L.registryRoot,
       externalProjects: { file: L.externalProjects, ownerSub, home, root: L.registryRoot } });
   } catch { return { ok: false, error: 'registry_unavailable' }; }
-  const enrolled = await enroll({ projects: registry.projects, explicit: repos, fromRegistry, origin, visibility });
+  const enrolled = await enroll({ projects: registry.projects, explicit: repos, fromRegistry, allOwnerProjects, origin, visibility });
   if (!enrolled.ok) return enrolled;
   // Staged only: the running runtime keeps the live files until promote (--install).
   const S = stagedLayout(home, out);
   writeAtomic(S.privatePolicy, renderPrivatePolicy({ ownerSub, projects: enrolled.projects }), 0o600);
-  writeAtomic(S.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects }), 0o600);
+  writeAtomic(S.remotePolicy, renderRemotePolicy({ ownerSub, projects: enrolled.projects, publicProjects: enrolled.publicProjects, allOwnerProjects }), 0o600);
   // A lease key is made once and never replaced (that would orphan every live private lease).
   let leaseKey = 'live';
   if (!existsSync(L.leaseKey)) {
@@ -326,6 +263,7 @@ function parseArgs(argv) {
     else if (a === '--repo') opts.repos.push(value());
     else if (a === '--path') opts.extraPath.push(value());
     else if (a === '--from-registry') opts.fromRegistry = true;
+    else if (a === '--all-owner-projects') opts.allOwnerProjects = true;
     else if (a === '--github-app') opts.githubApp = true;
     else throw new Error(`unknown argument ${a}`);
   }

@@ -343,3 +343,19 @@ test('the installer promotes the staged policies only with --install, right befo
   assert.ok(promoteAt > text.indexOf('if [ "$INSTALL" != 1 ]; then'), 'never in a stage run');
   assert.ok(promoteAt < text.indexOf('reload_agent\n/bin/launchctl kickstart'), 'before the restart');
 });
+
+
+test('global owner opt-in enrolls public and private registry checkouts, preserving refusals', async () => {
+  const all = await enroll({ projects: registry, allOwnerProjects: true, ...deps });
+  assert.equal(all.ok, true);
+  assert.deepEqual(all.publicProjects, [{ name: 'cuesheet', repo: 'memolabs-dev/cuesheet' }]);
+  assert.equal(all.projects.length, 2);
+  assert.ok(all.skipped.some(p => p.reason === 'archived'));
+  assert.ok(all.skipped.some(p => p.reason === 'github_unverified'));
+  assert.ok(!all.projects.some(p => p.repo.startsWith('someone/')));
+  const raw = JSON.parse(renderRemotePolicy({ ownerSub: SUB, projects: all.projects,
+    publicProjects: all.publicProjects, allOwnerProjects: true }));
+  assert.equal(raw.registry_enrollment, 'all-owner-projects');
+  assert.equal(parseRemotePolicy(raw).projects.length, 3);
+  assert.equal(JSON.parse(renderRemotePolicy({ ownerSub: SUB, projects: [] })).registry_enrollment, undefined);
+});
