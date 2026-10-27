@@ -29,4 +29,7 @@ Rollback: disable new opt-in via previous reviewed release and restore the exact
 private/remote policies and runtime plist using trusted administration; do not use probe-only
 rollback as proof of runtime availability. Record exact deployed revision before changing it.
 
-Current status: IMPLEMENTING. No production change, CI or live smoke is claimed.
+Current status: VERIFYING. T1/T2/T3 source changes implemented and locally verified.
+T4: independent standards/security and spec reviews found reproduced defects, now fixed;
+CI on final revision pending. T5 remains BLOCKED by protected configuration preflight.
+No production change or live smoke is claimed. The code PR does not close #312.

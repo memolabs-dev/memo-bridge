@@ -1,16 +1,32 @@
 {
-  "phase": "IMPLEMENTING",
+  "phase": "VERIFYING",
+  "requirements": {
+    "total": 5,
+    "covered": 3
+  },
   "todos": {
+    "T1": "DONE:EV-01,EV-03",
+    "T2": "DONE:EV-03,EV-04,EV-05",
+    "T3": "DONE:EV-03,EV-05",
+    "T4": "IN_PROGRESS: final CI pending",
+    "T5": "BLOCKED: protected configuration path_secret",
     "p0_open": 1,
-    "p1_open": 4
+    "p1_open": 1
   },
   "acceptance": {
-    "verified": 0,
-    "pending": 5,
+    "verified": 3,
+    "pending": 2,
     "failed": 0
   },
   "risks": {
-    "high_open": 2
+    "high_open": 1,
+    "details": "Production deployment/rollback/live smoke lack authorized execution evidence"
+  },
+  "verification": {
+    "local": "PASS on preceding revision; final run pending",
+    "independent_source_review": "PASS",
+    "ci": "PENDING",
+    "live": "NOT_RUN"
   },
   "ready_for_manual_acceptance": false
 }
