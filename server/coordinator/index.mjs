@@ -897,8 +897,12 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
       } else {
         if (remote && !currentRemotePolicy().configured) return remoteProjectRefusal(principal, null, currentRemotePolicy(), { host });
         try { projects = (await listProjectRepos()).slice(0, TASKS_SCAN.projects); } catch { return fail('catalog_unavailable'); }
-        // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09).
-        if (remote) { const allowed = currentRemotePolicy().projects; projects = projects.filter(p => allowed.includes(p.name)); }
+        // A remote principal only ever sees the allowlisted projects (D9, REQ-P5-09), except the
+        // owner, whose registry is the scope (#312 owner decision of 2026-10-27).
+        if (remote && !isOwnerPrincipal(principal, currentRemotePolicy().owner_sub)) {
+          const allowed = currentRemotePolicy().projects;
+          projects = projects.filter(p => allowed.includes(p.name));
+        }
       }
       const allowlist = await effectiveAllowlist();
       if (!allowlist.ok) return allowlist;
@@ -1522,6 +1526,17 @@ export function createCoordinator({ store, principal, ledger, now = Date.now, ca
     const origins = new Set();
     const policy = currentRemotePolicy();
     if (!policy.configured) return origins;
+    // The owner's scope is his registry, not a per-repository list (#312). Anyone else keeps
+    // the explicit allowlist.
+    if (isOwnerPrincipal(principal, policy.owner_sub)) {
+      let projects;
+      try { projects = (await listProjectRepos()).slice(0, TASKS_SCAN.projects); } catch { return origins; }
+      for (const project of projects) {
+        const origin = await projectRemote(project);
+        if (origin) origins.add(origin.toLowerCase());
+      }
+      return origins;
+    }
     for (const name of policy.projects) {
       const project = await resolveProject(name);
       const origin = project?.ok ? await projectRemote(project.project) : null;

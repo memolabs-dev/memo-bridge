@@ -57,7 +57,9 @@ test('stage W (remote_writes enabled, no root runner): a conversation claims, wr
   assert.equal(opened.data.ok, true, JSON.stringify(opened.data));
   assert.deepEqual([opened.data.workspace.client_type, opened.data.workspace.host], ['chatgpt', 'vps']);
   const ws = opened.data.workspace.workspace_id;
-  assert.equal((await chat.call('workspace_open', { project: 'other' })).data.error, 'project_not_allowed');
+  // The owner is no longer limited to the rendered allowlist (#312); what still refuses is a
+  // project that is not in the registry at all, and it says so instead of hiding behind the list.
+  assert.equal((await chat.call('workspace_open', { project: 'other' })).data.error, 'unknown_project');
 
   const claim = await chat.call('task_claim', { workspace_id: ws, issue: ISSUE, client_request_id: 'smoke-claim-0001' }, S1);
   assert.equal(claim.data.ok, true, JSON.stringify(claim.data));

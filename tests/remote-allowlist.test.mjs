@@ -100,3 +100,31 @@ test('a project refusal names the condition, the project and the runtime that an
   assert.equal(projectRef(null), null);
   assert.equal(projectRef(42), null);
 });
+
+// Owner decision of 2026-10-27 (#312): the owner reaches every project of his registry. The
+// allowlist keeps its meaning for every other remote principal, and an unreadable policy still
+// refuses everyone (fail closed).
+const OWNER_SUB = '0b9c2d51-3b8e-4d7a-9c11-2f4e5a6b7c8d';
+const OWNER = makePrincipal(`oidc:${OWNER_SUB}`, ALL, { client_type: 'chatgpt', via: 'hub' });
+const OTHER = makePrincipal('oidc:11111111-2222-4333-8444-555555555555', ALL, { client_type: 'chatgpt', via: 'hub' });
+
+test('the owner is never limited to the rendered allowlist', () => {
+  const policy = parseRemotePolicy({ projects: ['drop'], oidc: { owner_sub: OWNER_SUB } });
+  assert.equal(remoteProjectRefusal(OWNER, 'cuesheet', policy), null);
+  assert.equal(remoteProjectRefusal(OWNER, 'anything-at-all', policy), null);
+  assert.equal(remoteProjectRefusal(OWNER, 'memolabs-dev/cuesheet', policy), null);
+  assert.equal(remoteProjectRefusal(OTHER, 'cuesheet', policy).error, 'project_not_allowed');
+  assert.equal(remoteProjectRefusal(OWNER, 'drop', UNCONFIGURED_POLICY).error, 'project_not_allowed', 'no policy, no owner');
+  assert.equal(remoteProjectRefusal(LOCAL, 'anything', UNCONFIGURED_POLICY), null, 'local principals are unchanged');
+});
+
+test('tasks_list and task_status for the owner cover the registry, not the allowlist', async t => {
+  const policy = parseRemotePolicy({ projects: ['drop'], oidc: { owner_sub: OWNER_SUB } });
+  const searched = [];
+  const tasks = { searchIssues: async query => { searched.push(query); return { ok: true, total_count: 0, incomplete: false, items: [] }; } };
+  const { coordinator } = on(t, await tempStateDir(t), { principal: OWNER, policy, tasks });
+  assert.equal((await coordinator.taskStatus({ issue: 'memolabs-dev/cuesheet#3' })).ok, true);
+  assert.equal((await coordinator.tasksList({ project: 'cuesheet' })).ok, true);
+  const listed = await coordinator.tasksList({});
+  assert.deepEqual(listed.repositories, ['memolabs-dev/cuesheet', 'memolabs-dev/drop']);
+});

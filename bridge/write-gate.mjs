@@ -16,6 +16,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { isRemotePrincipal } from '../server/coordinator/policy.mjs';
+import { isOwnerPrincipal } from '../server/coordinator/owner-private-repos.mjs';
 
 const fail = (error, detail) => ({ ok: false, error, ...(detail !== undefined ? { detail } : {}) });
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
@@ -149,6 +150,11 @@ export function remoteProjectRefusal(principal, project, policy = UNCONFIGURED_P
     return fail('project_not_allowed',
       `no remote project allowlist is configured${label ? ` on the ${label} runtime` : ''}`);
   }
+  // The owner is the authority the allowlist exists for: every project of his registry is his,
+  // and the answering runtime still bounds the set to the projects it actually serves
+  // (unknown_project, repo_unavailable). Owner decision of 2026-10-27: no project_not_allowed
+  // for an owner project, including one created after the policy was rendered (#312).
+  if (isOwnerPrincipal(principal, policy.owner_sub)) return null;
   const name = projectRef(project);
   if (name === null) return fail('project_not_allowed', 'the project argument is not a project name');
   if (policy.projects.includes(name)) return null;
