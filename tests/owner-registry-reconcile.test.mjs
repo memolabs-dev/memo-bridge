@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, chmod, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reconcileOwnerRegistry, startOwnerRegistryReconciler } from '../server/projects/reconcile-owner-registry.mjs';
@@ -69,4 +69,27 @@ test('scheduler shares one in-flight reconciliation and stops on shutdown', asyn
   await Promise.resolve(); assert.equal(calls, 1);
   finish({ ok: true }); await first; await worker.close(); await worker.run();
   assert.equal(calls, 1);
+});
+
+
+test('transient origin or checkout failure cannot revoke enrolled projects', async t => {
+  const opts = await fixture(t);
+  const before = await readFile(opts.remoteConfigPath, 'utf8');
+  const privateBefore = await readFile(opts.privatePolicyPath, 'utf8');
+  assert.equal((await reconcileOwnerRegistry({ ...opts, origin: async () => null })).error, 'reconcile_registry_unverified');
+  assert.equal((await reconcileOwnerRegistry({ ...opts, readRegistry: async () => ({ projects: [
+    { name: 'existing', kind: 'repo', available: false, path: null }
+  ] }) })).error, 'reconcile_registry_unverified');
+  assert.equal(await readFile(opts.remoteConfigPath, 'utf8'), before);
+  assert.equal(await readFile(opts.privatePolicyPath, 'utf8'), privateBefore);
+});
+
+
+test('a crashed writer lock expires but a fresh lock stays exclusive', async t => {
+  const opts = await fixture(t);
+  const lock = join(opts.home, '.local/share/memo-bridge/owner-policy/.enroll.lock');
+  await mkdir(lock);
+  assert.equal((await reconcileOwnerRegistry({ ...opts, lockWaitMs: 0 })).error, 'reconcile_locked');
+  await utimes(lock, new Date(0), new Date(0));
+  assert.equal((await reconcileOwnerRegistry({ ...opts, lockWaitMs: 0 })).ok, true);
 });

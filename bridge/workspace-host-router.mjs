@@ -176,7 +176,7 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
       let live;
       try { live = await requestAgent('mac', op, envelope); } catch { live = null; }
       if (live?.ok !== false && Array.isArray(live?.projects)) {
-        const rows = new Map(result.projects.map(p => [p.name, p]));
+        const rows = new Map(result.projects.filter(p => p.metadata_only !== true).map(p => [p.name, p]));
         for (const p of live.projects) {
           if (p.metadata_only === true || !PROJECT.test(p.name ?? '')) continue;
           if (!rows.has(p.name) || rows.get(p.name).metadata_only === true) rows.set(p.name, { ...p, source_host: 'mac' });

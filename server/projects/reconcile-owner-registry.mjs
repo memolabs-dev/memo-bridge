@@ -52,11 +52,19 @@ export async function reconcileOwnerRegistry({ host, home, ownerSub, remoteConfi
   if (!result.ok) return result;
   // A network/credential failure is not evidence that a repository was removed. Retry later.
   if (result.skipped.some(p => p.reason === 'github_unverified')) return { ok: false, error: 'reconcile_github_unverified' };
+  if (result.skipped.some(p => ['origin_unverified', 'checkout_unavailable'].includes(p.reason)))
+    return { ok: false, error: 'reconcile_registry_unverified' };
   const names = [...result.projects, ...result.publicProjects].map(p => p.name).sort();
   const repos = result.projects.map(p => p.repo).sort();
   const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
   if (same(remote.projects, names) && same(privateRaw.repos, repos)) return { ok: true, changed: false, projects: names.length };
   const lock = join(dir, ENROLL_LOCK);
+  // The same stale lock recovery as project_create enrollment; this lock only covers
+  // small policy writes, never GitHub/network calls.
+  try {
+    const held = await lstat(lock);
+    if (held.isDirectory() && Date.now() - held.mtimeMs > 120_000) await rmdir(lock);
+  } catch { /* absent, nonempty, or another reconciler already recovered it */ }
   if (!(await acquireLock(lock, { waitMs: lockWaitMs, stepMs: 50 }))) return { ok: false, error: 'reconcile_locked' };
   try {
     if (digest(await trusted(remoteFile, uid)) !== digest(beforeRemote) || digest(await trusted(privateFile, uid)) !== digest(beforePrivate))

@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 export const REPO_RE = /^(?:memolabs-dev|guillaume-flambard)\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 export const PROJECT_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 export const MAX_REPOS = 100;
-const ORIGIN_RE = /[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?\s*$/;
+const ORIGIN_RE = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/;
 const run = (cmd, args, opts = {}) => new Promise(resolve => {
   execFile(cmd, args, { timeout: 25_000, maxBuffer: 256 * 1024, ...opts }, (error, stdout) =>
     resolve(error ? null : String(stdout)));
@@ -36,9 +36,17 @@ export async function enroll({ projects, explicit = [], fromRegistry = false, al
   const publicChosen = new Map();
   const skipped = [];
   for (const p of projects) {
-    if (p.kind !== 'repo' || !p.available || !p.path) continue;
+    if (p.kind !== 'repo') continue;
+    if (!p.available || !p.path) {
+      if (allOwnerProjects) skipped.push({ name: p.name, reason: 'checkout_unavailable' });
+      continue;
+    }
     const repo = await origin(p.path);
-    if (!repo || !REPO_RE.test(repo)) continue;
+    if (!repo) {
+      if (allOwnerProjects) skipped.push({ name: p.name, reason: 'origin_unverified' });
+      continue;
+    }
+    if (!REPO_RE.test(repo)) continue;
     if (!fromRegistry && !allOwnerProjects && !wanted.has(repo.toLowerCase())) continue;
     if (!PROJECT_RE.test(p.name)) { skipped.push({ name: p.name, reason: 'project_name_invalid' }); continue; }
     if (chosen.has(repo.toLowerCase()) || publicChosen.has(repo.toLowerCase())) {

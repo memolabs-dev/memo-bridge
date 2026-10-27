@@ -8,7 +8,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENT_URL, LEASE_KEY_SCHEMA, enroll, promote, renderPlist, renderPrivatePolicy, renderRemotePolicy, runtimeLayout, stagedLayout } from '../deploy/mac/runtime-mac.mjs';
+import { AGENT_URL, LEASE_KEY_SCHEMA, enroll, gitOrigin, promote, renderPlist, renderPrivatePolicy, renderRemotePolicy, runtimeLayout, stagedLayout } from '../deploy/mac/runtime-mac.mjs';
 import { parseRemotePolicy } from '../bridge/write-gate.mjs';
 import { loadOwnerPrivatePolicy, parseOwnerPrivatePolicy } from '../server/coordinator/owner-private-repos.mjs';
 
@@ -358,4 +358,16 @@ test('global owner opt-in enrolls public and private registry checkouts, preserv
   assert.equal(raw.registry_enrollment, 'all-owner-projects');
   assert.equal(parseRemotePolicy(raw).projects.length, 3);
   assert.equal(JSON.parse(renderRemotePolicy({ ownerSub: SUB, projects: [] })).registry_enrollment, undefined);
+});
+
+
+test('owner identity attestation rejects origin lookalikes outside github.com', async () => {
+  for (const origin of ['https://evil.example/memolabs-dev/new-app.git', 'https://github.com.evil.example/memolabs-dev/new-app.git',
+    'https://github.com@evil.example/memolabs-dev/new-app.git', '/tmp/memolabs-dev/new-app.git']) {
+    assert.equal(await gitOrigin('/unused', { git: async () => origin }), null);
+  }
+  for (const origin of ['https://github.com/memolabs-dev/new-app.git', 'git@github.com:memolabs-dev/new-app.git',
+    'ssh://git@github.com/memolabs-dev/new-app.git']) {
+    assert.equal(await gitOrigin('/unused', { git: async () => origin }), 'memolabs-dev/new-app');
+  }
 });
