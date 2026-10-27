@@ -87,7 +87,13 @@ export async function enroll({ projects, explicit = [], fromRegistry = false, al
       continue;
     }
     const repo = seenOrigin.repo;
-    if (!REPO_RE.test(repo)) continue;
+    // An origin outside the owner namespaces (a fork, a client clone) is conclusive: it cannot
+    // be enrolled, and a project that used to point into an owner namespace must be refused as
+    // a revoke rather than dropped silently.
+    if (!REPO_RE.test(repo)) {
+      if (allOwnerProjects) skipped.push({ name: p.name, reason: 'not_owner_origin' });
+      continue;
+    }
     if (!fromRegistry && !allOwnerProjects && !wanted.has(repo.toLowerCase())) continue;
     if (!PROJECT_RE.test(p.name)) { skipped.push({ name: p.name, reason: 'project_name_invalid' }); continue; }
     if (chosen.has(repo.toLowerCase()) || publicChosen.has(repo.toLowerCase())) {

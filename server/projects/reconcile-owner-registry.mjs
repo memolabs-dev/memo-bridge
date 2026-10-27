@@ -8,7 +8,7 @@ import { parseRemotePolicy } from '../../bridge/write-gate.mjs';
 import { parseOwnerPrivatePolicy } from '../coordinator/owner-private-repos.mjs';
 import { acquireLock } from './registry-writer.mjs';
 import { ENROLL_LOCK, ownerPolicyDir } from './mac-enroll.mjs';
-import { enroll, gitOrigin, githubVisibility } from './owner-enrollment.mjs';
+import { enroll, gitOriginStatus, githubVisibilityStatus } from './owner-enrollment.mjs';
 
 const digest = text => createHash('sha256').update(text).digest('hex');
 async function trusted(path, uid) {
@@ -27,7 +27,8 @@ async function atomic(path, text) {
 }
 
 export async function reconcileOwnerRegistry({ host, home, ownerSub, remoteConfigPath, privatePolicyPath,
-  uid = process.getuid?.(), readRegistry = readProjectRegistry, origin = gitOrigin, visibility = githubVisibility,
+  uid = process.getuid?.(), readRegistry = readProjectRegistry,
+  origin = path => gitOriginStatus(path), visibility = repo => githubVisibilityStatus(repo),
   lockWaitMs = 1000 } = {}) {
   if (host !== 'mac' || typeof home !== 'string' || !home.startsWith('/')) return { ok: false, error: 'reconcile_unsupported' };
   const dir = ownerPolicyDir(home), remoteFile = join(dir, 'remote.json'), privateFile = join(dir, 'private-repos.json');
