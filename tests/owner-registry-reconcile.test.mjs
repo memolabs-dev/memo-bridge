@@ -79,7 +79,7 @@ test('transient origin or checkout failure cannot revoke enrolled projects', asy
   assert.equal((await reconcileOwnerRegistry({ ...opts, origin: async () => null })).error, 'reconcile_registry_unverified');
   assert.equal((await reconcileOwnerRegistry({ ...opts, readRegistry: async () => ({ projects: [
     { name: 'existing', kind: 'repo', available: false, path: null }
-  ] }) })).error, 'reconcile_registry_unverified');
+  ] }) })).error, 'reconcile_would_revoke');
   assert.equal(await readFile(opts.remoteConfigPath, 'utf8'), before);
   assert.equal(await readFile(opts.privatePolicyPath, 'utf8'), privateBefore);
 });
@@ -102,5 +102,39 @@ test('an unrelated never-cloned registry entry does not block new available proj
     ...(await original()).projects, { name: 'not-cloned-on-mac', kind: 'repo', available: false, path: null }
   ] }) });
   assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(await readFile(opts.remoteConfigPath, 'utf8')).projects, ['private-app', 'public-app']);
+});
+
+test('conclusive skips neither block the reconciliation nor revoke an enrolled project', async t => {
+  const opts = await fixture(t);
+  // Client projects, forks and local pilots have no owner origin: a stable fact, not a failure.
+  const projects = [
+    { name: 'private-app', kind: 'repo', available: true, path: '/fake/private-app' },
+    { name: 'client-app', kind: 'repo', available: true, path: '/fake/client-app' },
+    { name: 'gone-app', kind: 'repo', available: true, path: '/fake/gone-app' }
+  ];
+  const readRegistry = async () => ({ projects });
+  const origin = async path => (path.endsWith('client-app') ? { reason: 'not_owner_origin' } : `memolabs-dev/${path.split('/').at(-1)}`);
+  const visibility = async repo => (repo.endsWith('gone-app') ? { reason: 'repo_absent' } : { private: true, archived: false });
+  const result = await reconcileOwnerRegistry({ ...opts, readRegistry, origin, visibility });
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.deepEqual(JSON.parse(await readFile(opts.remoteConfigPath, 'utf8')).projects, ['private-app']);
+  // The same conclusive absence on a project this policy already carries is not auto-revoked.
+  const secured = await fixture(t);
+  const revoked = await reconcileOwnerRegistry({ ...secured, readRegistry: async () => ({ projects: [
+    { name: 'existing', kind: 'repo', available: true, path: '/fake/existing' }
+  ] }), origin: async () => ({ reason: 'not_owner_origin' }) });
+  assert.equal(revoked.error, 'reconcile_would_revoke');
+  assert.deepEqual(JSON.parse(await readFile(secured.remoteConfigPath, 'utf8')).projects, ['existing']);
+});
+
+
+test('a status-shaped GitHub answer keeps its private/public classification', async t => {
+  const opts = await fixture(t);
+  const result = await reconcileOwnerRegistry({ ...opts,
+    visibility: async repo => ({ visibility: { private: repo.endsWith('private-app'), archived: false } }) });
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(await readFile(opts.privatePolicyPath, 'utf8')).repos, ['memolabs-dev/private-app']);
   assert.deepEqual(JSON.parse(await readFile(opts.remoteConfigPath, 'utf8')).projects, ['private-app', 'public-app']);
 });
