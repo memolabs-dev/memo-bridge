@@ -80,7 +80,7 @@ test('snapshot staleness is visible, future timestamps refused', async t=>{
   assert.equal(list.projects.find(p=>p.name==='product-4').catalog_stale,true);
   assert.equal((await loadCatalogSnapshot(snapshotFile,{now:NOW})).projects.length,68);
 });
-test('OIDC owner needs explicit opt-in for metadata; other remote users retain allowlist', async t=>{
+test('the OIDC owner sees the whole registry; other remote users retain the allowlist', async t=>{
   const {options}=await fixture(t);
   const policy={configured:true,owner_sub:'owner-123',projects:['memo-bridge']};
   let handler,rt;
