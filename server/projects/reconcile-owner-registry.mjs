@@ -50,11 +50,16 @@ export async function reconcileOwnerRegistry({ host, home, ownerSub, remoteConfi
     result = await enroll({ projects: registry.projects, allOwnerProjects: true, origin, visibility });
   } catch { return { ok: false, error: 'reconcile_registry_unavailable' }; }
   if (!result.ok) return result;
-  // A network/credential failure is not evidence that a repository was removed. Retry later.
+  // A network, authentication or git failure proves nothing about the registry: write nothing
+  // and retry later rather than compute a policy from an incomplete attestation (#312).
   if (result.skipped.some(p => p.reason === 'github_unverified')) return { ok: false, error: 'reconcile_github_unverified' };
-  if (result.skipped.some(p => p.reason === 'origin_unverified' ||
-      (p.reason === 'checkout_unavailable' && remote.projects.includes(p.name))))
-    return { ok: false, error: 'reconcile_registry_unverified' };
+  if (result.skipped.some(p => p.reason === 'origin_unverified')) return { ok: false, error: 'reconcile_registry_unverified' };
+  // A conclusive skip (no owner origin, definitely absent, archived) is safe only when it cannot
+  // revoke a grant this policy already carries. Removing an enrolled project stays an explicit
+  // installer action; a periodic reconcile never drops one on evidence it did not complete.
+  const skippedNames = new Set(result.skipped.map(p => p.name));
+  const wouldRevoke = remote.projects.filter(name => skippedNames.has(name));
+  if (wouldRevoke.length) return { ok: false, error: 'reconcile_would_revoke', detail: wouldRevoke.slice(0, 5).join(', ') };
   const names = [...result.projects, ...result.publicProjects].map(p => p.name).sort();
   const repos = result.projects.map(p => p.repo).sort();
   const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
