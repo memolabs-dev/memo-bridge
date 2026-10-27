@@ -163,7 +163,7 @@ test('#218 the running Mac projects_list shows the owner a project as soon as pr
   const listed = async search => JSON.parse((await handler({ search })).content[0].text);
   // Owner decision of 2026-10-27 (#312): the owner's projects_list is his registry, not the
   // rendered allowlist, so the project is visible before any enrollment. Enrollment still gates
-  // execution (workspace_open, claims), which is what #218 was about.
+  // what executes (the ledger preflight on claims, worktree creation), which is what #218 serves.
   assert.deepEqual((await listed('relay-v2')).projects.map(p => p.name), ['relay-v2']);
   assert.equal((await enrollOnMac(args(h))).ok, true);
   const rows = (await listed('relay-v2')).projects;
