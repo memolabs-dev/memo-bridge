@@ -23,9 +23,9 @@
     "details": "Production deployment/rollback/live smoke lack authorized execution evidence"
   },
   "verification": {
-    "local": "PASS on preceding revision; final run pending",
+    "local": "PASS: EV-06, 1221 passed / 3 skipped / 0 failed",
     "independent_source_review": "PASS",
-    "ci": "PENDING",
+    "ci": "External live evidence: PR #313 required Node 22/24 checks; check exact head before merge",
     "live": "NOT_RUN"
   },
   "ready_for_manual_acceptance": false

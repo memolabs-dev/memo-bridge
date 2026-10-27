@@ -9,7 +9,11 @@ EV-04: Independent standards/security review of 1184eae: no remaining blocking s
 16 focused tests passed. No live policy touched.
 EV-05: Independent spec review of 6aa9abe: 33 focused tests passed; all three reproduced source
 blockers resolved, including an unrelated unavailable registry entry blocking valid additions.
-EV-06: final full suite and GitHub CI pending; PR #313, issue remains open.
+EV-06: c6681b7 stable local full suite: 1221 pass, 3 skip, 0 fail (1224 tests).
+An earlier run overlapped a commit and failed the installer idempotency test because VERSION
+changed between its two installs; re-running on a stable revision passed. No test disabled.
+GitHub CI is external live evidence: https://github.com/memolabs-dev/memo-bridge/pull/313/checks.
+The issue remains open pending production acceptance.
 
 Production installation, actual rollback rehearsal, inventory parity, new-conversation and
 negative live smoke remain BLOCKED: operator_preflight path_secret; recorded
