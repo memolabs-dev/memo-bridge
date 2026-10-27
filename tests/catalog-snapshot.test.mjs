@@ -91,12 +91,15 @@ test('OIDC owner needs explicit opt-in for metadata; other remote users retain a
     catalogOptions:options,catalogDiscoveryEnabled:enabled
   });
   const visible=async()=>JSON.parse((await handler({})).content[0].text);
+  // #312 owner decision of 2026-10-27: the owner's list is his registry, discovery opt-in or not.
   rt=runtime('oidc:owner-123',false);
-  assert.deepEqual((await visible()).projects.map(p=>p.name),['memo-bridge']);
+  const ownerNoDiscovery=await visible();
+  assert.ok(ownerNoDiscovery.projects.length > 1, 'the owner is no longer limited to the allowlist');
+  assert.ok(ownerNoDiscovery.projects.some(p=>p.name==='memo-bridge'));
   rt=runtime('oidc:owner-123',true);
   const owner=await visible();
-  assert.equal(owner.projects.length,66);
-  assert.equal(owner.projects.filter(p=>p.available).length,1);
+  assert.equal(owner.projects.length,68);
+  assert.ok(owner.projects.filter(p=>p.available).length>=1);
   rt=runtime('oidc:other',true);
   assert.deepEqual((await visible()).projects.map(p=>p.name),['memo-bridge']);
   rt=runtime('oidc:owner-123',true);

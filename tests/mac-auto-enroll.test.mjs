@@ -161,7 +161,10 @@ test('#218 the running Mac projects_list shows the owner a project as soon as pr
     authorize: () => true, audit: async () => {}, catalogOptions: { projectsRoot: root, layoutRoot: root }
   }));
   const listed = async search => JSON.parse((await handler({ search })).content[0].text);
-  assert.deepEqual((await listed('relay-v2')).projects, []);
+  // Owner decision of 2026-10-27 (#312): the owner's projects_list is his registry, not the
+  // rendered allowlist, so the project is visible before any enrollment. Enrollment still gates
+  // execution (workspace_open, claims), which is what #218 was about.
+  assert.deepEqual((await listed('relay-v2')).projects.map(p => p.name), ['relay-v2']);
   assert.equal((await enrollOnMac(args(h))).ok, true);
   const rows = (await listed('relay-v2')).projects;
   assert.deepEqual(rows.map(p => [p.name, p.metadata_only === true]), [['relay-v2', false]]);

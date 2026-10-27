@@ -20,6 +20,7 @@ import { inExpiryWindow, leaseExpiring, parseIssueRef } from '../coordinator/iss
 import { LIMITS, createGitHub, validInputText } from '../integrations/github.mjs';
 import { AI_ATTRIBUTION, gitBaseEnv, isProtectedBranch, protectedSinceDefault, pushedCommits } from '../runners/worktrees.mjs';
 import { CLIENT_REQUEST_ID_RE, runOnce } from '../coordinator/store.mjs';
+import { isOwnerPrincipal } from '../coordinator/owner-private-repos.mjs';
 import { isRemotePrincipal, metaFromExtra, remotePolicyFromEnv, remoteProjectRefusal, scopeOwner, sessionBindingDecision }
   from '../../bridge/write-gate.mjs';
 
@@ -86,7 +87,7 @@ export function registerGithubTools(server, getRuntime, options = {}) {
         if (resolved.error === 'repo_not_registered') await rt.audit(op, 'denied', 'repo_not_registered');
         return result(resolved);
       }
-      if (isRemotePrincipal(rt.principal) && !(await remoteRepoAllowed(github, resolved.repo))) {
+      if (isRemotePrincipal(rt.principal) && !(await remoteRepoAllowed(github, resolved.repo, rt.principal))) {
         await rt.audit(op, 'denied', 'project_not_allowed');
         return result(fail('project_not_allowed',
           `repository ${resolved.repo.full} is not the origin of any project in ${scopeOwner(rt.host)} remote project allowlist`));
@@ -98,9 +99,12 @@ export function registerGithubTools(server, getRuntime, options = {}) {
   };
 
   // A remote principal reads only the GitHub origins of the allowlisted projects.
-  async function remoteRepoAllowed(github, repo) {
+  async function remoteRepoAllowed(github, repo, principal) {
     const remotePolicy = remotePolicyNow();
     if (!remotePolicy.configured) return false;
+    // The owner answers for every project of his registry; resolveRepo already refused any
+    // repository that is not a registered project's origin (#312).
+    if (isOwnerPrincipal(principal, remotePolicy.owner_sub)) return true;
     for (const name of remotePolicy.projects) {
       const origin = await github.projectRepo(name);
       if (origin && origin.toLowerCase() === repo.full.toLowerCase()) return true;
