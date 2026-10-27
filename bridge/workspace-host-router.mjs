@@ -170,6 +170,23 @@ export function createWorkspaceHostRouter({ requestAgent, enabled=false, stateDi
       }
     }
     let result=await requestAgent(destination,op,envelope);
+    // Ask the live Mac with the same authenticated principal. Its own project gate filters
+    // the answer; this merges discovery only and never grants execution from a snapshot.
+    if (op === 'projects_list' && destination !== 'mac' && result?.ok !== false && Array.isArray(result?.projects)) {
+      let live;
+      try { live = await requestAgent('mac', op, envelope); } catch { live = null; }
+      if (live?.ok !== false && Array.isArray(live?.projects)) {
+        const rows = new Map(result.projects.filter(p => p.metadata_only !== true).map(p => [p.name, p]));
+        for (const p of live.projects) {
+          if (p.metadata_only === true || !PROJECT.test(p.name ?? '')) continue;
+          if (!rows.has(p.name) || rows.get(p.name).metadata_only === true) rows.set(p.name, { ...p, source_host: 'mac' });
+        }
+        const projects = [...rows.values()];
+        const { snapshot, ...rest } = result;
+        return { ...rest, source: 'live_runtimes', projects, total: projects.length, count: projects.length,
+          ...(projects.some(p => p.metadata_only === true) && snapshot ? { snapshot } : {}) };
+      }
+    }
     if (destination === 'mac' && result?.ok === false && result.error === 'unsupported_op') return fail('host_offline', PROBE_ONLY);
     // A repository the receiving host does not register belongs to the host that holds the owner's
     // private checkouts. Only this exact refusal moves the read, never a policy answer, and only

@@ -89,6 +89,12 @@ if (mode === 'runtime') {
   // The ledger client gets its token per call and hands it only to its python child, with a
   // private gh configuration under the state directory (server/runtime.mjs).
   base = createRuntime({ host, githubCredentials });
+  if (host === 'mac') {
+    const { startOwnerRegistryReconciler } = await import('../server/projects/reconcile-owner-registry.mjs');
+    const reconciler = startOwnerRegistryReconciler({ env, host, log });
+    base.onShutdown(() => reconciler.close());
+    void reconciler.run();
+  }
   runtimeOps = await createRuntimeOperations({
     runtimeFor: principal => base.as(principal),
     principalFromWire: wire => base.principalFromHub(wireClaim(wire)),

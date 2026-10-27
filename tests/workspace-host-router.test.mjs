@@ -442,3 +442,44 @@ test('without the opt-in the live Mac lookup never happens', async t => {
   await route.call('vps','task_claim',{ args:{ issue:'memolabs-dev/freelance-growth#1' }, principal });
   assert.deepEqual(hosts.calls, [['vps','task_claim']]);
 });
+
+
+test('listing refreshes stale Mac discovery from the live authenticated Mac catalog', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'catalog-live-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let offline = false;
+  const stale = { projects: [{ name: 'freelance-growth', metadata_only: true, available: false }],
+    snapshot: { stale: true } };
+  const route = createWorkspaceHostRouter({ enabled: true, stateDir: dir, requestAgent: async (host, op, envelope) => {
+    assert.equal(envelope.principal, principal);
+    if (host === 'vps') return stale;
+    if (offline) return { ok: false, error: 'host_offline' };
+    return { projects: [{ name: 'freelance-growth', available: true }, { name: 'new-app', available: true }] };
+  } });
+  const result = await route.call('vps', 'projects_list', { args: {}, principal });
+  assert.equal(result.projects[0].available, true);
+  assert.equal(result.projects[0].metadata_only, undefined);
+  assert.equal(result.projects[0].source_host, 'mac');
+  assert.equal(result.projects.length, 2);
+  assert.equal(result.snapshot, undefined);
+  offline = true;
+  assert.deepEqual(await route.call('vps', 'projects_list', { args: {}, principal }), stale);
+});
+
+
+test('a live empty Mac listing removes obsolete snapshot rows; policy refusal is never retried', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'catalog-live-empty-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let refused = false, macCalls = 0;
+  const route = createWorkspaceHostRouter({ enabled: true, stateDir: dir, requestAgent: async host => {
+    if (host === 'mac') { macCalls++; return { projects: [] }; }
+    return refused ? { ok: false, error: 'forbidden' } : {
+      projects: [{ name: 'removed-app', metadata_only: true, source_host: 'mac' }], snapshot: { stale: true }
+    };
+  } });
+  const result = await route.call('vps', 'projects_list', { args: {}, principal });
+  assert.deepEqual(result.projects, []); assert.equal(result.snapshot, undefined);
+  refused = true;
+  assert.equal((await route.call('vps', 'projects_list', { args: {}, principal })).error, 'forbidden');
+  assert.equal(macCalls, 1);
+});
