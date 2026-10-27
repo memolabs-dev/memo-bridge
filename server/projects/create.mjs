@@ -50,7 +50,9 @@ export function validateProjectArgs(args = {}) {
   if (RESERVED_NAMES.includes(name)) return fail('invalid_name', 'reserved name');
   const visibility = args.visibility ?? 'private';
   if (!VISIBILITIES.includes(visibility)) return fail('invalid_input', 'visibility');
-  const host = args.host ?? (visibility === 'private' ? 'mac' : 'vps');
+  // The Mac serves public projects too (#312), so it is the default for both: a new project is
+  // usable at once. `host: 'vps'` stays available; its clone arrives with the next deploy.
+  const host = args.host ?? 'mac';
   if (!PROJECT_HOSTS.includes(host)) return fail('invalid_input', 'host');
   const area = args.area ?? 'products';
   if (!AREAS.includes(area)) return fail('invalid_input', 'area');
@@ -61,14 +63,18 @@ export function validateProjectArgs(args = {}) {
   if (visibility === 'private' && host === 'vps') {
     return fail('private_on_vps_refused', 'a private repository is never placed on the VPS', { next_step: 'call again with host "mac"' });
   }
-  if (visibility === 'public' && host === 'mac') {
-    return fail('public_on_mac_unsupported', 'the Mac runtime serves only enrolled private repositories',
-      { next_step: 'call again with host "vps" for a public project, or visibility "private" for a Mac one' });
-  }
+  // A public project is servable by the Mac too: its runtime lists the owner's public repositories
+  // and the owner scope no longer depends on the rendered allowlist (#312, owner decision of
+  // 2026-10-27). The host only says where it runs first; the Mac serves it until the VPS clone
+  // arrives with the next lab-infra deploy.
+
   return { ok: true, spec: Object.freeze({ name, visibility, host, area, template, description, repo: `${PROJECT_ORG}/${name}` }) };
 }
 
-// The owner steps a project still needs before batch_create can use it (spec section 09, G-1 and G-2).
+// What a project still needs before batch_create can use it (spec section 09, G-1 and G-2).
+// Since the owner scope covers the whole registry (#312), the ledger literal and the remote list
+// are no longer steps. What remains is where the code physically runs: the Mac serves the
+// project at once, the VPS clone arrives with the next lab-infra deploy.
 function ownerSteps(spec, { ownerSub, governanceRef }) {
   if (spec.host === 'mac') {
     return [{ step: 'enroll_on_mac',
@@ -77,15 +83,10 @@ function ownerSteps(spec, { ownerSub, governanceRef }) {
       command: `deploy/mac/install-runtime-agent.sh --owner-sub ${ownerSub ?? '<owner sub>'} --governance-ref ${governanceRef ?? '<governance commit>'} --from-registry --app-key "$HOME/${APP_KEY_HOME_PATH}" --install`,
       from_chatgpt: 'operator_run on host mac with that command, which asks for your approval' }];
   }
-  return [
-    { step: 'register_on_vps', repo: spec.repo,
-      why: 'the VPS runner clones and serves only the projects lab-infra lists',
-      change: `lab-infra ansible/group_vars/lab.yml: add ${spec.repo} to memo_runner_pilot_repos and to memo_bridge_remote_projects (kept identical, at most 50)` },
-    { step: 'allow_in_ledger_prefilter', repo: spec.repo,
-      why: 'the deployed coordinator pre-filters with the PUBLIC_ALLOWLIST literal (until T-A3a)',
-      change: `memolabs-dev/.github scripts/issue_preflight.py: add "${spec.repo}" to PUBLIC_ALLOWLIST, then re-pin it in lab-infra after risk R-6 (coordinator.test.mjs on the candidate)` },
-    { step: 'deploy', why: 'both changes reach the VPS with a deploy, on your go', command: 'make deploy-memo-bridge from a clean lab-infra checkout' }
-  ];
+  return [{ step: 'vps_clone_on_next_deploy', repo: spec.repo,
+    why: 'the Mac serves the project now; the VPS clones its repository at the next lab-infra deploy',
+    command: 'make deploy-memo-bridge from a clean lab-infra checkout, on your go',
+    from_chatgpt: 'none needed to use the project on the Mac' }];
 }
 
 // deps: root (MEMOLABS_ROOT), credentials (github-app.mjs provider), gh (runGh), scratchDir

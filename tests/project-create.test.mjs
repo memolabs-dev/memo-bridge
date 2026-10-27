@@ -189,7 +189,7 @@ test('A2: the same name again returns the same project, never a second repositor
   assert.equal(bare.ok, true, JSON.stringify(bare));
   assert.equal(bare.existing, true);
   assert.equal(bare.visibility, 'public');
-  assert.equal(bare.host, 'vps');
+  assert.equal(bare.host, 'mac');
   assert.equal((await v.call({ name: 'open-relay', visibility: 'private' })).error, 'visibility_mismatch');
   // A first call that stopped after the repository (no clone, no row) is finished by the next one.
   const g = await setup(t);
@@ -208,11 +208,14 @@ test('A2: ready for batch_create once enrolled on the Mac; a public VPS project 
   const v = await setup(t);
   const pub = await v.call({ name: 'open-relay', visibility: 'public' });
   assert.equal(pub.ok, true, JSON.stringify(pub));
-  assert.equal(pub.host, 'vps');
+  assert.equal(pub.host, 'mac', 'the Mac serves public projects too (#312)');
   assert.equal(v.gh.calls.find(c => c.method === 'POST').body.private, false);
-  assert.equal(pub.ready_for_batch_create, false);
-  assert.deepEqual(pub.owner_steps.map(s => s.step), ['register_on_vps', 'allow_in_ledger_prefilter', 'deploy']);
-  assert.match(pub.owner_steps[0].change, /memo_runner_pilot_repos and to memo_bridge_remote_projects/);
+  assert.equal(pub.ready_for_batch_create, true, 'a public project needs no enrollment file: the owner scope covers it');
+  // On the VPS the only remaining step is the clone at the next deploy: no list, no literal.
+  const vps = await setup(t);
+  const onVps = await vps.call({ name: 'open-relay', visibility: 'public', host: 'vps' });
+  assert.equal(onVps.ok, true, JSON.stringify(onVps));
+  assert.deepEqual(onVps.owner_steps.map(s => s.step), ['vps_clone_on_next_deploy']);
 });
 
 test('#216: a private Mac project is enrolled by project_create itself and ready at once; never a public or untrusted one', async t => {
@@ -270,19 +273,19 @@ test('A2: owner only, on the Mac only; every refusal is journaled and touches no
   assert.equal(isProjectOwner(makePrincipal('local:memo', ALL, { via: 'hub' }), policy), false);
 });
 
-test('A2: names are kebab-case and not reserved; private never on the VPS, public not on the Mac; nothing is called', async t => {
+test('A2: names are kebab-case and not reserved; private never on the VPS; a public project may run on the Mac (#312)', async t => {
   for (const name of ['Relay', 'relay_v2', 'r', '-relay', 'relay-', 'relay--v2', '2relay', 'project-template', 'github', 'x'.repeat(51),
     'relay.v2', '../relay', 'memolabs-dev']) {
     assert.equal(validateProjectArgs({ name }).error, 'invalid_name', name);
   }
   assert.equal(validateProjectArgs({ name: 'relay-v2' }).spec.host, 'mac');
-  assert.equal(validateProjectArgs({ name: 'relay-v2', visibility: 'public' }).spec.host, 'vps');
+  assert.equal(validateProjectArgs({ name: 'relay-v2', visibility: 'public' }).spec.host, 'mac');
   assert.equal(validateProjectArgs({ name: 'relay-v2', area: 'tmp' }).detail, 'area');
   assert.equal(validateProjectArgs({ name: 'relay-v2', template: 'rust' }).detail, 'template');
   assert.equal(validateProjectArgs({ name: 'relay-v2', description: 'a\nb' }).detail, 'description');
   const f = await setup(t);
   assert.equal((await f.call({ name: 'relay-v2', host: 'vps' })).error, 'private_on_vps_refused');
-  assert.equal((await f.call({ name: 'relay-v2', visibility: 'public', host: 'mac' })).error, 'public_on_mac_unsupported');
+  assert.equal(validateProjectArgs({ name: 'relay-v2', visibility: 'public', host: 'mac' }).ok, true, 'the Mac serves public projects too');
   assert.equal((await f.call({ name: 'Relay' })).error, 'invalid_name');
   assert.equal(f.gh.calls.length, 0);
   assert.ok(f.journal.every(e => e.outcome === 'denied'));
