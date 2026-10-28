@@ -31,7 +31,10 @@
     "build:standalone": "esbuild standalone/index.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/standalone/index.mjs",
     "install:standalone": "node scripts/install-standalone.mjs",
     "smoke:standalone": "node tests/standalone-smoke.mjs",
-    "build:personal-remote": "esbuild standalone/personal-cli.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/standalone/personal-cli.mjs"
+    "build:personal-remote": "esbuild standalone/personal-cli.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/standalone/personal-cli.mjs",
+    "prepare": "sh scripts/install-git-hooks.sh",
+    "hooks:install": "sh scripts/install-git-hooks.sh",
+    "check:staged": "node scripts/check-staged-syntax.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
