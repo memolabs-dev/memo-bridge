@@ -1,0 +1,34 @@
+# Template ONLY. Replace @@...@@ with absolute, verified operator-owned paths.
+# Never install or enable without a successful dry-run canary on an allowlisted repo.
+[Unit]
+Description=Memo Source Engine trusted reconciliation (no GitHub writes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=memo-runner
+Group=memo-runner
+UMask=0077
+Environment=MEMO_BRIDGE_STATE_DIR=@@PRIVATE_STATE@@
+Environment=MEMO_BRIDGE_PROJECTS_ROOT=@@PROJECTS_ROOT@@
+Environment=MEMO_BRIDGE_GITHUB_APP_ID=@@GITHUB_APP_ID@@
+Environment=MEMO_BRIDGE_GITHUB_APP_INSTALLATION_ID=@@GITHUB_APP_INSTALLATION_ID@@
+Environment=HOME=@@PRIVATE_STATE@@
+WorkingDirectory=@@CHECKOUT@@
+# The credential ID MUST be app-key, as expected by github-app.mjs.
+# Use a dedicated read-only GitHub App key when provisioned by the operator.
+# NEVER copy a private key, token or PAT into Environment or repository content.
+LoadCredential=app-key:@@SCOPED_GITHUB_APP_KEY_PATH@@
+ExecStart=/usr/bin/flock -n @@PRIVATE_STATE@@/source-poll.lock /usr/bin/node @@CHECKOUT@@/server/source-engine/poll-cli.mjs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@@PRIVATE_STATE@@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=8min
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
