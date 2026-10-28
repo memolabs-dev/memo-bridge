@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+git diff --cached --check
+if git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)\.env($|\.(local|production|development|test)$)|\.(pem|p12|p8)$' >/dev/null; then
+  echo "pre-commit: remove staged environment credentials or key files" >&2
+  exit 1
+fi
+if git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(mjs|cjs|js|json)$' >/dev/null; then
+  pnpm run check:staged
+fi
