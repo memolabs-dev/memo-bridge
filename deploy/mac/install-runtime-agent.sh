@@ -31,17 +31,18 @@
 #   ~/.local/share/memo-bridge/runtime-releases/<bridge-ref>/   the runtime bundle (bridge/,
 #                     server/, production node_modules), from `git archive` of that commit
 #   ~/.local/share/memo-bridge/governance/<governance-ref>/     scripts/ of that governance commit
-#   ~/.local/share/memo-bridge/runtime-config/credentials/      0700: agent-key (the existing
-#                     probe identity, so the hub sees the same agent), ledger-gh and push-gh
-#                     (the token of the owner's own `gh` login, read from the Keychain, never
-#                     printed, never in the plist or the environment)
+#   ~/.local/share/memo-bridge/launchd/runtime-credentials/    0700: STAGED
+#                     agent-key, ledger-gh, push-gh and optional app-key. Only this
+#                     directory is modified before --install. No token is printed.
+#   ~/.local/share/memo-bridge/runtime-config/credentials/      0700: LIVE
+#                     credentials used by launchd. Changed ONLY during --install.
 #   ~/.local/share/memo-bridge/launchd/owner-policy/            0700, STAGED: private-repos.json,
 #                     remote.json, stage.json and, when the owner has none yet, lease-key.json
 #                     (deploy/mac/runtime-mac.mjs configure). The live owner-policy/ files the
 #                     running agent reads are not touched by a stage run (fix pass of #258);
 #                     external-projects.json is read, never written
 #   ~/.local/share/memo-bridge/launchd/dev.memolabs.memo-bridge-agent.plist   staged plist
-# A stage run still refreshes the ledger-gh and push-gh credentials (the same gh login token).
+# A stage run never changes the live agent's credentials; promotion needs --install.
 # --install keeps the current plist as .../launchd/dev.memolabs.memo-bridge-agent.plist.probe
 # (once), installs the staged one, promotes the staged policies into owner-policy/ (each live
 # one kept as .bak-<time>; a live lease-key.json is never replaced; refused if a live policy
@@ -196,30 +197,17 @@ fi
 require_account_home_allowlist "$GOVERNANCE" "$GOV_REF"
 say governance "\"root\":\"$GOVERNANCE\""
 
-# 3. Credentials: the probe identity, and the owner's gh token for the ledger and for pushes.
+# 3. Credentials: stage into a DIFFERENT directory from the live agent credentials.
+# A stage-only run must never touch the keys/tokens the already-running agent reads.
+# Promotion happens after approval of --install and immediately before launchd reload.
+# Keep this helper outside the runtime archive: the trusted checkout drives installation.
+# shellcheck source=deploy/mac/runtime-credentials.sh
+source "$REPO/deploy/mac/runtime-credentials.sh"
 CREDS="$BASE/runtime-config/credentials"
-/bin/mkdir -p "$CREDS"
-/bin/chmod 0700 "$BASE/runtime-config" "$CREDS"
-/usr/bin/install -m 0600 "$SOURCE_KEY" "$CREDS/agent-key"
-TOKEN="$("$GH" auth token --hostname github.com 2>/dev/null || true)"
-# Length checked apart: macOS /bin/bash 3.2 refuses a regex bound above 255 (RE_DUP_MAX).
-[[ "$TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]] && [ "${#TOKEN}" -ge 20 ] && [ "${#TOKEN}" -le 2048 ] \
-  || die "GitHub CLI has no usable github.com token (gh auth login)"
-for name in ledger-gh push-gh; do
-  printf '%s\n' "$TOKEN" > "$CREDS/$name.tmp"
-  /bin/chmod 0600 "$CREDS/$name.tmp"
-  /bin/mv -f "$CREDS/$name.tmp" "$CREDS/$name"
-done
-TOKEN=""
-if [ -n "$APP_KEY" ]; then
-  /usr/bin/install -m 0600 "$APP_KEY" "$CREDS/app-key.tmp"
-  /bin/mv -f "$CREDS/app-key.tmp" "$CREDS/app-key"
-  say credentials "\"dir\":\"$CREDS\",\"files\":[\"agent-key\",\"ledger-gh\",\"push-gh\",\"app-key\"]"
-else
-  # A key without the plist's App settings would make every App purpose fail: never keep one.
-  /bin/rm -f "$CREDS/app-key"
-  say credentials "\"dir\":\"$CREDS\",\"files\":[\"agent-key\",\"ledger-gh\",\"push-gh\"]"
-fi
+STAGED_CREDS="$STAGING/runtime-credentials"
+stage_runtime_credentials "$STAGED_CREDS" "$SOURCE_KEY" "$GH" "$APP_KEY" \
+  || die "could not stage runtime credentials; the live agent credentials remain unchanged"
+say credentials_staged "\"dir\":\"$STAGED_CREDS\",\"live_unchanged\":true"
 
 # 4. Enrollment, the two policy files and the staged plist.
 ARGS=(configure --home "$HOME" --owner-sub "$OWNER_SUB" --release "$RELEASE" --governance "$GOVERNANCE"
@@ -244,6 +232,12 @@ if [ -f "$TARGET" ] && [ ! -f "$PROBE_BACKUP" ]; then /bin/cp -p "$TARGET" "$PRO
 # never changes what the running agent reads.
 "$NODE" "$REPO/deploy/mac/runtime-mac.mjs" promote --home "$HOME" --out "$STAGING" \
   || { /bin/rm -f "$TARGET.tmp"; die "promote refused (see the JSON line above); the agent and its policy are unchanged"; }
+# Promote only on explicit install. Do not touch running credentials during --stage.
+# Missing App enrollment means the old App key is removed at install, never at stage.
+# This is a separate T2 action after governance-policy promotion has been validated.
+if [ -n "$APP_KEY" ]; then HAS_APP=1; else HAS_APP=0; fi
+promote_runtime_credentials "$STAGED_CREDS" "$CREDS" "$HAS_APP" \
+  || { /bin/rm -f "$TARGET.tmp"; die "credential promotion refused; agent not restarted"; }
 /bin/mv -f "$TARGET.tmp" "$TARGET"
 LOG="$HOME/Library/Logs/memo-bridge/stderr.log"
 START_LINES="$( [ -f "$LOG" ] && /usr/bin/wc -l < "$LOG" | /usr/bin/tr -d ' ' || echo 0)"
