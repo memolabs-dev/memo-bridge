@@ -51,12 +51,12 @@ test('sensitive paths stay with the owner, code paths land', () => {
   assert.ok(match, 'no file deny list');
   const regex = new RegExp(match[1].trim().replace(/^['"]|['"]$/g, ''));
   for (const path of ['.github/workflows/ci.yml', '.mergify.yml', 'CODEOWNERS', '.env.production',
-    'AGENTS.md']) {
+    'AGENTS.md', 'deploy/install.sh']) {
     assert.match(path, regex, 'sensitive path not excluded: ' + path);
   }
   for (const path of ['server/index.mjs', 'bridge/hub-cli.mjs', 'scripts/reap-worktrees.mjs',
     'tests/github.test.mjs', 'package.json', 'pnpm-lock.yaml', 'docs/guide.md', 'docs/AGENTS.md',
-    'deploy/install.sh', 'infra/ansible.yml', 'migrations/001.sql']) {
+    'infra/ansible.yml', 'migrations/001.sql']) {
     assert.doesNotMatch(path, regex, 'code path wrongly excluded: ' + path);
   }
 });
