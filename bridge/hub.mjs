@@ -404,7 +404,10 @@ export function createHub(options) {
         outcome: out?.ok === false ? 'refused' : 'ok', code: out?.ok === false ? out.error : null });
       return out;
     }
-    const frozen = hubFrozen();
+    // The owner's freeze (Telegram, FROZEN file) stops both hosts. A chain check stops the host
+    // whose journal is in doubt only: one host losing its history is not a reason to refuse the
+    // other, and the event stays in the hub journal for both (issue #326).
+    const frozen = hubFrozen() || tampered.has(host);
     if (hubFreezeDenial(tier, frozen)) {
       record('operator_refused', OPERATOR_AGENT_IDS[host], {principal: principal.id, op, reason: 'frozen'});
       return fail('frozen');
@@ -750,7 +753,7 @@ export function createHub(options) {
         record('operator_chain_tampered', OPERATOR_AGENT_IDS[host], { anchored_seq: last?.seq ?? null, seq: out.seq, chain_ok: out.chain_ok,
           first_broken_line: out.first_broken_line ?? null });
         tampered.add(host);
-        setOperatorFrozen(true, 'chain_check');
+        record('operator_frozen', OPERATOR_AGENT_IDS[host], { by: 'chain_check' });
         results[host] = 'tampered';
         continue;
       }

@@ -320,7 +320,7 @@ Any one switch stops every call above T0 on the next call; reads keep working.
 | Mac file `~/.memo-operator/FROZEN` | the Mac, its root helper included | `touch ~/.memo-operator/FROZEN` | `rm ~/.memo-operator/FROZEN` |
 | Mac root file `/Library/Application Support/MemoBridge/operator-root/FROZEN` | Mac root only; only root can lift it | `sudo touch "/Library/Application Support/MemoBridge/operator-root/FROZEN"` | `sudo rm` of the same path |
 | auto-freeze: 5 signature or policy refusals in 5 min | that host (or the root helper) | automatic, marker `AUTO-FROZEN` in the state directory | read the journal first; `/unfreeze`, or `make memo-operator-unfreeze auto=1` on lab, or `rm ~/.memo-operator/state/AUTO-FROZEN` on the Mac |
-| chain check: a journal shorter than its anchor, or an anchored line that changed | both hosts (both are re-checked) | automatic, every 15 min | read the journal, then `/unfreeze`, which also drops the anchor of each host reported since the last unfreeze (below) |
+| chain check: a journal shorter than its anchor, or an anchored line that changed | the host whose journal is in doubt, above T0 only | automatic, every 15 min | read the journal, then `/unfreeze`, which also drops and re-takes the anchor of each host reported since the last unfreeze (below) |
 | agent key removed from the hub | that agent, entirely | remove `operator-mac.pub` or `operator-vps.pub` from `/var/lib/memo-bridge/secrets`, restart the hub | put it back |
 
 The hub flag set by `/freeze` is saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) before it is journaled: a hub restart or a
@@ -332,9 +332,12 @@ no tool can lift. The model has no freeze or unfreeze tool.
 
 Every 15 minutes the hub asks each host for its journal head and compares it with the last
 anchored line: a shorter chain or a changed line at an anchored sequence means the journal was
-rewritten, which the hub journals (`operator_chain_tampered`) and answers by freezing operator
-access above T0. A journal that genuinely went away (a cleaner deleted the directory, a disk
-was wiped) can never catch up with its own anchor, so that freeze would repeat for ever.
+rewritten, which the hub journals (`operator_chain_tampered`, then `operator_frozen` with that
+host) and answers by refusing that host's calls above T0. The other host keeps working: one
+journal losing its history is not a reason to stop the fleet (issue #326). Reads stay available,
+and the owner's `/freeze` remains the switch that stops both. A journal that genuinely went away
+(a cleaner deleted the directory, a disk was wiped) can never catch up with its own anchor, so
+that per-host refusal would repeat for ever.
 
 `/unfreeze` is therefore also the acknowledgement: for a host reported since the last unfreeze it
 drops the anchor and adopts the head it reads at that moment as the new baseline
@@ -365,6 +368,7 @@ make -C ~/memolabs/lab/infrastructure deploy-memo-operator
 deploy/mac/install-operator-agent.sh --install
 launchctl print gui/$(id -u)/dev.memolabs.memo-operator-agent | head -20
 tail ~/Library/Logs/memo-operator/stderr.log   # operator_ready, then no reconnect_scheduled
+node ~/memolabs/os/core/bridge/scripts/audit-verify.mjs ~/.memo-operator/audit.jsonl   # journal and restarts
 ```
 
 Without `--install` the script writes only `~/.memo-operator`, the bundle and the logs folder,
@@ -382,7 +386,7 @@ removes the plist; keys and logs stay.
 | `operator-hub.pub` | 0444 | the hub's operator signing key (one or more PEM blocks) |
 | `policy.json` | 0444 | the Mac policy: `max_tier: exec`, `approval_mode: dangerous`, roots, denylist, `repositories` read from `~/memolabs/PROJECTS.md`, Path relative to `~/memolabs` (`MEMOLABS_ROOT`) |
 | `state/` | 0700 | background runs, uploads, the auto-freeze marker |
-| `~/Library/Logs/memo-operator/audit.jsonl` | 0600 | the Mac's hash-chained journal |
+| `~/.memo-operator/audit.jsonl` | 0600 | the Mac's hash-chained journal. It lives in the agent's own directory, not in `~/Library/Logs`, which a log cleaner deletes whole (2026-11-08). The installer moves an existing journal there intact, so the chain and the hub's anchor keep matching |
 
 A policy change is a rerun of the script and a restart (`--install` restarts the job). The
 agent reads the policy and the hub key once at start and refuses to start on any problem with

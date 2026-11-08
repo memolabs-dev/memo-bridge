@@ -28,7 +28,8 @@
 //     FROZEN                                created by the owner to freeze (D6 b)
 //     state/                          0700  background runs, uploads, AUTO-FROZEN marker
 //   ~/.local/share/memo-bridge/operator/   pinned bundle (scripts/build-operator.mjs), 0444 files
-//   ~/Library/Logs/memo-operator/     0700  stdout.log, stderr.log, audit.jsonl (D7)
+//   ~/Library/Logs/memo-operator/     0700  stdout.log, stderr.log (launchd, deletable)
+//   ~/.memo-operator/audit.jsonl      0600  the hash-chained journal (D7), moved out of Logs
 import { createHash, createPrivateKey, createPublicKey, X509Certificate } from 'node:crypto';
 import {
   chmodSync, closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync,
@@ -63,7 +64,10 @@ export function macLayout(home) {
     policyFile: join(conf, 'policy.json'),
     frozenFile: join(conf, 'FROZEN'),
     stateDir: join(conf, 'state'),
-    auditFile: join(logs, 'audit.jsonl'),
+    // The journal lives in the agent's own 0700 directory, not in ~/Library/Logs: that tree is
+    // what a log cleaner deletes, entirely, and the hash chain cannot be rebuilt afterwards
+    // (2026-11-08 lost 23 467 lines that way). stdout.log/stderr.log stay under Logs.
+    auditFile: join(conf, 'audit.jsonl'),
     script: join(runtime, 'bridge', 'operator-agent-cli.mjs'),
     probeCa: join(home, '.config', 'memo-bridge', 'hub-ca.crt'),
     launchAgent: join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`)
