@@ -297,7 +297,7 @@ const LIVE = {
     frozen_file: '/etc/memo-operator/FROZEN', audit_file: '/var/log/memo-operator/audit.jsonl', state_dir: '/var/lib/memo-operator',
     root_helper: { socket: '/run/memo-operator/root.sock' } },
   mac: { version: 1, host: 'mac', max_tier: 'root', approval_mode: 'off', roots: { read: ['/Users/memo'], write: ['/Users/memo', '/tmp'] },
-    frozen_file: '/Users/memo/.memo-operator/FROZEN', audit_file: '/Users/memo/Library/Logs/memo-operator/audit.jsonl',
+    frozen_file: '/Users/memo/.memo-operator/FROZEN', audit_file: '/Users/memo/.memo-operator/audit.jsonl',
     state_dir: '/Users/memo/.memo-operator/state', root_helper: { socket: '/var/run/memo-operator/root.sock' } }
 };
 const live = host => {

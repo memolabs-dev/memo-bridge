@@ -115,10 +115,12 @@ has repaired one real thing remotely.
 - **D7. Audit.** Hub SQLite journal (exists) gains `tier`, `args_sha256`, redacted args,
   `approval_id`, exit code, duration, output hash. Each host keeps
   `/var/log/memo-operator/audit.jsonl` (root, 0600; on the Mac
-  `~/Library/Logs/memo-operator/audit.jsonl`), each line hashed with the previous line's hash.
+  `~/.memo-operator/audit.jsonl`, moved out of `~/Library/Logs` on 2026-11-08, issue #326: a log
+  cleaner deletes that tree whole), each line hashed with the previous line's hash.
   On lab the root helper writes it, so `memo-operator` cannot rewrite it. The hub stores the
   chain head every 15 min. `operator_audit_verify` recomputes a chain and reports the first
-  break.
+  break. A chain check refuses the host whose journal is in doubt, above T0 (2026-11-08, issue
+  #326: one host's lost journal froze the other); the owner's `/freeze` stays fleet-wide.
 - **D8. Secrets and untrusted content.** Read, list and search refuse a denylist:
   `**/.ssh/**`, `**/.gnupg/**`, `**/.env*`, `*.pem`, `*.key`, `id_*`, `**/*secret*`,
   `/etc/shadow`, `/etc/gshadow`, `~/Library/Keychains/**`, `/etc/memo-operator/**`,
@@ -460,7 +462,7 @@ it disagrees with the text above; each entry says what changed and why.
   `~/.config/memolabs/secrets/memo-bridge/operator-mac.pub`.
 - DEV-P6-31 (D6 b, D7 on the Mac). The Mac FROZEN file is `~/.memo-operator/FROZEN`, the
   auto-freeze marker `~/.memo-operator/state/AUTO-FROZEN`, the host journal
-  `~/Library/Logs/memo-operator/audit.jsonl`, written by the agent itself (no root helper on the
+  `~/.memo-operator/audit.jsonl` (issue #326), written by the agent itself (no root helper on the
   Mac): the owner's user can rewrite it; the hub's 15 min anchoring detects a rewrite of lines
   already anchored, as long as the agent's own code is not altered too (its bundle is 0444 but
   the owner's). lab-infra `make memo-operator-freeze` freezes the Mac too, through the hub file.
@@ -517,7 +519,7 @@ Decisions and deviations:
   (`otool -L`): Homebrew's node links `/opt/homebrew` libraries the owner's user can rewrite, the
   official build (nvm) links system libraries only and runs with the hardened runtime.
 - DEV-P6-36 (journals). On the Mac the agent keeps its own journal
-  (`~/Library/Logs/memo-operator/audit.jsonl`); the helper writes a second, root-owned chain at
+  (`~/.memo-operator/audit.jsonl`); the helper writes a second, root-owned chain at
   `/var/log/memo-operator/audit.jsonl` for root calls only. The hub's 15 min anchoring reads the
   agent's chain; anchoring the root chain is deferred (P2).
 - DEV-P6-37 (approval). The Mac root policy refuses `approval_mode: off` (the helper does not
