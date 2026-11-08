@@ -15,7 +15,7 @@ import { createAgent } from '../bridge/agent.mjs';
 import { generateAgentIdentity } from '../bridge/crypto.mjs';
 import { createOperatorOperations } from '../bridge/operator-agent.mjs';
 import { createOperatorGuard } from '../bridge/operator-guard.mjs';
-import { createAuditChain, fileAuditStore } from '../bridge/operator-audit.mjs';
+import { createAuditChain, fileAuditStore, verifyChain } from '../bridge/operator-audit.mjs';
 import { createOperatorTools } from '../bridge/operator-tools.mjs';
 import { createOperatorExecTools } from '../bridge/operator-exec.mjs';
 import { createOperatorWriteTools } from '../bridge/operator-write.mjs';
@@ -305,4 +305,35 @@ test('AC-P6-07 (anchoring): the hub anchors each chain head; a rewritten host jo
   assert.deepEqual(await s.hub.anchorChains(), { vps: 'tampered' });
   assert.equal(s.hub.operatorFrozen(), true);
   assert.ok(s.audit.some(e => e.event === 'operator_chain_tampered'));
+  // A chain that does not verify cannot become a baseline: /unfreeze lifts the flag, accepts
+  // nothing, and the next check reports the same rewrite again (a rewrite left in place is not
+  // something an owner acknowledgement can turn into a valid history).
+  await s.hub.ownerUnfreeze('owner');
+  assert.equal(s.hub.operatorFrozen(), false);
+  assert.equal(s.audit.some(e => e.event === 'operator_anchor_rebaselined'), false);
+  assert.deepEqual(await s.hub.anchorChains(), { vps: 'tampered' });
+  assert.equal(s.hub.operatorFrozen(), true);
+});
+
+test('AC-P6-07: a journal deleted under the agent restarts a valid chain, and the owner /unfreeze becomes the new baseline', async t => {
+  const s = await stack(t);
+  await s.call('operator_policy', {});
+  await s.call('operator_state', {});
+  assert.deepEqual(await s.hub.anchorChains(), { vps: 'anchored' });
+  const file = s.host.policy.auditFile;
+  const before = verifyChain(readFileSync(file, 'utf8'));
+  assert.equal(before.ok, true);
+  rmSync(file);
+  // The agent keeps running: its next line starts a new chain that verifies, and says what it lost.
+  assert.equal((await s.call('operator_policy', {})).ok, true);
+  assert.equal(verifyChain(readFileSync(file, 'utf8')).ok, true);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8').split('\n')[0]).journal_lost, { seq: before.lines, hash: before.head });
+  // The hub sees a chain that went backwards: it records the rewrite and freezes once.
+  assert.deepEqual(await s.hub.anchorChains(), { vps: 'tampered' });
+  assert.equal(s.hub.operatorFrozen(), true);
+  // The owner accepts it; the anchor is dropped and the next one is taken on the new chain.
+  assert.deepEqual(await s.hub.ownerUnfreeze('owner'), { vps: 'not_auto_frozen' });
+  assert.equal(s.hub.operatorFrozen(), false);
+  assert.deepEqual(await s.hub.anchorChains(), { vps: 'anchored' });
+  assert.equal((await s.call('operator_run', { argv: ['df'] })).ok, true, 'operator access is back');
 });

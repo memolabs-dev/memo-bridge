@@ -320,12 +320,34 @@ Any one switch stops every call above T0 on the next call; reads keep working.
 | Mac file `~/.memo-operator/FROZEN` | the Mac, its root helper included | `touch ~/.memo-operator/FROZEN` | `rm ~/.memo-operator/FROZEN` |
 | Mac root file `/Library/Application Support/MemoBridge/operator-root/FROZEN` | Mac root only; only root can lift it | `sudo touch "/Library/Application Support/MemoBridge/operator-root/FROZEN"` | `sudo rm` of the same path |
 | auto-freeze: 5 signature or policy refusals in 5 min | that host (or the root helper) | automatic, marker `AUTO-FROZEN` in the state directory | read the journal first; `/unfreeze`, or `make memo-operator-unfreeze auto=1` on lab, or `rm ~/.memo-operator/state/AUTO-FROZEN` on the Mac |
+| chain check: a journal shorter than its anchor, or an anchored line that changed | both hosts (both are re-checked) | automatic, every 15 min | read the journal, then `/unfreeze`, which also drops the anchor of each host reported since the last unfreeze (below) |
 | agent key removed from the hub | that agent, entirely | remove `operator-mac.pub` or `operator-vps.pub` from `/var/lib/memo-bridge/secrets`, restart the hub | put it back |
 
 The hub flag set by `/freeze` is saved in the hub's state directory (`MEMO_BRIDGE_HUB_STATE_DIR`, or `StateDirectory=` on lab, `bridge/hub-state.mjs`) before it is journaled: a hub restart or a
 deploy keeps the hub frozen (journal `operator_frozen` with `by: restored`) until `/unfreeze`.
 Without a state directory it lives in memory and a restart drops it. The files stay the switches
 no tool can lift. The model has no freeze or unfreeze tool.
+
+### The chain check (D7) and what `/unfreeze` accepts
+
+Every 15 minutes the hub asks each host for its journal head and compares it with the last
+anchored line: a shorter chain or a changed line at an anchored sequence means the journal was
+rewritten, which the hub journals (`operator_chain_tampered`) and answers by freezing operator
+access above T0. A journal that genuinely went away (a cleaner deleted the directory, a disk
+was wiped) can never catch up with its own anchor, so that freeze would repeat for ever.
+
+`/unfreeze` is therefore also the acknowledgement: for a host reported since the last unfreeze it
+drops the anchor and adopts the head it reads at that moment as the new baseline
+(`operator_anchor_rebaselined` records the host, the sequence and the hash that were given up, and
+the accepted head). The tamper event and the dropped baseline stay in the hub journal, so the loss
+remains auditable; the refusals and the auto-freeze of a host whose chain is broken are not
+forgiven by this.
+
+A journal deleted while the agent runs restarts its chain and marks the loss on its first line
+(`journal_lost`), which `operator_audit_verify` and `scripts/audit-verify.mjs` report as a restart.
+A journal deleted while the agent is stopped leaves no marker, and the hub's anchors live in
+memory: in that case the only trace is what the hub journal recorded before the loss, which is why
+the journal belongs somewhere a cleaner does not delete (#326).
 
 ## Install on the Mac (TODO-P6-13)
 
