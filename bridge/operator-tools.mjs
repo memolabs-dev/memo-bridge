@@ -403,7 +403,10 @@ export function createOperatorTools(policy, { run = runArgv,
       let v;
       try { v = await chain.verify(); } catch { return fail('audit_unavailable'); }
       return { ok: true, host: policy.host, chain_ok: v.ok, lines: v.lines, head: v.head,
-        ...(v.ok ? {} : { first_broken_line: v.first_broken_line, reason: v.reason }) };
+        ...(v.ok ? {} : { first_broken_line: v.first_broken_line, reason: v.reason }),
+        // A journal that restarted after it went away (operator-audit.mjs journal_lost): the
+        // chain verifies, but the history is not complete and the caller must be able to see it.
+        ...(Array.isArray(v.restarts) && v.restarts.length ? { restarts: v.restarts.length } : {}) };
     }
   };
 }

@@ -2,7 +2,9 @@
 //   node scripts/audit-verify.mjs <audit.jsonl> [--anchor <seq>:<sha256>]
 // Prints one JSON document (bridge/operator-audit.mjs verifyJournal): chain state, the first
 // broken line and why (unparsable, sequence, prev_mismatch, hash_mismatch, truncated,
-// anchor_mismatch), and the lines of each session in order. Exit 0 when the chain is clean,
+// anchor_mismatch), and the lines of each session in order. A chain that started again after its
+// journal went away is valid but carries `restarts` (the sequence and hash that were lost). Exit 0
+// when the chain is clean,
 // 1 when it is broken, 2 when the arguments or the file cannot be used: missing, a symlink, not a
 // regular file, or larger than the 64 MiB the journal reader takes (never a partial verdict).
 // The journal is read with O_NOFOLLOW and never written. On lab it is root-only:

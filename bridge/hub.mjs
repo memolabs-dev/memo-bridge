@@ -113,6 +113,8 @@ export function createHub(options) {
     initial: hubState.load('notifications', null), onChange: data => hubState.save('notifications', data),
     ...(operator?.now ? { now: operator.now } : {}), ...(operator?.notifyLimits ? { limits: operator.notifyLimits } : {}) });
   const anchors = new Map();
+  // Hosts whose chain was reported rewritten since the last owner unfreeze (ownerUnfreeze).
+  const tampered = new Set();
   const anchorIntervalMs = operator?.anchorIntervalMs ?? 15 * 60_000;
   let anchorTimer = null;
   let operatorDefs = null;
@@ -689,9 +691,38 @@ export function createHub(options) {
     return sendAgent(OPERATOR_AGENT_IDS[host], op, { args, principal, id, operator: signature });
   }
   // The owner's Telegram /unfreeze: the hub flag, then each host's auto-freeze (signed internal
-  // op). The FROZEN files stay the owner's to remove on the hosts.
+  // op). The FROZEN files stay the owner's to remove on the hosts. For a host whose chain was
+  // reported rewritten since the last unfreeze, it also drops that host's anchor: a frozen
+  // chain_check means the hub no longer believes that journal, and unfreezing is the owner
+  // accepting the state the host can prove. Without it the next anchor compares against the
+  // pre-freeze baseline, reports the same rewrite every 15 minutes and freezes again, so an
+  // owner unfreeze could never hold (a Mac journal deleted by a log cleaner did exactly that,
+  // 2026-11-08). The tamper event and the dropped baseline stay in the hub journal.
   async function ownerUnfreeze(by = 'owner') {
     setOperatorFrozen(false, by);
+    const dropped = [];
+    const accepted = {};
+    for (const host of [...tampered]) {
+      const out = await sendInternal(host, 'operator_audit_head', { host });
+      // Only a chain that verifies can be a baseline: headInfoOf reports a line count and the last
+      // good head, which belong to different lines when the chain is broken. A host that cannot be
+      // read now keeps its anchor and its tamper flag: unfreezing is not accepting what was never
+      // seen, and the next check still compares the old baseline.
+      // seq >= 1: an empty journal verifies with seq 0 and the genesis hash, which is no line at
+      // all; adopting it would also make anchorChains ask for since_seq 0, which the host refuses,
+      // so that host would never be anchored again.
+      const head = out?.ok === true && out.chain_ok === true && Number.isInteger(out.seq) && out.seq >= 1 && typeof out.head === 'string'
+        ? { seq: out.seq, hash: out.head } : null;
+      if (!head) continue;
+      const previous = anchors.get(host) ?? null;
+      if (previous) dropped.push({ host, ...previous });
+      // Adopt what was read as the new baseline: with no anchor the next 15-minute check would take
+      // whatever chain the host presents then, so a rewrite in that window would go unseen.
+      anchors.set(host, head);
+      accepted[host] = head;
+      tampered.delete(host);
+    }
+    if (Object.keys(accepted).length > 0) record('operator_anchor_rebaselined', null, { by: String(by).slice(0, 64), dropped, accepted });
     const hosts = {};
     for (const host of Object.keys(OPERATOR_AGENT_IDS)) {
       if (!agents.has(OPERATOR_AGENT_IDS[host])) continue;
@@ -718,6 +749,7 @@ export function createHub(options) {
       if (rewritten || out.chain_ok === false) {
         record('operator_chain_tampered', OPERATOR_AGENT_IDS[host], { anchored_seq: last?.seq ?? null, seq: out.seq, chain_ok: out.chain_ok,
           first_broken_line: out.first_broken_line ?? null });
+        tampered.add(host);
         setOperatorFrozen(true, 'chain_check');
         results[host] = 'tampered';
         continue;

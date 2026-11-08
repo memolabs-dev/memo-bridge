@@ -23,7 +23,7 @@ One JSON line per operator call, refusals included, hash-chained (`bridge/operat
 
 | Field | Meaning |
 |---|---|
-| `seq` | 1, 2, 3... one monotonic sequence per journal file |
+| `seq` | 1, 2, 3... one monotonic sequence per journal file. It falls back to 1 only when the journal itself went away under the agent (see `journal_lost`) |
 | `at` | ISO time of the line |
 | `prev` | `hash` of the previous line; 64 zeros for the first |
 | `hash` | SHA-256 of the canonical JSON of the line without `hash` |
@@ -38,8 +38,9 @@ One JSON line per operator call, refusals included, hash-chained (`bridge/operat
 | `approval` | approval or grant id the signature carried, or `null` |
 | `outcome`, `code` | `ok` or `denied`, and the refusal code |
 | `ms`, `output_sha256` | duration; hash of the bounded output (the output itself is never kept) |
+| `journal_lost` | only on the first line of a chain that started again because the journal file had gone away (a cleaner deleted the directory, a disk was wiped): `{seq, hash}` of the last line the agent had written in the lost journal. `prev` is 64 zeros again on that line |
 
-Lines written before this change have no `host` and no `session` and still verify: the hash covers the fields a line has.
+Lines written before this change have no `host` and no `session` and still verify: the hash covers the fields a line has. A line carrying `journal_lost` verifies like any other, and `verifyJournal` returns them as `restarts: [{seq, lost_seq, lost_hash}]` (only the first line of a chain counts, and `operator_audit_verify` reports the count): the chain is valid but the history is not complete, and that must not read as a clean journal. A torn last line, from a crash during an append, was never committed and is cut when the chain is loaded (only when the read covered the whole file, so a capped read is never rewritten), not glued to the next line.
 
 ## The verifier
 
@@ -47,7 +48,7 @@ Lines written before this change have no `host` and no `session` and still verif
 node scripts/audit-verify.mjs /var/log/memo-operator/audit.jsonl --anchor 1234:<sha256>
 ```
 
-It prints one JSON document and exits 0 for a clean chain, 1 for a broken one, 2 for unusable arguments or file. It reads with `O_NOFOLLOW` and never writes. On lab the journal is root-only, so the command runs as root.
+It prints one JSON document and exits 0 for a clean chain, 1 for a broken one, 2 for unusable arguments or file. A chain that started again after losing its journal still exits 0 but carries `restarts`, which names the sequence and the hash that were lost: read it before calling a journal complete. The marker only lives while the line lives: someone who rehashes the whole journal removes it, and a journal deleted while the agent is stopped leaves no marker at all. The durable trace of a loss is then the hub's anchor and its journal (`operator_chain_tampered`, `operator_anchor_rebaselined`), not the host file. It reads with `O_NOFOLLOW` and never writes. On lab the journal is root-only, so the command runs as root.
 
 - `ok`, `lines`, `head`; on a break `first_broken_line` and `reason`: `unparsable`, `sequence` (a line deleted or inserted), `prev_mismatch` (a line rewritten and rehashed), `hash_mismatch` (a line edited), `truncated` (fewer lines than the anchor), `anchor_mismatch` (another line at the anchor's seq).
 - `sessions`: for each session hash (and `null`), its principals, its number of lines, the seq of its first and last line. A session with two principals is visible here. Only verified sessions are grouped: until session binding is enabled on the Mac, every line falls in the `null` group.
