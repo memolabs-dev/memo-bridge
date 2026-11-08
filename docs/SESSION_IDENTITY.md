@@ -19,7 +19,7 @@ The hint is not proof: the hub signs the hash it received, so it cannot be chang
 
 ## The operator host journal
 
-One JSON line per operator call, refusals included, hash-chained (`bridge/operator-audit.mjs`). Lab: `/var/log/memo-operator/audit.jsonl`, owned by the root helper, the agent appends through its socket. Mac: `~/Library/Logs/memo-operator/audit.jsonl`, written by the agent as the owner, plus the root helper's own chain for root calls. The hub asks each agent for its head every 15 minutes and freezes operator access when an anchored line changed.
+One JSON line per operator call, refusals included, hash-chained (`bridge/operator-audit.mjs`). Lab: `/var/log/memo-operator/audit.jsonl`, owned by the root helper, the agent appends through its socket. Mac: `~/.memo-operator/audit.jsonl`, written by the agent as the owner, plus the root helper's own chain for root calls. It is not under `~/Library/Logs`: a log cleaner deletes that tree entirely, and the journal of 2026-11-08 went with it. The hub asks each agent for its head every 15 minutes and freezes operator access when an anchored line changed.
 
 | Field | Meaning |
 |---|---|

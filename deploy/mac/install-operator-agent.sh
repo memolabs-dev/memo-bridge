@@ -13,7 +13,9 @@
 #                                               operator-mac.pub, hub-ca.crt, operator-hub.pub,
 #                                               policy.json (all 0444), state/ 0700
 #   ~/.local/share/memo-bridge/operator/        the pinned agent bundle (files 0444)
-#   ~/Library/Logs/memo-operator/         0700  logs and the hash-chained audit journal
+#   ~/Library/Logs/memo-operator/         0700  launchd's stdout.log and stderr.log only
+#   ~/.memo-operator/audit.jsonl          0600  the hash-chained audit journal (moved there from
+#                                               ~/Library/Logs, which a cleaner deletes whole)
 #   $MEMO_OPERATOR_STAGING (default ~/.local/share/memo-bridge/operator/launchd/)
 #                                               dev.memolabs.memo-operator-agent.plist
 # --install copies the staged plist to ~/Library/LaunchAgents and bootstraps it in gui/<uid>.
@@ -87,6 +89,18 @@ fi
 
 # 4. Policy, read-only, checked through bridge/operator-policy.mjs and the project registry.
 "$NODE" "$HELPER" policy --home "$HOME"
+
+# 4b. The journal used to live in ~/Library/Logs/memo-operator, which a log cleaner deletes whole.
+# Moving the file, not starting a new one, keeps the chain: same sequence, same hashes, so the hub's
+# anchor still matches and no rewrite is reported.
+OLD_AUDIT="$HOME/Library/Logs/memo-operator/audit.jsonl"
+NEW_AUDIT="$CONF/audit.jsonl"
+if [ -f "$OLD_AUDIT" ] && [ ! -e "$NEW_AUDIT" ]; then
+  /bin/mv "$OLD_AUDIT" "$NEW_AUDIT" && /bin/chmod 0600 "$NEW_AUDIT"
+  echo "{\"step\":\"journal\",\"state\":\"moved\",\"from\":\"$OLD_AUDIT\",\"to\":\"$NEW_AUDIT\"}"
+else
+  echo "{\"step\":\"journal\",\"state\":\"unchanged\",\"path\":\"$NEW_AUDIT\"}"
+fi
 
 # 5. Pinned bundle of bridge/operator-agent-cli.mjs, outside every write root of the policy.
 BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/memo-operator-build.XXXXXX")"

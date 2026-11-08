@@ -51,7 +51,8 @@ export function journalArgs(args) {
 // Default file sink: append-only, created 0600. read() returns the whole text (bounded).
 // append() recreates a missing parent directory (the journal's own, 0700) once: a journal write
 // that fails ENOENT makes every operator call answer audit_unavailable (operator-agent.mjs), so a
-// deleted ~/Library/Logs/memo-operator on the Mac took the whole host down silently (2026-11-08).
+// deleted journal directory on the Mac took the whole host down silently (2026-11-08). The Mac
+// journal lives in ~/.memo-operator now, out of the ~/Library/Logs tree a cleaner deletes whole.
 // size() lets the chain notice the file went away under it (createAuditChain.append).
 export function fileAuditStore(path) {
   return Object.freeze({
