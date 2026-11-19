@@ -8,6 +8,8 @@
 //    a reader sees the old or the new content, never a mix;
 //  - whatever is replaced or deleted is backed up first, next to it (<name>.memo-bak.<ts>-<hex>, a
 //    directory as <name>.memo-bak.<ts>-<hex>.tar.gz); when the backup fails, nothing changes;
+//    after each backup, older copies of that same path are pruned (BACKUP_KEEP newest, none older
+//    than BACKUP_MAX_AGE_MS), best effort: a failing prune never fails the write;
 //  - a write that would change the file's owner (the agent cannot chown as another user) is
 //    refused rather than done silently;
 //  - chmod never sets setuid, setgid or sticky bits, and never follows a symlink.
@@ -15,7 +17,7 @@
 // operator_script (T3, root helper), not here (DEV-P6-18).
 import { randomBytes, createHash } from 'node:crypto';
 import { constants as fsConstants, createReadStream } from 'node:fs';
-import { chmod, copyFile, cp, lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, lstat, mkdir, open, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createDenylist, resolveOperatorPath, contained } from './operator-paths.mjs';
 import { runArgv, searchMatcher } from './operator-tools.mjs';
@@ -26,9 +28,31 @@ const DIFF_MAX_LINES = 400;
 const UPLOAD_TTL_MS = 60 * 60_000;
 const MAX_UPLOADS = 4;
 const COPY_MAX_ENTRIES = 10_000;
+// Backups were never removed: 380 piled up in the home directory by 2026-11-19, 36 for one file.
+export const BACKUP_KEEP = 5;
+export const BACKUP_MAX_AGE_MS = 14 * 86_400_000;
 
 const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
 const stamp = now => new Date(now()).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+const BACKUP_SUFFIX = /^\.memo-bak\.(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-[0-9a-f]{6}(?:\.tar\.gz)?$/;
+
+// Remove the backups of `path` beyond the BACKUP_KEEP newest and those older than
+// BACKUP_MAX_AGE_MS. Only names in the exact backup format count; anything else is left alone.
+// `fresh` (the backup just made) is never removed, even if the clock went back.
+async function pruneBackups(path, fresh, now) {
+  const dir = dirname(path); const base = basename(path);
+  const found = [];
+  for (const name of await readdir(dir)) {
+    if (!name.startsWith(base)) continue;
+    const m = BACKUP_SUFFIX.exec(name.slice(base.length));
+    if (m && name !== basename(fresh)) found.push({ name, at: Date.UTC(m[1], m[2] - 1, m[3], m[4], m[5], m[6]) });
+  }
+  found.sort((a, b) => b.at - a.at || (a.name < b.name ? 1 : -1));
+  const limit = now() - BACKUP_MAX_AGE_MS;
+  for (const [i, b] of found.entries()) {
+    if (i >= BACKUP_KEEP - 1 || b.at < limit) await unlink(join(dir, b.name)).catch(() => {});
+  }
+}
 
 // Validator presets (spec D9): name -> how to check a candidate file. `argv(file)` is fixed
 // except for the temporary file path the agent created itself. json is checked in process.
@@ -133,8 +157,15 @@ export function createOperatorWriteTools(policy, { run = runArgv, now = Date.now
     await rename(tmp, path);
   }
 
-  // Backup next to the target. A file is copied (mode kept), a directory archived with tar.
+  // Backup next to the target, then prune older copies of the same path (never fatal).
   async function backup(path, info) {
+    const made = await makeBackup(path, info);
+    await pruneBackups(path, made, now).catch(() => {});
+    return made;
+  }
+
+  // A file is copied (mode kept), a directory archived with tar.
+  async function makeBackup(path, info) {
     // Timestamp plus 6 random hex: two backups of one path in the same second never collide.
     const target = `${path}.memo-bak.${stamp(now)}-${random(3).toString('hex')}`;
     if (info.isDirectory()) {

@@ -129,7 +129,8 @@ has repaired one real thing remotely.
   token patterns (`ghp_`, `github_pat_`, `sk-`, `xox`, AWS keys, JWTs, PEM blocks) before it
   leaves the host. Results carry `{untrusted_content: ...}` with a short boundary note.
 - **D9. File writes.** `operator_edit` modes `replace`, `regex`, `block`, `append`, `prepend`,
-  `write`, with `dry_run`, `diff`, a backup next to the file (`.memo-bak.<ts>`), ownership and
+  `write`, with `dry_run`, `diff`, a backup next to the file (`.memo-bak.<ts>`; each new backup
+  prunes that file's older ones to the 5 newest, none past 14 days, best effort), ownership and
   mode kept, atomic rename, named validator presets `json`, `yaml`, `nginx`, `systemd`, `sh`,
   `python`, `toml`, `caddy`, `traefik` (each a fixed argv). Delete always backs up first,
   refuses if the backup fails, needs `recursive` for a directory.
