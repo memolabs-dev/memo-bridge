@@ -63,6 +63,57 @@ test('edit: backup, atomic replace, mode kept, dry run and diff leave the file a
   assert.equal((await h.tools.operator_edit({ path: h.p('srv/rw/missing/x.txt'), mode: 'write', new_text: 'x', create: true })).error, 'not_found');
 });
 
+test('backups: each write keeps the 5 newest copies of that file, none older than 14 days', async t => {
+  const NOW = Date.parse('2026-11-19T12:00:00Z');
+  const h = host(t, { now: () => NOW });
+  const dir = h.p('srv/rw');
+  const ago = days => new Date(NOW - days * 86_400_000).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const seed = (name, days, hex, suffix = '') => writeFileSync(join(dir, `${name}.memo-bak.${ago(days)}-${hex}${suffix}`), 'old');
+  // app.conf: six recent copies (one a directory archive) and two past 14 days.
+  for (const d of [1, 2, 3, 4, 5]) seed('app.conf', d, `00000${d}`);
+  seed('app.conf', 6, '000006', '.tar.gz');
+  seed('app.conf', 20, '000020');
+  seed('app.conf', 30, '000030');
+  // Not backups of app.conf, or not in the backup format: never touched.
+  seed('app.conf2', 40, '000040');
+  writeFileSync(join(dir, 'app.conf.memo-bak.notes'), 'mine');
+  // b.conf: few copies, but one is too old.
+  writeFileSync(join(dir, 'b.conf'), 'b');
+  seed('b.conf', 2, '0000b2');
+  seed('b.conf', 15, '0000bf');
+
+  const out = await h.tools.operator_edit({ path: join(dir, 'app.conf'), mode: 'append', new_text: 'x\n' });
+  assert.equal(out.ok, true);
+  assert.deepEqual(backups(dir, 'app.conf').sort(), [
+    out.backup.slice(dir.length + 1),
+    `app.conf.memo-bak.${ago(1)}-000001`, `app.conf.memo-bak.${ago(2)}-000002`,
+    `app.conf.memo-bak.${ago(3)}-000003`, `app.conf.memo-bak.${ago(4)}-000004`,
+    'app.conf.memo-bak.notes'
+  ].sort());
+  assert.equal(existsSync(join(dir, `app.conf2.memo-bak.${ago(40)}-000040`)), true, 'another file keeps its backups');
+
+  const b = await h.tools.operator_edit({ path: join(dir, 'b.conf'), mode: 'append', new_text: 'x' });
+  assert.deepEqual(backups(dir, 'b.conf').sort(), [b.backup.slice(dir.length + 1), `b.conf.memo-bak.${ago(2)}-0000b2`].sort());
+
+  // Copies dated in the future (the clock went back) never push out the backup just made.
+  for (const d of [-1, -2, -3, -4, -5]) seed('b.conf', d, `00000${-d}`);
+  const late = await h.tools.operator_edit({ path: join(dir, 'b.conf'), mode: 'append', new_text: 'y' });
+  assert.equal(existsSync(late.backup), true);
+  assert.equal(backups(dir, 'b.conf').length, 5);
+});
+
+test('backups: a failing prune never fails the write', async t => {
+  const h = host(t);
+  const dir = h.p('srv/rw');
+  writeFileSync(join(dir, 'app.conf.memo-bak.20200101T000000Z-aaaaaa'), 'old');
+  chmodSync(dir, 0o300); // the directory can no longer be listed, so pruning cannot run
+  let out;
+  try { out = await h.tools.operator_edit({ path: join(dir, 'app.conf'), mode: 'append', new_text: 'x\n' }); } finally { chmodSync(dir, 0o755); }
+  assert.equal(out.ok, true);
+  assert.match(readFileSync(join(dir, 'app.conf'), 'utf8'), /x\n$/);
+  assert.equal(existsSync(join(dir, 'app.conf.memo-bak.20200101T000000Z-aaaaaa')), true);
+});
+
 test('AC-P6-02: validators are named presets with fixed argv; any other name is refused by the schema; json runs in process', async t => {
   const h = host(t);
   const file = h.p('srv/rw/conf.json');
