@@ -252,6 +252,25 @@ export function createGitHub({ gh = runGh, git = runGit, catalogOptions = {}, re
       } catch { return null; }
     },
 
+    // Fresh registered-repo observation. A closed issue is not proof of acceptance.
+    async issue(repo, number) {
+      if (!parseRepo(repo?.full) || !Number.isSafeInteger(number) || number < 1) return fail('invalid_input');
+      const scoped = await this.resolveRepo(repo.full);
+      if (!scoped.ok) return scoped;
+      const res = await read(scoped.repo, 'repos/' + scoped.repo.full + '/issues/' + number);
+      if (!res.ok) return res;
+      const data = res.data;
+      // GitHub uses null for an explicitly empty Issue body. Missing body is unknown.
+      const body = data?.body === null ? '' : data?.body;
+      if (data?.pull_request || !['open', 'closed'].includes(data?.state) || typeof body !== 'string'
+        || Buffer.byteLength(body, 'utf8') > 20_000 || Number(data.number) !== number) {
+        return fail('github_unavailable', 'issue body or state unavailable');
+      }
+      return { ok: true, issue: { ref: scoped.repo.full + '#' + number, state: data.state,
+        body, updated_at: data.updated_at ?? null, closed_at: data.closed_at ?? null,
+        authorized: true, observed_at: new Date(now()).toISOString() } };
+    },
+
     async issues(repo, { state = 'open', labels, limit = LIMITS.list.default } = {}) {
       const res = await read(repo, `repos/${repo.full}/issues`, { state, labels: labels?.length ? labels.join(',') : undefined,
         sort: 'updated', direction: 'desc', per_page: limit, page: 1 });
