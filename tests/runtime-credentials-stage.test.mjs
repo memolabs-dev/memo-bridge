@@ -194,7 +194,7 @@ test('installer promotes credentials before policies and puts them back if the p
   const creds=source.indexOf('promote_runtime_credentials "$STAGED_CREDS" "$CREDS" "$APP_MODE"');
   const policies=source.indexOf('runtime-mac.mjs" promote');
   const restore=source.indexOf('restore_runtime_credentials "$CREDS"',policies);
-  const finish=source.indexOf('finish_runtime_credentials "$CREDS"');
+  const finish=source.indexOf('finish_runtime_credentials "$CREDS"',policies);
   const plist=source.indexOf('/bin/mv -f "$TARGET.tmp" "$TARGET"');
   assert.ok(creds>=0&&creds<policies&&policies<restore&&restore<finish&&finish<plist,
     'credentials, then policies with a credential rollback, then the plist');
@@ -254,4 +254,29 @@ test('a stage without a gh login says so, without printing anything on stdout',a
   assert.equal(r.status,11);
   assert.match(r.stderr,/no usable github.com token \(gh auth login\)/);
   assert.equal(r.stdout,'');
+});
+
+test('an interrupted --install decides by what promote did, never by the signal alone',async t=>{
+  const source=await readFile(INSTALLER,'utf8');
+  const fn=source.match(/^interrupted_install\(\) \{\n[\s\S]*?\n\}\n/m)?.[0];
+  assert.ok(fn,'interrupted_install must exist');
+  for(const sig of ['INT','TERM','HUP']) assert.match(source,new RegExp("trap 'interrupted_install \\d+' "+sig));
+  for(const policiesLive of [false,true]){
+    const fx=await fixture(t);
+    const before=await fx.contents(fx.live);
+    const staging=join(fx.home,'launchd');
+    await mkdir(join(staging,'owner-policy'),{recursive:true});
+    if(!policiesLive) await writeFile(join(staging,'owner-policy','stage.json'),'{}');
+    assert.equal(fx.call('stage_runtime_credentials "$1" "$2" "$3" ""').status,0);
+    assert.equal(fx.guarded('promote_runtime_credentials "$1" "$5" remove').status,0);
+    const r=fx.call('STAGING='+JSON.stringify(staging)+'; CREDS="$5"; TARGET="$STAGING/agent.plist"; '+fn+' interrupted_install 143');
+    assert.equal(r.status,143,r.stderr);
+    assert.equal(await gone(fx.live+'.prev'),true);
+    if(policiesLive){
+      assert.equal((await fx.contents(fx.live)).agent,'AGENT_VALID_INITIAL','policies went live: keep the new credentials');
+      assert.equal((await fx.contents(fx.live)).app,null);
+    }else{
+      assert.deepEqual(await fx.contents(fx.live),before,'policies still old: the old credentials come back');
+    }
+  }
 });

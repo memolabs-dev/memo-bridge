@@ -257,8 +257,25 @@ if [ "$CRED_RC" != 0 ]; then
   [ "$CRED_RC" != 2 ] || die "credential promotion failed AND the previous credentials could not be put back: they are in $CREDS.prev; the policy and the agent are unchanged"
   die "credential promotion refused; the live credentials, the policy and the agent are unchanged"
 fi
-# New credentials, old policy until the next step: an interrupt here puts the credentials back.
-trap '/bin/rm -f "$TARGET.tmp"; restore_runtime_credentials "$CREDS" || echo "install-runtime-agent: interrupted; the previous credentials are in $CREDS.prev" >&2; exit 130' INT TERM HUP
+# New credentials, old policy until the next step. Bash runs a trap only once the foreground
+# node has exited, so the trap goes by what promote did, not by the signal: promote deletes the
+# stage record last, on success only (runtime-mac.mjs). Record still there: the policies are
+# old, put the credentials back. Record gone: both halves are new, keep them.
+interrupted_install() {
+  /bin/rm -f "$TARGET.tmp"
+  if [ -e "$STAGING/owner-policy/stage.json" ]; then
+    restore_runtime_credentials "$CREDS" \
+      || { echo "install-runtime-agent: interrupted; the previous credentials are in $CREDS.prev" >&2; exit "$1"; }
+    echo "install-runtime-agent: interrupted before the policies went live; credentials put back, agent unchanged" >&2
+  else
+    finish_runtime_credentials "$CREDS" || true
+    echo "install-runtime-agent: interrupted after the policies went live; new credentials and policies, agent not restarted: rerun --install" >&2
+  fi
+  exit "$1"
+}
+trap 'interrupted_install 130' INT
+trap 'interrupted_install 143' TERM
+trap 'interrupted_install 129' HUP
 if ! "$NODE" "$REPO/deploy/mac/runtime-mac.mjs" promote --home "$HOME" --out "$STAGING"; then
   trap - INT TERM HUP
   /bin/rm -f "$TARGET.tmp"
