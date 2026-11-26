@@ -250,16 +250,28 @@ if [ -f "$TARGET" ] && [ ! -f "$PROBE_BACKUP" ]; then /bin/cp -p "$TARGET" "$PRO
 # what the running agent reads (fix pass of #258, #311). promote_runtime_credentials keeps the
 # previous credentials in $CREDS.prev, so a refused policy promotion puts them back and leaves
 # the agent exactly as it was.
-promote_runtime_credentials "$STAGED_CREDS" "$CREDS" "$APP_MODE" \
-  || { /bin/rm -f "$TARGET.tmp"; die "credential promotion refused; the live credentials, the policy and the agent are unchanged"; }
+CRED_RC=0
+promote_runtime_credentials "$STAGED_CREDS" "$CREDS" "$APP_MODE" || CRED_RC=$?
+if [ "$CRED_RC" != 0 ]; then
+  /bin/rm -f "$TARGET.tmp"
+  [ "$CRED_RC" != 2 ] || die "credential promotion failed AND the previous credentials could not be put back: they are in $CREDS.prev; the policy and the agent are unchanged"
+  die "credential promotion refused; the live credentials, the policy and the agent are unchanged"
+fi
+# New credentials, old policy until the next step: an interrupt here puts the credentials back.
+trap '/bin/rm -f "$TARGET.tmp"; restore_runtime_credentials "$CREDS" || echo "install-runtime-agent: interrupted; the previous credentials are in $CREDS.prev" >&2; exit 130' INT TERM HUP
 if ! "$NODE" "$REPO/deploy/mac/runtime-mac.mjs" promote --home "$HOME" --out "$STAGING"; then
+  trap - INT TERM HUP
   /bin/rm -f "$TARGET.tmp"
   restore_runtime_credentials "$CREDS" \
     || die "promote refused (see the JSON line above) AND the previous credentials could not be put back: they are in $CREDS.prev; the agent was not restarted"
   die "promote refused (see the JSON line above); the agent, its policy and its credentials are unchanged"
 fi
-# Both halves are live and consistent: a leftover copy only blocks the next --install.
+trap - INT TERM HUP
+# Both halves are live and consistent: a leftover copy only blocks the next --install. The
+# staged copies go too, so the secrets are kept once, in the live directory (the next run
+# stages them again).
 finish_runtime_credentials "$CREDS" || echo "install-runtime-agent: could not remove $CREDS.prev; remove it before the next --install" >&2
+/bin/rm -rf "$STAGED_CREDS" || echo "install-runtime-agent: could not remove the staged copies in $STAGED_CREDS" >&2
 /bin/mv -f "$TARGET.tmp" "$TARGET"
 LOG="$HOME/Library/Logs/memo-bridge/stderr.log"
 START_LINES="$( [ -f "$LOG" ] && /usr/bin/wc -l < "$LOG" | /usr/bin/tr -d ' ' || echo 0)"
