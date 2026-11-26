@@ -198,8 +198,12 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
     const release = out.steps.bundle.release;
     assert.ok(existsSync(join(release, 'server', 'runtime.mjs')) && existsSync(join(release, 'node_modules', 'ws')));
     assert.ok(existsSync(join(out.steps.governance.root, 'scripts', 'private_owner_allowlist.py')));
-    for (const f of ['agent-key', 'ledger-gh', 'push-gh']) assert.equal(mode(join(L.credentials, f)), 0o600, f);
-    assert.equal(mode(L.credentials), 0o700);
+    // #311: a stage run writes the STAGED credentials only; the live directory the running
+    // agent reads changes at --install alone.
+    const stagedCreds = join(L.base, 'launchd', 'runtime-credentials');
+    for (const f of ['agent-key', 'ledger-gh', 'push-gh']) assert.equal(mode(join(stagedCreds, f)), 0o600, f);
+    assert.equal(mode(stagedCreds), 0o700);
+    assert.equal(existsSync(L0.credentials), false, 'a stage run never creates or changes the live credentials');
     assert.equal(mode(L.policyDir), 0o700);
     assert.equal(mode(L.privatePolicy), 0o600);
     assert.equal(mode(L.remotePolicy), 0o600);
@@ -236,14 +240,15 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
     assert.equal((await loadOwnerPrivatePolicy({ file: L0.privatePolicy, principal: { id: 'oidc:someone-else' },
       remotePolicy: remote, host: 'mac', home })).error, 'private_policy_owner_only');
 
-    // --app-key (owner console D-A2-2): the key becomes the 0600 app-key credential, the plist gets
-    // the App ids and the purpose gate; a later run without it removes the key again.
+    // --app-key (owner console D-A2-2): the key becomes the 0600 staged app-key credential, the
+    // plist gets the App ids and the purpose gate; a later stage run without it drops the STAGED
+    // key only (the live one is decided at --install, by --app-key or --remove-app-key).
     const pemLine = kind => `-----${kind} RSA ${'PRIVATE'} KEY-----`;
     writeFileSync(p('app.pem'), `${pemLine('BEGIN')}\nfixture\n${pemLine('END')}\n`);
     const withKey = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry',
       '--app-key', p('app.pem')]);
     assert.equal(withKey.status, 0, withKey.stderr + withKey.stdout);
-    assert.equal(mode(join(L.credentials, 'app-key')), 0o600);
+    assert.equal(mode(join(stagedCreds, 'app-key')), 0o600);
     assert.ok(!withKey.stdout.includes('fixture'), 'the key is never printed');
     const appPlist = plistEnv(readFileSync(join(L.base, 'launchd', 'dev.memolabs.memo-bridge-agent.plist'), 'utf8'));
     assert.equal(appPlist.MEMO_BRIDGE_GITHUB_APP_PURPOSES, 'repo_create,repo_admin');
@@ -251,7 +256,8 @@ test('dry run on a Mac: bundle, pinned governance, 0600 credentials and policies
       '--app-key', 'relative.pem']).status, 0);
     const again = run(home, ['--owner-sub', SUB, '--governance-ref', govRef, '--governance-src', p('gov'), '--from-registry']);
     assert.equal(again.status, 0, again.stderr + again.stdout);
-    assert.equal(existsSync(join(L.credentials, 'app-key')), false);
+    assert.equal(existsSync(join(stagedCreds, 'app-key')), false);
+    assert.equal(existsSync(L0.credentials), false, 'still no live credentials without --install');
   });
 
 test('a governance pin that resolves the owner home from $HOME is refused (incident E-16)',

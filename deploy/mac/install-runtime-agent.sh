@@ -6,7 +6,7 @@
 #
 # Usage, from a trusted memo-bridge checkout with `pnpm install` done:
 #   deploy/mac/install-runtime-agent.sh --owner-sub <uuid> --governance-ref <sha> \
-#       (--all-owner-projects | --from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>] [--app-key <pem>]   stage
+#       (--all-owner-projects | --from-registry | --repo memolabs-dev/<name> ...) [--bridge-ref <sha>] [--app-key <pem> | --remove-app-key]   stage
 #   ... same arguments ... --install                         stage, then load it in launchd
 #   deploy/mac/install-runtime-agent.sh --rollback          restore the probe agent's plist
 #
@@ -25,7 +25,10 @@
 #   --app-key         the memo-labs-automation App private key (lab-infra memo_runner_github_app_key_path),
 #                     copied as the app-key credential so project_create can create repositories;
 #                     the plist then limits the App to that (MEMO_BRIDGE_GITHUB_APP_PURPOSES): ledger,
-#                     pushes and pull requests keep the gh token. Without it no app-key is kept.
+#                     pushes and pull requests keep the gh token.
+#   --remove-app-key  at --install, delete the live app-key (the App goes away). Without --app-key
+#                     or this flag, --install refuses while a live app-key exists: a forgotten
+#                     --app-key never removes App access.
 #
 # What it writes (without --install nothing else, and launchd is not called):
 #   ~/.local/share/memo-bridge/runtime-releases/<bridge-ref>/   the runtime bundle (bridge/,
@@ -43,6 +46,9 @@
 #                     external-projects.json is read, never written
 #   ~/.local/share/memo-bridge/launchd/dev.memolabs.memo-bridge-agent.plist   staged plist
 # A stage run never changes the live agent's credentials; promotion needs --install.
+# --install promotes the staged credentials first (the previous ones kept in
+# runtime-config/credentials.prev), then the staged policies; if the policies are refused, the
+# previous credentials are put back, so a failure leaves neither half-installed.
 # --install keeps the current plist as .../launchd/dev.memolabs.memo-bridge-agent.plist.probe
 # (once), installs the staged one, promotes the staged policies into owner-policy/ (each live
 # one kept as .bak-<time>; a live lease-key.json is never replaced; refused if a live policy
@@ -79,7 +85,7 @@ reload_agent() {
     || die "launchctl bootstrap failed; the agent is unloaded: rerun this command, or $0 --rollback"
 }
 
-INSTALL=0; ROLLBACK=0; FROM_REGISTRY=0
+INSTALL=0; ROLLBACK=0; FROM_REGISTRY=0; REMOVE_APP_KEY=0
 ALL_OWNER_PROJECTS=0
 OWNER_SUB=""; GOV_REF=""; BRIDGE_REF=""; APP_KEY=""; GOV_SRC="https://github.com/memolabs-dev/.github.git"
 REPOS=()
@@ -95,7 +101,8 @@ while [ "$#" -gt 0 ]; do
     --bridge-ref) [ "$#" -ge 2 ] || die "--bridge-ref needs a value"; BRIDGE_REF="$2"; shift ;;
     --repo) [ "$#" -ge 2 ] || die "--repo needs a value"; REPOS+=("$2"); shift ;;
     --app-key) [ "$#" -ge 2 ] || die "--app-key needs a value"; APP_KEY="$2"; shift ;;
-    -h|--help) /usr/bin/sed -n '2,39p' "$0"; exit 0 ;;
+    --remove-app-key) REMOVE_APP_KEY=1 ;;
+    -h|--help) /usr/bin/sed -n '2,/^set -euo pipefail$/p' "$0" | /usr/bin/sed '$d'; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -108,6 +115,7 @@ BASE="$HOME/.local/share/memo-bridge"
 STAGING="$BASE/launchd"
 TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
 PROBE_BACKUP="$STAGING/$LABEL.plist.probe"
+CREDS="$BASE/runtime-config/credentials"
 DOMAIN="gui/$(/usr/bin/id -u)"
 
 if [ "$ROLLBACK" = 1 ]; then
@@ -125,6 +133,17 @@ if [ -n "$APP_KEY" ]; then
   case "$APP_KEY" in /*) ;; *) die "--app-key must be an absolute path" ;; esac
   [ -f "$APP_KEY" ] && [ ! -L "$APP_KEY" ] || die "--app-key is not a regular file"
   /usr/bin/grep -q 'PRIVATE KEY-----' "$APP_KEY" || die "--app-key is not a PEM private key"
+fi
+[ -z "$APP_KEY" ] || [ "$REMOVE_APP_KEY" = 0 ] || die "--app-key and --remove-app-key exclude each other"
+if [ -n "$APP_KEY" ]; then APP_MODE=install; elif [ "$REMOVE_APP_KEY" = 1 ]; then APP_MODE=remove; else APP_MODE=keep; fi
+# Refused before anything is built, staged or promoted.
+if [ "$INSTALL" = 1 ]; then
+  if [ "$APP_MODE" = keep ] && { [ -e "$CREDS/app-key" ] || [ -L "$CREDS/app-key" ]; }; then
+    die "a live app-key exists: pass --app-key <pem> to keep the App, or --remove-app-key to drop it"
+  fi
+  if [ -e "$CREDS.prev" ] || [ -L "$CREDS.prev" ]; then
+    die "an earlier --install left $CREDS.prev (the credentials before it): put them back or remove it, then rerun"
+  fi
 fi
 
 REPO="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -203,7 +222,6 @@ say governance "\"root\":\"$GOVERNANCE\""
 # Keep this helper outside the runtime archive: the trusted checkout drives installation.
 # shellcheck source=deploy/mac/runtime-credentials.sh
 source "$REPO/deploy/mac/runtime-credentials.sh"
-CREDS="$BASE/runtime-config/credentials"
 STAGED_CREDS="$STAGING/runtime-credentials"
 stage_runtime_credentials "$STAGED_CREDS" "$SOURCE_KEY" "$GH" "$APP_KEY" \
   || die "could not stage runtime credentials; the live agent credentials remain unchanged"
@@ -228,16 +246,20 @@ fi
 if [ -f "$TARGET" ] && [ ! -f "$PROBE_BACKUP" ]; then /bin/cp -p "$TARGET" "$PROBE_BACKUP"; fi
 /bin/cp -f "$STAGING/$LABEL.plist" "$TARGET.tmp"
 /bin/chmod 0644 "$TARGET.tmp"
-# The staged policies go live now, right before the restart (fix pass of #258): a stage run
-# never changes what the running agent reads.
-"$NODE" "$REPO/deploy/mac/runtime-mac.mjs" promote --home "$HOME" --out "$STAGING" \
-  || { /bin/rm -f "$TARGET.tmp"; die "promote refused (see the JSON line above); the agent and its policy are unchanged"; }
-# Promote only on explicit install. Do not touch running credentials during --stage.
-# Missing App enrollment means the old App key is removed at install, never at stage.
-# This is a separate T2 action after governance-policy promotion has been validated.
-if [ -n "$APP_KEY" ]; then HAS_APP=1; else HAS_APP=0; fi
-promote_runtime_credentials "$STAGED_CREDS" "$CREDS" "$HAS_APP" \
-  || { /bin/rm -f "$TARGET.tmp"; die "credential promotion refused; agent not restarted"; }
+# Credentials first, then policies, both right before the restart: a stage run never changes
+# what the running agent reads (fix pass of #258, #311). promote_runtime_credentials keeps the
+# previous credentials in $CREDS.prev, so a refused policy promotion puts them back and leaves
+# the agent exactly as it was.
+promote_runtime_credentials "$STAGED_CREDS" "$CREDS" "$APP_MODE" \
+  || { /bin/rm -f "$TARGET.tmp"; die "credential promotion refused; the live credentials, the policy and the agent are unchanged"; }
+if ! "$NODE" "$REPO/deploy/mac/runtime-mac.mjs" promote --home "$HOME" --out "$STAGING"; then
+  /bin/rm -f "$TARGET.tmp"
+  restore_runtime_credentials "$CREDS" \
+    || die "promote refused (see the JSON line above) AND the previous credentials could not be put back: they are in $CREDS.prev; the agent was not restarted"
+  die "promote refused (see the JSON line above); the agent, its policy and its credentials are unchanged"
+fi
+# Both halves are live and consistent: a leftover copy only blocks the next --install.
+finish_runtime_credentials "$CREDS" || echo "install-runtime-agent: could not remove $CREDS.prev; remove it before the next --install" >&2
 /bin/mv -f "$TARGET.tmp" "$TARGET"
 LOG="$HOME/Library/Logs/memo-bridge/stderr.log"
 START_LINES="$( [ -f "$LOG" ] && /usr/bin/wc -l < "$LOG" | /usr/bin/tr -d ' ' || echo 0)"
